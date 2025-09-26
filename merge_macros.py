@@ -65,7 +65,14 @@ def build_versions(original_dir, out_dir, versions=5, seed=None):
         data = load_json_file(p)
         if 'events' not in data:
             raise SystemExit(f"File {p.name} missing 'events' key. Edit script if your schema differs.")
-        events = data['events']
+# Adapt to your JSON schema
+if 'events' in data:
+    events = data['events']
+elif 'macro' in data and 'events' in data['macro']:
+    events = data['macro']['events']
+else:
+    raise SystemExit(f"File {p.name} missing 'events' key. Edit script if your schema differs.")
+
         duration = events[-1].get('time', 0) if events else 0
         originals[p.name] = {"path": p, "events": events, "duration": duration}
 
