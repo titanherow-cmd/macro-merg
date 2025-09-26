@@ -1,212 +1,160 @@
-# merge_macros.py
-# Script to merge macro JSON files into multiple versions
-# Handles JSON files where events are under "events" or "macro"->"events"
+cat > merge_macros.py <<'PY'
+#!/usr/bin/env python3
+"""
+merge_macros.py
+
+Usage:
+  python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed 12345
+
+Behavior:
+ - Recursively loads JSON files in input-dir.
+ - Normalizes several common JSON shapes to a dict with 'events' list.
+ - Skips files that cannot be parsed or normalized (prints warnings).
+ - Produces merged_bundle.json and merged_bundle.zip in output-dir.
+ - Produces `versions` deterministic shuffles of the merged events using `seed`.
+"""
 
 import argparse
 import json
-import random
+import sys
 import os
-import zipfile
-import copy
+import glob
 from pathlib import Path
-from collections import Counter
+import zipfile
+import random
+import shutil
+from copy import deepcopy
 
-MIN_PAUSE_MS = 2 * 60 * 1000
-MAX_PAUSE_MS = 13 * 60 * 1000
-GAP_AFTER_FILE_MS = 30
-DUPLICATE_PAUSE_PROB = 0.6
-MAX_RESAMPLE_TRIES = 200
+def parse_args():
+    p = argparse.ArgumentParser(description="Merge macro JSON files into a bundle.")
+    p.add_argument("--input-dir", required=True, help="Directory with input JSON macro files (recursive).")
+    p.add_argument("--output-dir", required=True, help="Directory where merged bundle will be written.")
+    p.add_argument("--versions", type=int, default=1, help="Number of versions to output (shuffled variants).")
+    p.add_argument("--seed", type=int, default=None, help="Random seed for deterministic shuffles.")
+    return p.parse_args()
 
-def load_json_file(path):
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+def load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as e:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read(400)
+            snippet = repr(raw)
+        except Exception:
+            snippet = "<could not read snippet>"
+        raise ValueError(f"JSON parse error: {e}; snippet={snippet}")
 
-def save_json(obj, path):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(obj, f, indent=2)
+def load_and_normalize_events(path):
+    """
+    Load JSON from `path` and normalize it to a dict with an 'events' list or return None if not possible.
+    Accepts:
+      - { "events": [...] } -> returned as-is
+      - top-level list [ {...}, {...} ] -> {'events': list}
+      - { "items" | "entries" | "records" | "actions" : [...] } -> {'events': alt_list}
+      - { "event": {...} } -> {'events': [that_object]}
+      - {single-event-dict} (heuristic: has event-like keys) -> {'events':[that_dict]}
+    """
+    try:
+        data = load_json(path)
+    except ValueError as e:
+        print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
+        return None
 
-def first_three(s):
-    return s[:3]
+    if isinstance(data, dict) and isinstance(data.get("events"), list):
+        return data
 
-def sample_unique_pause(used_pauses, rng):
-    tries = 0
-    while True:
-        tries += 1
-        p = rng.randint(MIN_PAUSE_MS, MAX_PAUSE_MS)
-        if p not in used_pauses:
-            used_pauses.add(p)
-            return p, None
-        if tries > MAX_RESAMPLE_TRIES:
-            p2 = p + 1
-            while p2 in used_pauses:
-                p2 += 1
-            used_pauses.add(p2)
-            return p2, f"adjusted from {p} to {p2} after {tries} tries"
+    if isinstance(data, list):
+        return {"events": data}
 
-def ensure_no_adjacent(seq):
-    return all(seq[i] != seq[i+1] for i in range(len(seq)-1))
+    if isinstance(data, dict):
+        for alt in ("items", "entries", "records", "actions", "eventsList", "events_array"):
+            if isinstance(data.get(alt), list):
+                return {"events": data[alt]}
 
-def arrange_no_adjacent(freq_map):
-    counts = dict(freq_map)
-    arranged = []
-    total = sum(counts.values())
-    for _ in range(total):
-        choices = [fn for fn, c in counts.items() if c > 0 and (not arranged or fn != arranged[-1])]
-        if not choices:
-            choices = [fn for fn, c in counts.items() if c > 0]
-        pick = max(choices, key=lambda x: counts[x])
-        arranged.append(pick)
-        counts[pick] -= 1
-    return arranged
+        if "event" in data and isinstance(data["event"], dict):
+            return {"events": [data["event"]]}
 
-def build_versions(original_dir, out_dir, versions=5, seed=None):
-    rng = random.Random(seed)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+        event_like_keys = ("Type", "Time", "X", "Y", "KeyCode", "type", "time", "x", "y", "keyCode", "id", "timestamp")
+        if any(k in data for k in event_like_keys):
+            return {"events": [data]}
 
-    files = sorted([p for p in Path(original_dir).iterdir() if p.is_file() and p.suffix.lower() == '.json'])
-    if not files:
-        raise SystemExit("No JSON files found in input directory.")
+    return None
 
-    originals = {}
-    for p in files:
-        data = load_json_file(p)
-        # Adapt to your JSON schema
-        if 'events' in data:
-            events = data['events']
-        elif 'macro' in data and 'events' in data['macro']:
-            events = data['macro']['events']
-        else:
-            raise SystemExit(f"File {p.name} missing 'events' key. Edit script if your schema differs.")
-        duration = events[-1].get('time', 0) if events else 0
-        originals[p.name] = {"path": p, "events": events, "duration": duration}
+def find_json_files(input_dir):
+    p = Path(input_dir)
+    if not p.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+    pattern = str(p / "**" / "*.json")
+    files = sorted(glob.glob(pattern, recursive=True))
+    return files
 
-    filenames = list(originals.keys())
-    used_pauses = set()
-    bundle_log = {
-        "versions": [],
-        "global": {"min_pause_ms": MIN_PAUSE_MS, "max_pause_ms": MAX_PAUSE_MS, "gap_after_file_ms": GAP_AFTER_FILE_MS},
-        "original_filenames": filenames.copy(),
-        "notes": []
+def build_merged_events(valid_datas):
+    merged = []
+    for d in valid_datas:
+        events = d.get("events", [])
+        if isinstance(events, list):
+            merged.extend(deepcopy(events))
+    return merged
+
+def write_outputs(merged_versions, output_dir):
+    outp = Path(output_dir)
+    outp.mkdir(parents=True, exist_ok=True)
+
+    bundle = {
+        "meta": {
+            "generator": "merge_macros.py",
+            "versions_count": len(merged_versions)
+        },
+        "versions": merged_versions
     }
-    merged_filenames = []
 
-    for v in range(1, versions + 1):
-        base_seq = filenames.copy()
-        dup_two = rng.sample(filenames, 2)
-        base_seq += dup_two[:]
-        extra_count = rng.choice([1, 2])
-        extra_files = rng.sample(filenames, extra_count)
-        base_seq += extra_files[:]
+    json_path = outp / "merged_bundle.json"
+    zip_path = outp / "merged_bundle.zip"
 
-        seq = base_seq.copy()
-        attempts = 0
-        success = False
-        while attempts < 2000:
-            attempts += 1
-            rng.shuffle(seq)
-            if ensure_no_adjacent(seq):
-                success = True
-                break
-        if not success:
-            seq = arrange_no_adjacent(Counter(base_seq))
-            bundle_log["notes"].append(f"forced greedy arrange for version {v} after {attempts} shuffles")
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(bundle, fh, indent=2, ensure_ascii=False)
 
-        merged_events = []
-        current_offset = 0
-        pauses = []
-        indices_by_name = {}
-        for idx, name in enumerate(seq):
-            indices_by_name.setdefault(name, []).append(idx)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(json_path, arcname="merged_bundle.json")
 
-        extra_pause_insert = {}
-        for name, idxs in indices_by_name.items():
-            if len(idxs) >= 2:
-                for pos in idxs[1:]:
-                    if rng.random() < DUPLICATE_PAUSE_PROB:
-                        extra_pause_insert[pos] = True
+    print(f"WROTE: {json_path}")
+    print(f"WROTE: {zip_path}")
 
-        for idx, fname in enumerate(seq):
-            orig = originals[fname]
-            for ev in orig["events"]:
-                new_ev = copy.deepcopy(ev)
-                new_ev["time"] = new_ev["time"] + current_offset
-                new_ev["source"] = fname
-                merged_events.append(new_ev)
-            file_end = current_offset + orig["duration"]
-            if idx < len(seq) - 1:
-                pause_ms, fix_note = sample_unique_pause(used_pauses, rng)
-                pauses.append({"after_index": idx, "from": seq[idx], "to": seq[idx + 1], "pause_ms": pause_ms, "fix": fix_note})
-                current_offset = file_end + GAP_AFTER_FILE_MS + pause_ms
-                if (idx + 1) in extra_pause_insert:
-                    dup_pause_ms, dup_fix = sample_unique_pause(used_pauses, rng)
-                    pauses.append({
-                        "before_index": idx + 1,
-                        "inserted_before_file": seq[idx + 1],
-                        "pause_ms": dup_pause_ms,
-                        "fix": dup_fix,
-                        "reason": "duplicate_extra_pause"
-                    })
-                    current_offset += dup_pause_ms
-            else:
-                current_offset = file_end
+def main():
+    args = parse_args()
 
-        merged_name_base = "".join(first_three(fn) for fn in seq)
-        merged_filename = f"{merged_name_base}_v{v}.json"
-        merged_path = out_dir / merged_filename
-        merged_obj = {"merged_from_order": seq.copy(), "events": merged_events}
-        save_json(merged_obj, merged_path)
-        merged_filenames.append(merged_path.name)
+    files = find_json_files(args.input_dir)
+    if not files:
+        raise SystemExit(f"ERROR: No JSON files found in input-dir: {args.input_dir}")
 
-        originals_present = all(fn in seq for fn in filenames)
-        adjacents = [(i, seq[i], seq[i + 1]) for i in range(len(seq) - 1) if seq[i] == seq[i + 1]]
-        schedule = []
-        cur = 0
-        ok_monotonic = True
-        for i, fname in enumerate(seq):
-            dur = originals[fname]["duration"]
-            start = cur
-            end = start + dur
-            schedule.append({"index": i, "file": fname, "start": start, "end": end})
-            if i < len(seq) - 1:
-                total_pause_after = sum(p["pause_ms"] for p in pauses if p.get("after_index") == i)
-                total_pause_after += sum(p["pause_ms"] for p in pauses if p.get("before_index") == i + 1)
-                expected_next_start = end + GAP_AFTER_FILE_MS + total_pause_after
-                cur = expected_next_start
-        for j in range(len(schedule) - 1):
-            if schedule[j]["end"] > schedule[j + 1]["start"]:
-                ok_monotonic = False
-                break
+    print(f"Found {len(files)} JSON files; attempting to load and normalize...")
 
-        version_log = {
-            "version": v,
-            "merged_filename": merged_filename,
-            "file_order": seq.copy(),
-            "duplicated_files_selected": dup_two.copy(),
-            "extra_copies_added": extra_files.copy(),
-            "pauses": pauses,
-            "originals_present": originals_present,
-            "adjacent_duplicates": adjacents,
-            "time_schedule_sample": schedule[:3] + (schedule[-3:] if len(schedule) > 6 else []),
-            "monotonic_ok": ok_monotonic
-        }
-        bundle_log["versions"].append(version_log)
+    valid_datas = []
+    skipped = 0
+    for path in files:
+        normalized = load_and_normalize_events(path)
+        if normalized is None:
+            print(f"SKIP: {path} (unexpected schema or parse error)", file=sys.stderr)
+            skipped += 1
+            continue
+        valid_datas.append(normalized)
 
-    bundle_log_path = out_dir / "bundle_log.json"
-    save_json(bundle_log, bundle_log_path)
-    zip_path = out_dir / "merged_bundle.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(bundle_log_path, arcname="bundle_log.json")
-        for name in merged_filenames:
-            zf.write(Path(out_dir) / name, arcname=name)
-    return {"out_dir": str(out_dir), "merged_files": merged_filenames, "bundle_log": "bundle_log.json", "zip": str(zip_path)}
+    total_valid = len(valid_datas)
+    print(f"Loaded {total_valid} usable file(s); skipped {skipped} file(s).")
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", "-i", required=True)
-    parser.add_argument("--output-dir", "-o", required=True)
-    parser.add_argument("--versions", "-n", default=5, type=int)
-    parser.add_argument("--seed", "-s", default=None, type=int)
-    args = parser.parse_args()
-    res = build_versions(args.input_dir, args.output_dir, versions=args.versions, seed=args.seed)
-    print("Done. ZIP:", res["zip"])
+    if total_valid == 0:
+        raise SystemExit("ERROR: No input files with usable 'events' were found. Check originals/ for corrupted or differently-shaped JSON.")
+
+    merged_all = build_merged_events(valid_datas)
+    print(f"Merged total events: {len(merged_all)}")
+
+    versions = max(1, args.versions)
+    base_seed = args.seed if args.seed is not None else random.randrange(2**31)
+    merged_versions = []
+    for i in range(versions):
+        events_copy = deepcopy(merged_all)
+        r = random.Random(base_seed + i)
+        r.shuffle(events_copy)
+        merged_versions.appe_
