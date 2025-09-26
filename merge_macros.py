@@ -1,6 +1,13 @@
 # merge_macros.py
-# Script expects each original JSON to contain {"events":[{"time": <ms>, ...}, ...]}
-import argparse, json, random, os, zipfile, copy
+# Script to merge macro JSON files into multiple versions
+# Handles JSON files where events are under "events" or "macro"->"events"
+
+import argparse
+import json
+import random
+import os
+import zipfile
+import copy
 from pathlib import Path
 from collections import Counter
 
@@ -44,9 +51,9 @@ def arrange_no_adjacent(freq_map):
     arranged = []
     total = sum(counts.values())
     for _ in range(total):
-        choices = [fn for fn,c in counts.items() if c>0 and (not arranged or fn!=arranged[-1])]
+        choices = [fn for fn, c in counts.items() if c > 0 and (not arranged or fn != arranged[-1])]
         if not choices:
-            choices = [fn for fn,c in counts.items() if c>0]
+            choices = [fn for fn, c in counts.items() if c > 0]
         pick = max(choices, key=lambda x: counts[x])
         arranged.append(pick)
         counts[pick] -= 1
@@ -57,35 +64,38 @@ def build_versions(original_dir, out_dir, versions=5, seed=None):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    files = sorted([p for p in Path(original_dir).iterdir() if p.is_file() and p.suffix.lower()=='.json'])
+    files = sorted([p for p in Path(original_dir).iterdir() if p.is_file() and p.suffix.lower() == '.json'])
     if not files:
         raise SystemExit("No JSON files found in input directory.")
+
     originals = {}
     for p in files:
         data = load_json_file(p)
-        if 'events' not in data:
+        # Adapt to your JSON schema
+        if 'events' in data:
+            events = data['events']
+        elif 'macro' in data and 'events' in data['macro']:
+            events = data['macro']['events']
+        else:
             raise SystemExit(f"File {p.name} missing 'events' key. Edit script if your schema differs.")
-# Adapt to your JSON schema
-if 'events' in data:
-    events = data['events']
-elif 'macro' in data and 'events' in data['macro']:
-    events = data['macro']['events']
-else:
-    raise SystemExit(f"File {p.name} missing 'events' key. Edit script if your schema differs.")
-
         duration = events[-1].get('time', 0) if events else 0
         originals[p.name] = {"path": p, "events": events, "duration": duration}
 
     filenames = list(originals.keys())
     used_pauses = set()
-    bundle_log = {"versions": [], "global": {"min_pause_ms": MIN_PAUSE_MS, "max_pause_ms": MAX_PAUSE_MS, "gap_after_file_ms": GAP_AFTER_FILE_MS}, "original_filenames": filenames.copy(), "notes": []}
+    bundle_log = {
+        "versions": [],
+        "global": {"min_pause_ms": MIN_PAUSE_MS, "max_pause_ms": MAX_PAUSE_MS, "gap_after_file_ms": GAP_AFTER_FILE_MS},
+        "original_filenames": filenames.copy(),
+        "notes": []
+    }
     merged_filenames = []
 
-    for v in range(1, versions+1):
+    for v in range(1, versions + 1):
         base_seq = filenames.copy()
         dup_two = rng.sample(filenames, 2)
         base_seq += dup_two[:]
-        extra_count = rng.choice([1,2])
+        extra_count = rng.choice([1, 2])
         extra_files = rng.sample(filenames, extra_count)
         base_seq += extra_files[:]
 
@@ -124,13 +134,19 @@ else:
                 new_ev["source"] = fname
                 merged_events.append(new_ev)
             file_end = current_offset + orig["duration"]
-            if idx < len(seq)-1:
+            if idx < len(seq) - 1:
                 pause_ms, fix_note = sample_unique_pause(used_pauses, rng)
-                pauses.append({"after_index": idx, "from": seq[idx], "to": seq[idx+1], "pause_ms": pause_ms, "fix": fix_note})
+                pauses.append({"after_index": idx, "from": seq[idx], "to": seq[idx + 1], "pause_ms": pause_ms, "fix": fix_note})
                 current_offset = file_end + GAP_AFTER_FILE_MS + pause_ms
-                if (idx+1) in extra_pause_insert:
+                if (idx + 1) in extra_pause_insert:
                     dup_pause_ms, dup_fix = sample_unique_pause(used_pauses, rng)
-                    pauses.append({"before_index": idx+1, "inserted_before_file": seq[idx+1], "pause_ms": dup_pause_ms, "fix": dup_fix, "reason": "duplicate_extra_pause"})
+                    pauses.append({
+                        "before_index": idx + 1,
+                        "inserted_before_file": seq[idx + 1],
+                        "pause_ms": dup_pause_ms,
+                        "fix": dup_fix,
+                        "reason": "duplicate_extra_pause"
+                    })
                     current_offset += dup_pause_ms
             else:
                 current_offset = file_end
@@ -143,7 +159,7 @@ else:
         merged_filenames.append(merged_path.name)
 
         originals_present = all(fn in seq for fn in filenames)
-        adjacents = [(i, seq[i], seq[i+1]) for i in range(len(seq)-1) if seq[i]==seq[i+1]]
+        adjacents = [(i, seq[i], seq[i + 1]) for i in range(len(seq) - 1) if seq[i] == seq[i + 1]]
         schedule = []
         cur = 0
         ok_monotonic = True
@@ -152,17 +168,28 @@ else:
             start = cur
             end = start + dur
             schedule.append({"index": i, "file": fname, "start": start, "end": end})
-            if i < len(seq)-1:
-                total_pause_after = sum(p["pause_ms"] for p in pauses if p.get("after_index")==i)
-                total_pause_after += sum(p["pause_ms"] for p in pauses if p.get("before_index")==i+1)
+            if i < len(seq) - 1:
+                total_pause_after = sum(p["pause_ms"] for p in pauses if p.get("after_index") == i)
+                total_pause_after += sum(p["pause_ms"] for p in pauses if p.get("before_index") == i + 1)
                 expected_next_start = end + GAP_AFTER_FILE_MS + total_pause_after
                 cur = expected_next_start
-        for j in range(len(schedule)-1):
-            if schedule[j]["end"] > schedule[j+1]["start"]:
+        for j in range(len(schedule) - 1):
+            if schedule[j]["end"] > schedule[j + 1]["start"]:
                 ok_monotonic = False
                 break
 
-        version_log = {"version": v, "merged_filename": merged_filename, "file_order": seq.copy(), "duplicated_files_selected": dup_two.copy(), "extra_copies_added": extra_files.copy(), "pauses": pauses, "originals_present": originals_present, "adjacent_duplicates": adjacents, "time_schedule_sample": schedule[:3] + (schedule[-3:] if len(schedule)>6 else []), "monotonic_ok": ok_monotonic}
+        version_log = {
+            "version": v,
+            "merged_filename": merged_filename,
+            "file_order": seq.copy(),
+            "duplicated_files_selected": dup_two.copy(),
+            "extra_copies_added": extra_files.copy(),
+            "pauses": pauses,
+            "originals_present": originals_present,
+            "adjacent_duplicates": adjacents,
+            "time_schedule_sample": schedule[:3] + (schedule[-3:] if len(schedule) > 6 else []),
+            "monotonic_ok": ok_monotonic
+        }
         bundle_log["versions"].append(version_log)
 
     bundle_log_path = out_dir / "bundle_log.json"
@@ -175,7 +202,6 @@ else:
     return {"out_dir": str(out_dir), "merged_files": merged_filenames, "bundle_log": "bundle_log.json", "zip": str(zip_path)}
 
 if __name__ == '__main__':
-    import sys, argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", "-i", required=True)
     parser.add_argument("--output-dir", "-o", required=True)
