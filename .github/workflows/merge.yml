@@ -2,6 +2,12 @@ name: Merge macros
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force processing all groups even if previously processed'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   merge-macros:
@@ -20,7 +26,12 @@ jobs:
         run: python -m pip install --upgrade pip
 
       - name: Run merge_macros.py
-        run: python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed $RANDOM
+        run: |
+          python merge_macros.py \
+            --input-dir originals \
+            --output-dir out \
+            --versions 5 \
+            ${{ github.event.inputs.force && '--force' || '' }}
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
