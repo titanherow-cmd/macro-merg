@@ -2,144 +2,97 @@
 """
 merge_macros.py
 
-Usage:
-  python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed 12345
-
-Behavior:
- - Recursively loads JSON files in input-dir.
- - Normalizes several common JSON shapes to a dict with 'events' list.
- - Skips files that cannot be parsed or normalized (prints warnings).
- - Produces merged_bundle.json and merged_bundle.zip in output-dir.
- - Produces `versions` deterministic shuffles of the merged events using `seed`.
+Merges macro JSON files into multiple versions with exclusion, duplication,
+extra copies, random pauses, event time shifting, and detailed logging.
+Supports multiple groups in subfolders.
 """
 
 import argparse
 import json
-import sys
 import os
 import glob
-from pathlib import Path
-import zipfile
 import random
+from pathlib import Path
 from copy import deepcopy
+from zipfile import ZipFile
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Merge macro JSON files into a bundle.")
-    p.add_argument("--input-dir", required=True, help="Directory with input JSON macro files (recursive).")
-    p.add_argument("--output-dir", required=True, help="Directory where merged bundle will be written.")
-    p.add_argument("--versions", type=int, default=1, help="Number of versions to output (shuffled variants).")
-    p.add_argument("--seed", type=int, default=None, help="Random seed for deterministic shuffles.")
-    return p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-dir", required=True, help="Parent directory containing macro groups")
+    parser.add_argument("--output-dir", required=True, help="Directory to write merged versions and ZIP")
+    parser.add_argument("--versions", type=int, default=5, help="Number of versions to generate per group")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    return parser.parse_args()
 
 def load_json(path):
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
+        print(f"WARNING: Cannot parse {path}: {e}")
         return None
 
-def load_and_normalize_events(path):
-    data = load_json(path)
-    if data is None:
-        return None
-
-    if isinstance(data, dict) and isinstance(data.get("events"), list):
+def normalize_json(data):
+    if isinstance(data, dict) and "events" in data:
+        return data["events"]
+    elif isinstance(data, list):
         return data
-    if isinstance(data, list):
-        return {"events": data}
-    if isinstance(data, dict):
-        for alt in ("items", "entries", "records", "actions", "eventsList", "events_array"):
-            if isinstance(data.get(alt), list):
-                return {"events": data[alt]}
-        if "event" in data and isinstance(data["event"], dict):
-            return {"events": [data["event"]]}
-        event_like_keys = ("Type", "Time", "X", "Y", "KeyCode", "type", "time", "x", "y", "keyCode", "id", "timestamp")
-        if any(k in data for k in event_like_keys):
-            return {"events": [data]}
-    return None
+    elif isinstance(data, dict):
+        # Try to find list under common keys
+        for k in ["items","entries","records","actions","eventsList","events_array"]:
+            if k in data and isinstance(data[k], list):
+                return data[k]
+        # Single event dict
+        return [data]
+    return []
 
-def find_json_files(input_dir):
+def find_groups(input_dir):
     p = Path(input_dir)
-    if not p.exists():
-        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
-    return sorted(glob.glob(str(p / "**" / "*.json"), recursive=True))
+    return [x for x in p.iterdir() if x.is_dir()]
 
-def build_merged_events(valid_datas):
-    merged = []
-    for d in valid_datas:
-        merged.extend(deepcopy(d.get("events", [])))
-    return merged
+def find_json_files(group_path):
+    return sorted(glob.glob(str(group_path / "*.json")))
 
-def write_outputs(merged_versions, output_dir):
-    outp = Path(output_dir)
-    outp.mkdir(parents=True, exist_ok=True)
+def apply_shifts(events, shift_ms):
+    return [{"Type": e.get("Type"), "Time": e.get("Time",0)+shift_ms, "X": e.get("X"), "Y": e.get("Y"), "Delta": e.get("Delta"), "KeyCode": e.get("KeyCode")} for e in events]
 
-    bundle = {
-        "meta": {
-            "generator": "merge_macros.py",
-            "versions_count": len(merged_versions)
-        },
-        "versions": merged_versions
-    }
+def generate_version(files, seed, global_pause_set):
+    r = random.Random(seed)
+    # Exclude one file randomly
+    exclude_idx = r.randrange(len(files))
+    included_files = [f for i,f in enumerate(files) if i != exclude_idx]
 
-    json_path = outp / "merged_bundle.json"
-    zip_path = outp / "merged_bundle.zip"
+    # Duplicate 2 files randomly
+    dup_files = r.sample(included_files, 2)
+    final_files = deepcopy(included_files) + dup_files
 
-    with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(bundle, fh, indent=2, ensure_ascii=False)
+    # Add 1 or 2 extra copies randomly
+    extra_count = r.choice([1,2])
+    extra_candidates = [f for f in included_files if f not in dup_files]
+    extra_files = r.sample(extra_candidates, k=min(extra_count,len(extra_candidates)))
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(json_path, arcname="merged_bundle.json")
+    # Insert extra copies in positions not adjacent to the same file
+    for f in extra_files:
+        insert_pos = r.randrange(len(final_files)+1)
+        if insert_pos>0 and final_files[insert_pos-1]==f:
+            insert_pos +=1
+        if insert_pos>len(final_files):
+            insert_pos=len(final_files)
+        final_files.insert(insert_pos, f)
 
-    print(f"WROTE: {json_path}")
-    print(f"WROTE: {zip_path}")
+    # Shuffle final_files randomly
+    r.shuffle(final_files)
 
-def main():
-    args = parse_args()
-
-    files = find_json_files(args.input_dir)
-    if not files:
-        raise SystemExit(f"ERROR: No JSON files found in input-dir: {args.input_dir}")
-
-    print(f"Found {len(files)} JSON files; attempting to load and normalize...")
-
-    valid_datas = []
-    skipped = 0
-    for path in files:
-        normalized = load_and_normalize_events(path)
-        if normalized is None:
-            print(f"SKIP: {path} (unexpected schema or parse error)", file=sys.stderr)
-            skipped += 1
-            continue
-        valid_datas.append(normalized)
-
-    total_valid = len(valid_datas)
-    print(f"Loaded {total_valid} usable file(s); skipped {skipped} file(s).")
-
-    if total_valid == 0:
-        raise SystemExit("ERROR: No input files with usable 'events' were found. Check originals/ for corrupted or differently-shaped JSON.")
-
-    merged_all = build_merged_events(valid_datas)
-    print(f"Merged total events: {len(merged_all)}")
-
-    versions = max(1, args.versions)
-    base_seed = args.seed if args.seed is not None else random.randrange(2**31)
-    merged_versions = []
-    for i in range(versions):
-        events_copy = deepcopy(merged_all)
-        r = random.Random(base_seed + i)
-        r.shuffle(events_copy)
-        merged_versions.append({
-            "version": i + 1,
-            "seed": base_seed + i,
-            "events": events_copy
-        })
-        print(f"Prepared version {i+1} (seed={base_seed + i}) with {len(events_copy)} events.")
-
-    write_outputs(merged_versions, args.output_dir)
-
-    print("DONE.")
-
-if __name__ == "__main__":
-    main()
+    # Compute event times with 30ms gaps and random pauses
+    merged_events = []
+    pause_log = []
+    time_cursor = 0
+    for f in final_files:
+        events = normalize_json(load_json(f))
+        # Decide pause
+        add_pause = r.random()<0.6
+        pause_duration = None
+        if add_pause:
+            while True:
+                pause_duration = r.randint(2*60*1000, 13*60*1000) # 2-13 min in ms
+                if p
