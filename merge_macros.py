@@ -3,9 +3,9 @@
 merge_macros.py
 
 Merges macro JSON files into multiple versions per group with exclusion, duplication,
-extra copies, random pauses, event time shifting, detailed logging, and
-skips groups that contain only previously processed JSONs unless --force is used.
-Outputs each group's results in separate folders inside the ZIP with versioned filenames (_v1, _v2, ...).
+extra copies, random pauses, event time shifting, detailed logging per group,
+and skips groups that contain only previously processed JSONs unless --force is used.
+Outputs each group's results and log inside separate folders in the ZIP with versioned filenames (_v1, _v2, ...).
 """
 
 import argparse
@@ -118,9 +118,6 @@ def main():
     args = parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_data = {"groups":{}, "versions":args.versions}
-
-    groups = find_groups(args.input_dir)
     global_pause_set = set()
     zip_files = []
 
@@ -128,18 +125,18 @@ def main():
     zip_path = out_dir / "merged_bundle.zip"
     already_processed = get_previously_processed_files(zip_path)
 
-    for g_idx, g in enumerate(groups):
+    for g_idx, g in enumerate(find_groups(args.input_dir)):
         g_name = g.name
         files = find_json_files(g)
         if not files:
             print(f"Skipping group {g_name} — no JSON files found")
             continue
-
         if not args.force and all(Path(f).name in already_processed for f in files):
-            print(f"Skipping group {g_name} — all files already processed in ZIP (use --force to override)")
+            print(f"Skipping group {g_name} — all files already processed (use --force to override)")
             continue
 
-        log_data["groups"][g_name] = []
+        group_log = {"group": g_name, "versions": []}
+
         for v in range(1, args.versions+1):
             version_seed = seed_base + g_idx*1000 + v
             version_filename, merged_events, final_files, pause_log = generate_version(files, version_seed, global_pause_set, v)
@@ -148,7 +145,7 @@ def main():
                 json.dump({"events": merged_events}, f, indent=2)
             zip_files.append((g_name, version_path))
 
-            log_data["groups"][g_name].append({
+            group_log["versions"].append({
                 "version": v,
                 "filename": version_filename,
                 "excluded_file": list(set(files)-set(final_files)),
@@ -156,13 +153,14 @@ def main():
                 "pause_log": pause_log
             })
 
-    # Write log
-    log_path = out_dir / "bundle_log.json"
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, indent=2)
-    zip_files.append((None, log_path))
+        # Save group-specific log
+        group_log_filename = f"{g_name}_log.json"
+        group_log_path = out_dir / group_log_filename
+        with open(group_log_path, "w", encoding="utf-8") as f:
+            json.dump(group_log, f, indent=2)
+        zip_files.append((g_name, group_log_path))
 
-    # Create ZIP with group subfolders
+    # Create ZIP with each group's folder
     zip_path = out_dir / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, f in zip_files:
