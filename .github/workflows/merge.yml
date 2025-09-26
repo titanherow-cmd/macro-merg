@@ -1,6 +1,7 @@
+# write the corrected workflow
 mkdir -p .github/workflows
 cat > .github/workflows/merge-macros.yml <<'YML'
-name: Merge macros
+name: "Merge macros"
 
 on:
   workflow_dispatch:
@@ -19,12 +20,10 @@ jobs:
           python-version: "3.x"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
+        run: python -m pip install --upgrade pip
 
       - name: Run merge_macros.py
-        run: |
-          python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed $RANDOM
+        run: python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed $RANDOM
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
@@ -32,3 +31,8 @@ jobs:
           name: merged-bundle
           path: out/merged_bundle.zip
 YML
+
+# stage, commit, and push
+git add .github/workflows/merge-macros.yml
+git commit -m "ci: fix workflow YAML syntax"
+git push origin HEAD
