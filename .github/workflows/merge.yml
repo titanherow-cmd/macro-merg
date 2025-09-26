@@ -1,3 +1,5 @@
+mkdir -p .github/workflows
+cat > .github/workflows/merge-macros.yml <<'YML'
 name: Merge macros
 
 on:
@@ -29,3 +31,4 @@ jobs:
         with:
           name: merged-bundle
           path: out/merged_bundle.zip
+YML
