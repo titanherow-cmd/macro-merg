@@ -25,7 +25,7 @@ jobs:
           python merge_macros.py --input-dir originals --output-dir out --versions 5 --seed $RANDOM
 
       - name: Upload merged bundle
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
           path: out/merged_bundle.zip
