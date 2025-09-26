@@ -1,0 +1,30 @@
+name: Merge macros
+on:
+  push:
+    paths:
+      - 'originals/**'
+      - 'merge_macros.py'
+      - '.github/workflows/merge.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run merge script
+        run: |
+          python merge_macros.py -i originals -o output -n 5
+
+      - name: Upload merged bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged_bundle
+          path: output/merged_bundle.zip
