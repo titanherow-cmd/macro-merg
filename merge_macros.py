@@ -3,9 +3,9 @@
 merge_macros.py
 
 Merges macro JSON files into multiple versions per group with exclusion, duplication,
-extra copies, random pauses, event time shifting, detailed logging per group,
+extra copies, random pauses, event time shifting, detailed logging per group in .txt,
 and skips groups that contain only previously processed JSONs unless --force is used.
-Outputs each group's results and log inside separate folders in the ZIP with versioned filenames (_v1, _v2, ...).
+Outputs each group's results inside separate folders in the ZIP with versioned filenames (_v1, _v2, ...).
 """
 
 import argparse
@@ -108,7 +108,6 @@ def generate_version(files, seed, global_pause_set, version_num):
         max_time = max((e.get("Time",0) for e in events_shifted), default=0)
         time_cursor = max_time + 30
 
-    # Filename with first 3 chars of each file + version number (_v1, _v2, ...)
     filename_parts = [Path(f).name[:3] for f in final_files]
     version_filename = "".join(filename_parts) + f"_v{version_num}.json"
 
@@ -153,8 +152,8 @@ def main():
                 "pause_log": pause_log
             })
 
-        # Save group-specific log
-        group_log_filename = f"{g_name}_log.json"
+        # Save group-specific log as .txt
+        group_log_filename = f"{g_name}_log.txt"
         group_log_path = out_dir / group_log_filename
         with open(group_log_path, "w", encoding="utf-8") as f:
             json.dump(group_log, f, indent=2)
