@@ -7,7 +7,7 @@ on:
         description: 'Force processing groups even if previously processed'
         required: false
         default: false
-        type: boolean  # This will render as a checkbox in GitHub UI
+        type: boolean  # Renders as a checkbox in GitHub UI
 
 jobs:
   merge-macros:
@@ -35,14 +35,18 @@ jobs:
             --versions 5 \
             --seed $RANDOM \
             --intra-file-enabled"
-          
-          # Add --force if checkbox is checked
+
           if [ "${{ github.event.inputs.force }}" == "true" ]; then
             CMD="$CMD --force"
           fi
 
           echo "Running command: $CMD"
           eval $CMD
+
+      - name: Debug output directory
+        run: |
+          echo "Listing contents of out/:"
+          ls -lh out/
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
