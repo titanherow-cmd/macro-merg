@@ -48,6 +48,9 @@ jobs:
           echo "Listing contents of out/:"
           ls -lh out/ || echo "Output directory is empty"
 
+          echo "Listing all files recursively:"
+          find out/ -type f || echo "No files found"
+
           echo "Listing all .zip files:"
           ls -lh out/*.zip || echo "No zip files found"
 
@@ -56,4 +59,3 @@ jobs:
         with:
           name: merged-bundle
           path: out/merged_bundle.zip
-
