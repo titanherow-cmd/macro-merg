@@ -13,10 +13,10 @@ Features:
  - ZIP with per-group folders (clean, no extra nesting)
  - Deterministic with --seed
  - Filename scheme:
-     * Each file part: 3 alphanumeric chars + playtime in minutes [Xm]
+     * Each file part: all letters & numbers from original filename + playtime in minutes [Xm], with space
      * Version suffix: _vN
      * Total playtime appended: [Ym]
-     * Example: abc[3m]e1x[7m]eg2[1m]_v1[11m].json
+     * Example: EGfile1[3m] A2file[5m] xyz123[2m]_v1[10m].json
 """
 
 from pathlib import Path
@@ -101,10 +101,9 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
-def alnum_part_from_filename(fname: str):
-    s = ''.join(ch for ch in Path(fname).name if ch.isalnum())
-    s = s.lower()
-    return (s + "xxx")[:3] if len(s) < 3 else s[:3]
+def part_from_filename(fname: str):
+    # Keep all letters and numbers
+    return ''.join(ch for ch in Path(fname).name if ch.isalnum())
 
 def insert_intra_pauses_fixed(events, rng, max_pauses, min_minutes, max_minutes, intra_log):
     if not events or max_pauses <= 0:
@@ -176,10 +175,10 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
         else:
             play_times[f] = 0
 
-    parts = [alnum_part_from_filename(Path(f).name) + f"[{round((play_times[f] or 0)/60000)}m]" 
-             for f in final_files]
+    parts = [part_from_filename(Path(f).name) + f"[{round((play_times[f] or 0)/60000)}m] "
+             for f in final_files]  # space after each part
     total_minutes = round(sum(play_times.values()) / 60000)
-    fname = "".join(parts) + f"_v{version_num}[{total_minutes}m].json"
+    fname = "".join(parts).rstrip() + f"_v{version_num}[{total_minutes}m].json"
     return fname, merged, final_files, pause_log, excluded, total_minutes
 
 def main():
