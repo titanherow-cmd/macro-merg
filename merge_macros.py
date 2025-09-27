@@ -5,15 +5,16 @@ merge_macros.py
 Features:
  - Groups = subfolders in --input-dir
  - Multiple versions per group (--versions)
- - Random exclusion (--exclude-count), duplicates, extra copies
- - Inter-file pauses (60% chance), unique; first-file pause special 2..3 minutes
- - Optional intra-file pauses (up to N per file, 1–3 min)
+ - Random exclusions, duplicates, extra copies (non-adjacent)
+ - Inter-file pauses (60% chance, first file 2–3 min, others 2–13 min, unique)
+ - Optional intra-file pauses (up to 4 per file, 1–3 min)
+ - Shifts event times correctly
  - Outputs top-level JSON arrays
  - Per-group logs as .txt
- - ZIP with per-group folders (clean, no extra nesting)
+ - ZIP with per-group folders
  - Deterministic with --seed
  - Filename scheme:
-     * Each file part: all letters & numbers from original filename + playtime in minutes [Xm], with space
+     * Each file part: all letters & numbers from original filename (no .json) + playtime in minutes [Xm], with space
      * Version suffix: _vN
      * Total playtime appended: [Ym]
      * Example: EGfile1[3m] A2file[5m] xyz123[2m]_v1[10m].json
@@ -102,8 +103,9 @@ def get_previously_processed_files(zip_path: Path):
     return processed
 
 def part_from_filename(fname: str):
-    # Keep all letters and numbers
-    return ''.join(ch for ch in Path(fname).name if ch.isalnum())
+    # Keep all letters and numbers from the filename **without the extension**
+    stem = Path(fname).stem
+    return ''.join(ch for ch in stem if ch.isalnum())
 
 def insert_intra_pauses_fixed(events, rng, max_pauses, min_minutes, max_minutes, intra_log):
     if not events or max_pauses <= 0:
@@ -175,16 +177,19 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
         else:
             play_times[f] = 0
 
-    parts = [part_from_filename(Path(f).name) + f"[{round((play_times[f] or 0)/60000)}m] "
+    parts = [part_from_filename(f) + f"[{round((play_times[f] or 0)/60000)}m] "
              for f in final_files]  # space after each part
     total_minutes = round(sum(play_times.values()) / 60000)
-    fname = "".join(parts).rstrip() + f"_v{version_num}[{total_minutes}m].json"
-    return fname, merged, final_files, pause_log, excluded, total_minutes
+    merged_fname = "".join(parts).rstrip() + f"_v{version_num}[{total_minutes}m].json"
+    return merged_fname, merged, final_files, pause_log, excluded, total_minutes
 
 def main():
     a = parse_args()
     in_dir, out_dir = Path(a.input_dir), Path(a.output_dir)
+    
+    # Ensure output folder exists
     out_dir.mkdir(parents=True, exist_ok=True)
+
     base_seed = a.seed if a.seed is not None else random.randrange(2**31)
     processed = get_previously_processed_files(out_dir/"merged_bundle.zip")
     global_pauses, zip_items = set(), []
@@ -217,7 +222,7 @@ def main():
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
-    # --- Clean ZIP creation ---
+    # --- Create ZIP ---
     zip_path = out_dir / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
