@@ -20,6 +20,12 @@ def merge_files(input_dir, output_dir, versions, intra_enabled, force):
     for i in range(1, versions + 1):
         for filename in os.listdir(input_dir):
             input_path = os.path.join(input_dir, filename)
+
+            # Skip directories or non-files
+            if not os.path.isfile(input_path):
+                print(f"Skipping {input_path}, it is not a file.")
+                continue
+
             base, ext = os.path.splitext(filename)
             output_file = os.path.join(output_dir, f"{base}_v{i}{ext}")
 
