@@ -15,14 +15,25 @@ def parse_args():
     return parser.parse_args()
 
 def merge_files(input_dir, output_dir, versions, intra_enabled, force):
+    if versions < 1:
+        raise ValueError("Versions must be >= 1")
     os.makedirs(output_dir, exist_ok=True)
 
     for i in range(1, versions + 1):
+        version_folder = os.path.join(output_dir, f"version_{i}")
+        os.makedirs(version_folder, exist_ok=True)
+
         for root, _, files in os.walk(input_dir):
             for filename in files:
                 input_path = os.path.join(root, filename)
+
+                # Preserve subdirectory structure
+                rel_path = os.path.relpath(root, input_dir)
+                output_subdir = os.path.join(version_folder, rel_path)
+                os.makedirs(output_subdir, exist_ok=True)
+
                 base, ext = os.path.splitext(filename)
-                output_file = os.path.join(output_dir, f"{base}_v{i}{ext}")
+                output_file = os.path.join(output_subdir, f"{base}_v{i}{ext}")
 
                 if not force and os.path.exists(output_file):
                     print(f"Skipping {output_file}, already exists.")
@@ -30,9 +41,9 @@ def merge_files(input_dir, output_dir, versions, intra_enabled, force):
 
                 print(f"Processing {input_path} -> {output_file}")
 
-                # Read/write in chunks to avoid truncation
+                # Write in chunks to avoid truncation
                 with open(input_path, 'rb') as f_in, open(output_file, 'wb') as f_out:
-                    while chunk := f_in.read(1024 * 1024):  # 1 MB chunks
+                    while chunk := f_in.read(1024 * 1024):
                         f_out.write(chunk)
 
                 # Optional intra-file processing
@@ -48,10 +59,13 @@ def create_zip(output_dir, zip_name="merged_bundle.zip"):
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         files_added = 0
-        for file in os.listdir(output_dir):
-            file_path = os.path.join(output_dir, file)
-            if os.path.isfile(file_path) and file != zip_name:
-                zipf.write(file_path, file)
+        for root, _, files in os.walk(output_dir):
+            for file in files:
+                if file == zip_name:
+                    continue  # skip the zip itself
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, output_dir)  # preserve folder structure
+                zipf.write(file_path, arcname)
                 files_added += 1
 
     if files_added == 0:
@@ -68,11 +82,11 @@ def main():
         random.seed(args.seed)
 
     merge_files(args.input_dir, args.output_dir, args.versions, args.intra_file_enabled, args.force)
-    
-    # Debug: list files before zipping
+
     print("Files in output directory before zipping:")
-    for f in os.listdir(args.output_dir):
-        print(f" - {f}")
+    for root, _, files in os.walk(args.output_dir):
+        for f in files:
+            print(f" - {os.path.relpath(os.path.join(root, f), args.output_dir)}")
 
     zip_file = create_zip(args.output_dir)
 
