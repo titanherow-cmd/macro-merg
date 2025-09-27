@@ -2,6 +2,11 @@ name: Merge macros
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force processing all groups even if previously processed'
+        required: false
+        default: 'false'
   push:
     branches:
       - main
@@ -30,7 +35,8 @@ jobs:
             --output-dir out \
             --versions 5 \
             --seed $RANDOM \
-            --intra-file-enabled
+            --intra-file-enabled \
+            $([[ "${{ github.event.inputs.force }}" == 'true' ]] && echo "--force" || echo "")
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
