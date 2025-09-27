@@ -2,10 +2,9 @@
 """
 merge_macros.py
 
-Merges macro JSON files into multiple versions per group with exclusion, duplication,
-extra copies, random pauses, event time shifting, detailed logging per group in .txt,
-and skips groups that contain only previously processed JSONs unless --force is used.
-Outputs each group's results inside separate folders in the ZIP with versioned filenames (_v1, _v2, ...).
+Same features as before, but merged version files are written as a top-level JSON array
+(i.e. [...] ), compatible with programs that expect a list of MacroEvent objects.
+Group logs are .txt. Outputs grouped into ZIP subfolders per group.
 """
 
 import argparse
@@ -36,9 +35,9 @@ def load_json(path):
 def normalize_json(data):
     if isinstance(data, dict) and "events" in data:
         return data["events"]
-    elif isinstance(data, list):
+    if isinstance(data, list):
         return data
-    elif isinstance(data, dict):
+    if isinstance(data, dict):
         for k in ["items","entries","records","actions","eventsList","events_array"]:
             if k in data and isinstance(data[k], list):
                 return data[k]
@@ -53,9 +52,17 @@ def find_json_files(group_path):
     return sorted(glob.glob(str(group_path / "*.json")))
 
 def apply_shifts(events, shift_ms):
-    return [{"Type": e.get("Type"), "Time": e.get("Time",0)+shift_ms, 
-             "X": e.get("X"), "Y": e.get("Y"), "Delta": e.get("Delta"), "KeyCode": e.get("KeyCode")} 
-            for e in events]
+    return [
+        {
+            "Type": e.get("Type"),
+            "Time": int(e.get("Time", 0)) + int(shift_ms),
+            "X": e.get("X"),
+            "Y": e.get("Y"),
+            "Delta": e.get("Delta"),
+            "KeyCode": e.get("KeyCode")
+        }
+        for e in events
+    ]
 
 def get_previously_processed_files(zip_path):
     processed = set()
@@ -71,19 +78,22 @@ def generate_version(files, seed, global_pause_set, version_num):
     exclude_idx = r.randrange(len(files))
     included_files = [f for i,f in enumerate(files) if i != exclude_idx]
 
+    # duplicate 2 files (must exist)
     dup_files = r.sample(included_files, 2)
     final_files = deepcopy(included_files) + dup_files
 
+    # add 1 or 2 extra copies (not adjacent to same file if possible)
     extra_count = r.choice([1,2])
     extra_candidates = [f for f in included_files if f not in dup_files]
     extra_files = r.sample(extra_candidates, k=min(extra_count,len(extra_candidates)))
 
     for f in extra_files:
         insert_pos = r.randrange(len(final_files)+1)
-        if insert_pos>0 and final_files[insert_pos-1]==f:
-            insert_pos +=1
-        if insert_pos>len(final_files):
-            insert_pos=len(final_files)
+        # adjust to avoid adjacent duplicate
+        if insert_pos > 0 and final_files[insert_pos-1] == f:
+            insert_pos += 1
+        if insert_pos > len(final_files):
+            insert_pos = len(final_files)
         final_files.insert(insert_pos, f)
 
     r.shuffle(final_files)
@@ -92,10 +102,11 @@ def generate_version(files, seed, global_pause_set, version_num):
     pause_log = []
     time_cursor = 0
     for f in final_files:
-        events = normalize_json(load_json(f))
+        events = normalize_json(load_json(f)) or []
         add_pause = r.random() < 0.6
         pause_duration = None
         if add_pause:
+            # pick unique pause (ms) between 2 and 13 minutes
             while True:
                 pause_duration = r.randint(2*60*1000, 13*60*1000)
                 if pause_duration not in global_pause_set:
@@ -103,10 +114,10 @@ def generate_version(files, seed, global_pause_set, version_num):
                     break
             time_cursor += pause_duration
             pause_log.append({"after_file": Path(f).name, "pause_ms": pause_duration})
-        events_shifted = apply_shifts(events, time_cursor)
-        merged_events.extend(events_shifted)
-        max_time = max((e.get("Time",0) for e in events_shifted), default=0)
-        time_cursor = max_time + 30
+        shifted = apply_shifts(events, time_cursor)
+        merged_events.extend(shifted)
+        max_time = max((e.get("Time",0) for e in shifted), default=0)
+        time_cursor = int(max_time) + 30
 
     filename_parts = [Path(f).name[:3] for f in final_files]
     version_filename = "".join(filename_parts) + f"_v{version_num}.json"
@@ -140,23 +151,26 @@ def main():
             version_seed = seed_base + g_idx*1000 + v
             version_filename, merged_events, final_files, pause_log = generate_version(files, version_seed, global_pause_set, v)
             version_path = out_dir / version_filename
+
+            # *** WRITE AS TOP-LEVEL ARRAY (compatible with SimplyMacro) ***
             with open(version_path, "w", encoding="utf-8") as f:
-                json.dump({"events": merged_events}, f, indent=2)
+                json.dump(merged_events, f, indent=2, ensure_ascii=False)
+
             zip_files.append((g_name, version_path))
 
             group_log["versions"].append({
                 "version": v,
                 "filename": version_filename,
-                "excluded_file": list(set(files)-set(final_files)),
-                "duplicated_files": final_files,
+                "excluded_file": [Path(x).name for x in set(files)-set(final_files)],
+                "duplicated_files": [Path(x).name for x in final_files],
                 "pause_log": pause_log
             })
 
-        # Save group-specific log as .txt
+        # Save group-specific log as .txt (JSON-formatted for readability)
         group_log_filename = f"{g_name}_log.txt"
         group_log_path = out_dir / group_log_filename
         with open(group_log_path, "w", encoding="utf-8") as f:
-            json.dump(group_log, f, indent=2)
+            json.dump(group_log, f, indent=2, ensure_ascii=False)
         zip_files.append((g_name, group_log_path))
 
     # Create ZIP with each group's folder
