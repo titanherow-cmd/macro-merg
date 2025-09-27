@@ -47,6 +47,8 @@ jobs:
         run: |
           echo "Listing contents of out/:"
           ls -lh out/
+          echo "Listing all .zip files:"
+          ls -lh out/*.zip || echo "No zip files found"
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
