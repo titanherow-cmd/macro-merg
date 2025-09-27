@@ -6,8 +6,8 @@ on:
       force:
         description: 'Force processing groups even if previously processed'
         required: false
-        default: 'false'
-        type: boolean
+        default: false
+        type: boolean  # This will render as a checkbox in GitHub UI
 
 jobs:
   merge-macros:
@@ -25,16 +25,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run merge_macros.py
         run: |
-          python merge_macros.py \
+          CMD="python merge_macros.py \
             --input-dir originals \
             --output-dir out \
             --versions 5 \
             --seed $RANDOM \
-            --intra-file-enabled \
-            $([[ "${{ github.event.inputs.force }}" == 'true' ]] && echo "--force" || echo "")
+            --intra-file-enabled"
+          
+          # Add --force if checkbox is checked
+          if [ "${{ github.event.inputs.force }}" == "true" ]; then
+            CMD="$CMD --force"
+          fi
+
+          echo "Running command: $CMD"
+          eval $CMD
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
