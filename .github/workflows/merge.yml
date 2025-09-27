@@ -7,7 +7,7 @@ on:
         description: 'Force processing groups even if previously processed'
         required: false
         default: false
-        type: boolean  # Renders as a checkbox in GitHub UI
+        type: boolean  # Checkbox in GitHub UI
 
 jobs:
   merge-macros:
@@ -30,8 +30,8 @@ jobs:
       - name: Run merge_macros.py
         run: |
           CMD="python merge_macros.py \
-            --input-dir originals \
-            --output-dir out \
+            --input-dir 'originals' \
+            --output-dir 'out' \
             --versions 5 \
             --seed $RANDOM \
             --intra-file-enabled"
@@ -41,12 +41,13 @@ jobs:
           fi
 
           echo "Running command: $CMD"
-          eval $CMD
+          eval "$CMD"
 
       - name: Debug output directory
         run: |
           echo "Listing contents of out/:"
-          ls -lh out/
+          ls -lh out/ || echo "Output directory is empty"
+
           echo "Listing all .zip files:"
           ls -lh out/*.zip || echo "No zip files found"
 
@@ -55,3 +56,4 @@ jobs:
         with:
           name: merged-bundle
           path: out/merged_bundle.zip
+
