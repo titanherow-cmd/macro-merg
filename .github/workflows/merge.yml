@@ -1,15 +1,13 @@
-name: Merge macros
+name: Merge Macros
 
 on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Force processing all groups even if previously processed'
+        description: 'Force processing groups even if previously processed'
         required: false
         default: 'false'
-  push:
-    branches:
-      - main
+        type: boolean
 
 jobs:
   merge-macros:
