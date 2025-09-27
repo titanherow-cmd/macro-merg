@@ -18,46 +18,47 @@ def merge_files(input_dir, output_dir, versions, intra_enabled, force):
     os.makedirs(output_dir, exist_ok=True)
 
     for i in range(1, versions + 1):
-        for filename in os.listdir(input_dir):
-            input_path = os.path.join(input_dir, filename)
+        for root, _, files in os.walk(input_dir):
+            for filename in files:
+                input_path = os.path.join(root, filename)
+                base, ext = os.path.splitext(filename)
+                output_file = os.path.join(output_dir, f"{base}_v{i}{ext}")
 
-            # Skip directories or non-files
-            if not os.path.isfile(input_path):
-                print(f"Skipping {input_path}, it is not a file.")
-                continue
+                if not force and os.path.exists(output_file):
+                    print(f"Skipping {output_file}, already exists.")
+                    continue
 
-            base, ext = os.path.splitext(filename)
-            output_file = os.path.join(output_dir, f"{base}_v{i}{ext}")
+                print(f"Processing {input_path} -> {output_file}")
 
-            if not force and os.path.exists(output_file):
-                print(f"Skipping {output_file}, already exists.")
-                continue
+                # Read/write in chunks to avoid truncation
+                with open(input_path, 'rb') as f_in, open(output_file, 'wb') as f_out:
+                    while chunk := f_in.read(1024 * 1024):  # 1 MB chunks
+                        f_out.write(chunk)
 
-            print(f"Processing {input_path} -> {output_file}")
+                # Optional intra-file processing
+                if intra_enabled:
+                    with open(output_file, 'ab') as f_out:
+                        f_out.write(b"\n# Intra-file processing done\n")
 
-            # Read and write in chunks to avoid truncation
-            with open(input_path, 'rb') as f_in, open(output_file, 'wb') as f_out:
-                while chunk := f_in.read(1024 * 1024):  # 1 MB chunks
-                    f_out.write(chunk)
-
-            # Optional intra-file processing
-            if intra_enabled:
-                with open(output_file, 'ab') as f_out:
-                    f_out.write(b"\n# Intra-file processing done\n")
-
-            print(f"Merged file size: {os.path.getsize(output_file)} bytes")
+                print(f"Merged file size: {os.path.getsize(output_file)} bytes")
 
 def create_zip(output_dir, zip_name="merged_bundle.zip"):
     zip_path = os.path.join(output_dir, zip_name)
     print(f"Creating zip: {zip_path}")
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        files_added = 0
         for file in os.listdir(output_dir):
             file_path = os.path.join(output_dir, file)
             if os.path.isfile(file_path) and file != zip_name:
-                zipf.write(file_path, file)  # store at root of zip
+                zipf.write(file_path, file)
+                files_added += 1
 
-    print(f"Zip created successfully, size: {os.path.getsize(zip_path)} bytes")
+    if files_added == 0:
+        print("Warning: No files were added to the zip!")
+    else:
+        print(f"Zip created successfully with {files_added} files, size: {os.path.getsize(zip_path)} bytes")
+
     return zip_path
 
 def main():
@@ -67,6 +68,12 @@ def main():
         random.seed(args.seed)
 
     merge_files(args.input_dir, args.output_dir, args.versions, args.intra_file_enabled, args.force)
+    
+    # Debug: list files before zipping
+    print("Files in output directory before zipping:")
+    for f in os.listdir(args.output_dir):
+        print(f" - {f}")
+
     zip_file = create_zip(args.output_dir)
 
     # Debug: list contents of zip
