@@ -8,9 +8,12 @@ on:
         required: false
         default: '6'
       force:
-        description: 'Re-run even if outputs exist (true/false)'
+        description: 'Re-run even if outputs exist'
         required: false
-        default: 'false'
+        default: 'No'
+        options:
+          - No
+          - Yes
       between_min:
         description: "Between-files shortest pause (e.g. '10s' or '1m')"
         required: true
@@ -63,9 +66,10 @@ jobs:
           BETWEEN_MAX: ${{ github.event.inputs.between_max }}
           WITHIN_MIN: ${{ github.event.inputs.within_min }}
           WITHIN_MAX: ${{ github.event.inputs.within_max }}
+          FORCE_CHOICE: ${{ github.event.inputs.force }}
         run: |
           ARGS="--versions ${{ github.event.inputs.versions }} --between-min '${BETWEEN_MIN}' --between-max '${BETWEEN_MAX}' --within-min '${WITHIN_MIN}' --within-max '${WITHIN_MAX}' --min-pauses ${{ github.event.inputs.min_pauses }} --max-pauses ${{ github.event.inputs.max_pauses }}"
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+          if [ "${FORCE_CHOICE}" = "Yes" ]; then
             ARGS="${ARGS} --force"
           fi
           echo "Running: python merge_macros.py $ARGS"
