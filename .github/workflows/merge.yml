@@ -10,34 +10,28 @@ on:
       force:
         description: 'Re-run even if outputs exist'
         required: false
-        default: 'No'
+        default: 'Yes'
         options:
-          - No
           - Yes
-      between_min:
-        description: "Between-files shortest pause (e.g. '10s' or '1m')"
-        required: true
-        default: '10s'
-      between_max:
-        description: "Between-files longest pause (e.g. '4m53s')"
-        required: true
-        default: '4m53s'
-      within_min:
-        description: "Within-file shortest pause (e.g. '1m')"
-        required: true
-        default: '1m'
-      within_max:
-        description: "Within-file longest pause (e.g. '2m47s')"
+          - No
+      # WITHIN (time first, then pauses)
+      within_max_time:
+        description: "Within-file maximum pause time (examples: '1.30', '1:30', '1m30s')"
         required: true
         default: '2m47s'
-      min_pauses:
-        description: 'Min pauses per file (for within-file rule)'
-        required: false
-        default: '2'
-      max_pauses:
-        description: 'Max pauses per file (for within-file rule)'
-        required: false
-        default: '9'
+      within_max_pauses:
+        description: "Max pauses to insert inside each file (we pick 1..this)"
+        required: true
+        default: '5'
+      # BETWEEN (time first, then pauses)
+      between_max_time:
+        description: "Between-files maximum pause time (examples: '10s', '1m')"
+        required: true
+        default: '4m53s'
+      between_max_pauses:
+        description: "Max pauses to insert between files (usually 1)"
+        required: true
+        default: '1'
 
 jobs:
   merge:
@@ -62,13 +56,13 @@ jobs:
 
       - name: Run merge_macros (compact)
         env:
-          BETWEEN_MIN: ${{ github.event.inputs.between_min }}
-          BETWEEN_MAX: ${{ github.event.inputs.between_max }}
-          WITHIN_MIN: ${{ github.event.inputs.within_min }}
-          WITHIN_MAX: ${{ github.event.inputs.within_max }}
+          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
+          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
+          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
+          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           FORCE_CHOICE: ${{ github.event.inputs.force }}
         run: |
-          ARGS="--versions ${{ github.event.inputs.versions }} --between-min '${BETWEEN_MIN}' --between-max '${BETWEEN_MAX}' --within-min '${WITHIN_MIN}' --within-max '${WITHIN_MAX}' --min-pauses ${{ github.event.inputs.min_pauses }} --max-pauses ${{ github.event.inputs.max_pauses }}"
+          ARGS="--versions ${{ github.event.inputs.versions }} --within-max-time '${WITHIN_MAX_TIME}' --within-max-pauses ${WITHIN_MAX_PAUSES} --between-max-time '${BETWEEN_MAX_TIME}' --between-max-pauses ${BETWEEN_MAX_PAUSES}"
           if [ "${FORCE_CHOICE}" = "Yes" ]; then
             ARGS="${ARGS} --force"
           fi
