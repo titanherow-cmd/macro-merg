@@ -1,43 +1,182 @@
 name: Merge Macros
 
 on:
+  push:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
+      input_dir:
+        description: 'Input directory (relative to repo root)'
+        required: true
+        default: 'input'
+      output_dir:
+        description: 'Output directory (relative to repo root)'
+        required: true
+        default: 'output'
+      versions:
+        description: 'Number of versions per group'
+        required: false
+        default: '5'
+      seed:
+        description: 'Random seed (leave empty for random)'
+        required: false
+        default: ''
       force:
-        description: 'Force processing groups even if previously processed'
+        description: 'Force processing even if previously processed'
         required: false
         default: 'false'
-        type: boolean
+      exclude_count:
+        description: 'How many files to randomly exclude per version'
+        required: false
+        default: '1'
+      intra_file_enabled:
+        description: 'Enable intra-file pauses'
+        required: false
+        default: 'false'
+
+      # Intra-file tunables (express times as e.g. 1m, 2m47s, 30s, 1:30, or 90)
+      intra_long_prob:
+        description: 'Percent chance to use long intra pauses (0-100)'
+        required: false
+        default: '70'
+      intra_long_min_count:
+        description: 'Min long intra pauses'
+        required: false
+        default: '2'
+      intra_long_max_count:
+        description: 'Max long intra pauses'
+        required: false
+        default: '9'
+      intra_long_min:
+        description: "Long intra min (e.g. '1m')"
+        required: false
+        default: '1m'
+      intra_long_max:
+        description: "Long intra max (e.g. '2m47s')"
+        required: false
+        default: '2m47s'
+      intra_short_min:
+        description: "Short intra min (e.g. '6s')"
+        required: false
+        default: '6s'
+      intra_short_max:
+        description: "Short intra max (e.g. '30s')"
+        required: false
+        default: '30s'
+      intra_max_pauses_cap:
+        description: 'Hard cap on number of intra pauses per file'
+        required: false
+        default: '9'
+
+      # Inter-file tunables (times in m/s formats)
+      inter_insert_prob:
+        description: 'Percent chance to insert inter-file pause at each file (0-100)'
+        required: false
+        default: '60'
+      inter_long_prob:
+        description: 'Percent chance to choose LONG inter-file band when inserting a pause (0-100)'
+        required: false
+        default: '20'
+      inter_short_max:
+        description: "Inter short band max (e.g. '4m53s')"
+        required: false
+        default: '4m53s'
+      inter_long_min:
+        description: "Inter long band min (e.g. '7m')"
+        required: false
+        default: '7m'
+      inter_long_max:
+        description: "Inter long band max (e.g. '10m')"
+        required: false
+        default: '10m'
+
+      # Post-file buffer
+      post_buffer_min:
+        description: "Per-file post buffer min (e.g. '10s')"
+        required: false
+        default: '10s'
+      post_buffer_max:
+        description: "Per-file post buffer max (e.g. '30s')"
+        required: false
+        default: '30s'
 
 jobs:
-  merge-macros:
+  merge:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.x"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install dependencies if requirements.txt exists
         run: |
-          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          else
+            python -m pip install --upgrade pip
+          fi
+
+      - name: Ensure output dir exists
+        run: mkdir -p ${{ github.workspace }}/${{ github.event.inputs.output_dir }}
 
       - name: Run merge_macros.py
+        env:
+          INPUT_DIR: ${{ github.event.inputs.input_dir }}
+          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
         run: |
-          python merge_macros.py \
-            --input-dir originals \
-            --output-dir out \
-            --versions 5 \
-            --seed $RANDOM \
-            --intra-file-enabled \
-            $([[ "${{ github.event.inputs.force }}" == 'true' ]] && echo "--force" || echo "")
+          ARGS="--input-dir '${INPUT_DIR}' --output-dir '${OUTPUT_DIR}' --versions ${{ github.event.inputs.versions }} --exclude-count ${{ github.event.inputs.exclude_count }}"
+          if [ -n "${{ github.event.inputs.seed }}" ]; then
+            ARGS="${ARGS} --seed ${{ github.event.inputs.seed }}"
+          fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="${ARGS} --force"
+          fi
+          if [ "${{ github.event.inputs.intra_file_enabled }}" = "true" ]; then
+            ARGS="${ARGS} --intra-file-enabled"
+          fi
 
-      - name: Upload merged bundle
+          # Intra options
+          ARGS="${ARGS} --intra-long-prob ${{ github.event.inputs.intra_long_prob }}"
+          ARGS="${ARGS} --intra-long-min-count ${{ github.event.inputs.intra_long_min_count }}"
+          ARGS="${ARGS} --intra-long-max-count ${{ github.event.inputs.intra_long_max_count }}"
+          ARGS="${ARGS} --intra-long-min '${{ github.event.inputs.intra_long_min }}'"
+          ARGS="${ARGS} --intra-long-max '${{ github.event.inputs.intra_long_max }}'"
+          ARGS="${ARGS} --intra-short-min '${{ github.event.inputs.intra_short_min }}'"
+          ARGS="${ARGS} --intra-short-max '${{ github.event.inputs.intra_short_max }}'"
+          ARGS="${ARGS} --intra-max-pauses-cap ${{ github.event.inputs.intra_max_pauses_cap }}"
+
+          # Inter options
+          ARGS="${ARGS} --inter-insert-prob ${{ github.event.inputs.inter_insert_prob }}"
+          ARGS="${ARGS} --inter-long-prob ${{ github.event.inputs.inter_long_prob }}"
+          ARGS="${ARGS} --inter-short-max '${{ github.event.inputs.inter_short_max }}'"
+          ARGS="${ARGS} --inter-long-min '${{ github.event.inputs.inter_long_min }}'"
+          ARGS="${ARGS} --inter-long-max '${{ github.event.inputs.inter_long_max }}'"
+
+          # Post buffer
+          ARGS="${ARGS} --post-buffer-min '${{ github.event.inputs.post_buffer_min }}'"
+          ARGS="${ARGS} --post-buffer-max '${{ github.event.inputs.post_buffer_max }}'"
+
+          echo "Running: python merge_macros.py $ARGS"
+          python merge_macros.py $ARGS
+
+      - name: List output files
+        run: ls -la ${{ github.workspace }}/${{ github.event.inputs.output_dir }} || true
+
+      - name: Upload merged ZIP artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
-          path: out/merged_bundle.zip
+          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/merged_bundle.zip
+
+      - name: Upload per-group logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: group-logs
+          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/*_log.txt
