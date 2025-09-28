@@ -28,11 +28,11 @@ on:
         required: true
         default: '2m47s'
       min_pauses:
-        description: 'Min pauses per file (used for within-file rule)'
+        description: 'Min pauses per file (for within-file rule)'
         required: false
         default: '2'
       max_pauses:
-        description: 'Max pauses per file (used for within-file rule)'
+        description: 'Max pauses per file (for within-file rule)'
         required: false
         default: '9'
 
