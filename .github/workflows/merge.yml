@@ -6,30 +6,35 @@ on:
       versions:
         description: 'How many versions per group'
         required: false
-        default: '1'
+        default: '6'
       force:
         description: 'Re-run even if outputs exist (true/false)'
         required: false
         default: 'false'
-      pause_target:
-        description: "Where to put pauses: 'between' files or 'within' files"
+      between_min:
+        description: "Between-files shortest pause (e.g. '10s' or '1m')"
         required: true
-        default: 'between'
-        options:
-          - between
-          - within
-      pause_range:
-        description: "Pause length range MIN-MAX (e.g. '10s-4m53s' or '1m-2m47s')"
+        default: '10s'
+      between_max:
+        description: "Between-files longest pause (e.g. '4m53s')"
         required: true
-        default: '10s-4m53s'
-      pauses_count:
-        description: "Min-Max pauses per file (used for 'within' mode), e.g. '2-9'"
+        default: '4m53s'
+      within_min:
+        description: "Within-file shortest pause (e.g. '1m')"
+        required: true
+        default: '1m'
+      within_max:
+        description: "Within-file longest pause (e.g. '2m47s')"
+        required: true
+        default: '2m47s'
+      min_pauses:
+        description: 'Min pauses per file (used for within-file rule)'
         required: false
-        default: '2-9'
-      advanced_overrides:
-        description: "Optional: extra flags (not used by default), e.g. '--seed 999'"
+        default: '2'
+      max_pauses:
+        description: 'Max pauses per file (used for within-file rule)'
         required: false
-        default: ''
+        default: '9'
 
 jobs:
   merge:
@@ -54,18 +59,14 @@ jobs:
 
       - name: Run merge_macros (compact)
         env:
-          PAUSE_TARGET: ${{ github.event.inputs.pause_target }}
-          PAUSE_RANGE: ${{ github.event.inputs.pause_range }}
-          PAUSES_COUNT: ${{ github.event.inputs.pauses_count }}
-          ADV_OVERRIDES: ${{ github.event.inputs.advanced_overrides }}
+          BETWEEN_MIN: ${{ github.event.inputs.between_min }}
+          BETWEEN_MAX: ${{ github.event.inputs.between_max }}
+          WITHIN_MIN: ${{ github.event.inputs.within_min }}
+          WITHIN_MAX: ${{ github.event.inputs.within_max }}
         run: |
-          ARGS="--versions ${{ github.event.inputs.versions }} --pause-target '${PAUSE_TARGET}' --pause-range '${PAUSE_RANGE}' --pauses-count '${PAUSES_COUNT}'"
+          ARGS="--versions ${{ github.event.inputs.versions }} --between-min '${BETWEEN_MIN}' --between-max '${BETWEEN_MAX}' --within-min '${WITHIN_MIN}' --within-max '${WITHIN_MAX}' --min-pauses ${{ github.event.inputs.min_pauses }} --max-pauses ${{ github.event.inputs.max_pauses }}"
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             ARGS="${ARGS} --force"
-          fi
-          # Append advanced overrides verbatim if provided (use carefully)
-          if [ -n "${ADV_OVERRIDES}" ]; then
-            ARGS="${ARGS} ${ADV_OVERRIDES}"
           fi
           echo "Running: python merge_macros.py $ARGS"
           python merge_macros.py $ARGS
