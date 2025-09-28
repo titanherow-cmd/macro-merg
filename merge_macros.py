@@ -2,28 +2,17 @@
 """
 merge_macros.py
 
-Simplified, hardcoded defaults for easy UI:
-
-- input_dir (hardcoded): 'input'
-- output_dir (hardcoded): 'output'
-- seed (hardcoded): 12345
-
-UI-exposed options (via CLI / workflow):
-- --versions N
-- --force (flag)
-- --pause-target between|within
-- --pause-min <human time, e.g. '10s' or '1m'>
-- --pause-max <human time>
-- --min-pauses <int> (used only for 'within' mode)
-- --max-pauses <int> (used only for 'within' mode)
-
-Behavior:
-- If pause-target == 'between': insert a pause between each adjacent file (EXCEPT before first file).
-  Each pause length is uniform random between pause-min and pause-max.
-- If pause-target == 'within': for each file (EXCEPT first file), choose N between min-pauses and max-pauses
-  (capped by available gaps), pick N distinct gaps and insert pauses there; each pause length sampled between pause-min and pause-max.
-- Deterministic via hardcoded seed (12345). Use --seed to override if desired.
-- Produces per-group logs and merged_bundle.zip in output_dir.
+Compact, updated script keyed to a small workflow UI:
+- Hardcoded defaults: input='input', output='output', seed=12345
+- CLI-exposed (from compact workflow):
+    --versions N
+    --force
+    --pause-target between|within
+    --pause-range "MIN-MAX"  (e.g. "10s-4m53s" or "1m-2m47s")
+    --pauses-count "MIN-MAX" (e.g. "2-9")  (used only with pause-target=within)
+    --extra <string> (optional, ignored by script; for future/advanced overrides)
+- First file (index 0) is exempt from intra-file pauses and from any inter-file pause BEFORE it.
+- Filenames use the new format: {TOTALm}_v{VERSION}_<parts>.json
 """
 
 from pathlib import Path
@@ -36,20 +25,19 @@ from zipfile import ZipFile
 import sys
 import re
 
-# ---------- Hardcoded defaults ----------
-HARDCODED_INPUT_DIR = "input"
-HARDCODED_OUTPUT_DIR = "output"
-HARDCODED_SEED = 12345
+# Hardcoded defaults (per your request)
+DEFAULT_INPUT_DIR = "input"
+DEFAULT_OUTPUT_DIR = "output"
+DEFAULT_SEED = 12345
 
-# ---------- Helpers ----------
+# ----------------- helpers -----------------
 def parse_time_str_to_seconds(s: str):
-    """Parse flexible time like '90', '90s', '1m', '2m47s', '1:30' into integer seconds."""
+    """Parse '90', '90s', '1m', '2m47s', '1:30' into integer seconds."""
     if s is None:
         raise ValueError("time string is None")
     s = str(s).strip().lower()
     if not s:
         raise ValueError("empty time string")
-
     # mm:ss format
     if re.match(r'^\d+:\d{1,2}$', s):
         parts = s.split(':')
@@ -58,37 +46,40 @@ def parse_time_str_to_seconds(s: str):
         if secs >= 60:
             raise ValueError(f"seconds part must be < 60 in '{s}'")
         return mins * 60 + secs
-
-    # combined like '2m47s', '1m', '30s'
+    # combined like '2m47s' or '1m' or '30s'
     m = re.match(r'^(?:(\d+)m)?\s*(?:(\d+)s)?$', s)
     if m:
         mm = int(m.group(1)) if m.group(1) else 0
         ss = int(m.group(2)) if m.group(2) else 0
         return mm * 60 + ss
-
     # numeric like '90' or '90.0' optionally with trailing s
     if re.match(r'^\d+(\.\d+)?s?$', s):
         s2 = s[:-1] if s.endswith('s') else s
         val = float(s2)
         return int(round(val))
-
     raise ValueError(f"Could not parse time value '{s}'")
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Merge macro JSON files with simple pause controls (minimal UI).")
-    p.add_argument("--versions", type=int, default=1, help="How many versions to generate per group (UI exposes this).")
-    p.add_argument("--force", action="store_true", help="Force reprocessing even if outputs exist (UI checkbox).")
-    p.add_argument("--pause-target", choices=("between","within"), required=True,
-                   help="Where to insert pauses: 'between' entire files or 'within' each file.")
-    p.add_argument("--pause-min", required=True, help="Shortest pause (e.g. 10s, 1m, 1:30).")
-    p.add_argument("--pause-max", required=True, help="Longest pause (e.g. 4m53s).")
-    p.add_argument("--min-pauses", type=int, default=2, help="Min pauses per file (used only for 'within').")
-    p.add_argument("--max-pauses", type=int, default=9, help="Max pauses per file (used only for 'within').")
-    # optional overrides (kept but not exposed in simple UI)
-    p.add_argument("--input-dir", default=HARDCODED_INPUT_DIR, help=argparse.SUPPRESS)
-    p.add_argument("--output-dir", default=HARDCODED_OUTPUT_DIR, help=argparse.SUPPRESS)
-    p.add_argument("--seed", type=int, default=HARDCODED_SEED, help=argparse.SUPPRESS)
-    return p.parse_args()
+def parse_range_str_to_seconds(range_str: str):
+    """Parse 'MIN-MAX' where MIN and MAX are human time strings; return (min_secs, max_secs)."""
+    if '-' not in range_str:
+        raise ValueError("range must be in MIN-MAX format, e.g. '10s-4m53s'")
+    left, right = range_str.split('-', 1)
+    min_s = parse_time_str_to_seconds(left.strip())
+    max_s = parse_time_str_to_seconds(right.strip())
+    if min_s > max_s:
+        raise ValueError(f"range min ({min_s}s) > max ({max_s}s)")
+    return min_s, max_s
+
+def parse_count_range(count_str: str):
+    """Parse 'MIN-MAX' where MIN and MAX are integers. Return (min_count, max_count)."""
+    if '-' not in count_str:
+        raise ValueError("pauses count must be in MIN-MAX format, e.g. '2-9'")
+    left, right = count_str.split('-', 1)
+    mi = int(left.strip())
+    ma = int(right.strip())
+    if mi < 0 or ma < 0 or mi > ma:
+        raise ValueError("invalid pauses count range")
+    return mi, ma
 
 def load_json(path: Path):
     try:
@@ -153,24 +144,20 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
-# ---------- Core merging ----------
+# ----------------- core merging -----------------
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
     """
-    rng: a random.Random instance for inter-file and other choices (deterministic)
-    seed_for_intra: base seed used to create per-file intra RNGs
-    args: parsed CLI args
-    global_pause_set: set for uniqueness of inter pauses (keeps older behavior)
+    rng: random.Random for inter-file decisions, post buffers, filename ordering, duplicates, etc.
+    seed_for_intra: integer used to derive per-file intra RNG.
     """
     if not files:
         return None, [], [], {}, [], 0
 
-    m = len(files)
-    # Exclude count behavior from original is not exposed in simple UI; keep it 0 (no excludes)
-    exclude_count = 0
+    # In this compact UI we do not expose excludes; keep none.
     excluded = []
     included = [f for f in files if f not in excluded]
 
-    # duplicates & extras (keep original-ish behavior: duplicate up to 2 files)
+    # keep duplicate behavior similar to before
     dup_files = rng.sample(included or files, min(2, len(included or files)))
     final_files = included + dup_files
     if included:
@@ -187,24 +174,25 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     time_cursor = 0
     play_times = {}
 
+    # convert parsed seconds to ms
     pause_min_ms = args.pause_min_secs * 1000
     pause_max_ms = args.pause_max_secs * 1000
+    min_pauses = getattr(args, "min_pauses", 0)
+    max_pauses = getattr(args, "max_pauses", 0)
 
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # --- INTRA-FILE PAUSES (only for 'within' mode AND NOT for the first file) ---
+        # --- INTRA-FILE PAUSES: only for 'within' and NOT for the first file ---
         if args.pause_target == "within" and idx != 0 and evs:
-            # deterministic intra-file RNG per file/version
-            intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
-            # decide count between min and max, but cap by available gaps
             n_gaps = max(0, len(evs) - 1)
             if n_gaps > 0:
-                chosen_count = intra_rng.randint(args.min_pauses, args.max_pauses)
+                # deterministic intra RNG per file/version
+                intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
+                chosen_count = intra_rng.randint(min_pauses, max_pauses)
                 chosen_count = min(chosen_count, n_gaps)
-                # pick chosen_count distinct gaps
                 chosen_gaps = intra_rng.sample(range(n_gaps), chosen_count)
                 for gap_idx in sorted(chosen_gaps):
                     pause_ms = intra_rng.randint(pause_min_ms, pause_max_ms)
@@ -214,9 +202,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         if intra_log_local:
             pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
 
-        # --- INTER-FILE PAUSES (only for 'between' mode AND NOT before the first file) ---
+        # --- INTER-FILE PAUSES: only for 'between' and NOT before the first file ---
         if args.pause_target == "between" and idx != 0:
-            # choose a pause for the gap between previous and this file
             attempts = 0
             while True:
                 inter_ms = rng.randint(pause_min_ms, pause_max_ms)
@@ -227,44 +214,73 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             time_cursor += inter_ms
             pause_log["inter_file_pauses"].append({"after_file": Path(f).name, "pause_ms": inter_ms, "is_before_index": idx})
 
-        # Apply shifts and append events
+        # --- apply shifts ---
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
-            # compute play time for this file
             max_t = max(int(e.get("Time", 0)) for e in shifted)
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
 
-            # small randomized post-file buffer (10-30s) to separate files slightly; deterministic via rng
+            # post-file buffer (kept 10-30s deterministic)
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
             pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
         else:
             play_times[f] = 0
 
-    parts = [part_from_filename(f) + f"[{round((play_times.get(f,0))/60000)}m] " for f in final_files]
+    # build filename: {TOTALm}_v{version}_ + parts
     total_minutes = round(sum(play_times.values()) / 60000) if play_times else 0
-    merged_fname = "".join(parts).rstrip() + f"_v{version_num}[{total_minutes}m].json"
+    parts = [part_from_filename(f) + f"[{round((play_times.get(f,0))/60000)}m] " for f in final_files]
+    # join parts and strip trailing space
+    parts_joined = "".join(parts).rstrip()
+    merged_fname = f"{total_minutes}m_v{version_num}_" + parts_joined + ".json"
 
     return merged_fname, merged, final_files, pause_log, excluded, total_minutes
+
+# ----------------- entrypoint -----------------
+def parse_args():
+    p = argparse.ArgumentParser(description="Merge macros (compact UI).")
+    p.add_argument("--versions", type=int, default=1, help="How many versions per group")
+    p.add_argument("--force", action="store_true", help="Force reprocessing even if outputs exist")
+    p.add_argument("--pause-target", choices=("between", "within"), required=True,
+                   help="Where to insert pauses: between files or within each file")
+    p.add_argument("--pause-range", required=True,
+                   help="Pause length range MIN-MAX in formats like '10s-4m53s' or '1m-2m47s'")
+    p.add_argument("--pauses-count", required=False, default="2-9",
+                   help="Min-Max pauses per file (only used for 'within' mode), e.g. '2-9'")
+    p.add_argument("--extra", required=False, default="", help=argparse.SUPPRESS)  # optional advanced overrides (ignored)
+    # allow overriding defaults if needed
+    p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help=argparse.SUPPRESS)
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
+    return p.parse_args()
 
 def main():
     args = parse_args()
 
-    # parse pause times
+    # parse pause-range
     try:
-        args.pause_min_secs = parse_time_str_to_seconds(args.pause_min)
-        args.pause_max_secs = parse_time_str_to_seconds(args.pause_max)
-    except ValueError as ve:
-        print(f"ERROR parsing pause times: {ve}", file=sys.stderr)
+        min_s, max_s = parse_range_str_to_seconds(args.pause_range)
+    except Exception as e:
+        print("ERROR parsing pause-range:", e, file=sys.stderr)
+        sys.exit(2)
+    args.pause_min_secs = min_s
+    args.pause_max_secs = max_s
+
+    # parse pauses-count
+    try:
+        min_count, max_count = parse_count_range(args.pauses_count)
+    except Exception as e:
+        print("ERROR parsing pauses-count:", e, file=sys.stderr)
+        sys.exit(2)
+    args.min_pauses = min_count
+    args.max_pauses = max_count
+
+    if args.min_pauses > args.max_pauses:
+        print("ERROR: min_pauses > max_pauses", file=sys.stderr)
         sys.exit(2)
 
-    if args.pause_min_secs > args.pause_max_secs:
-        print("ERROR: pause-min must be <= pause-max", file=sys.stderr)
-        sys.exit(2)
-
-    # hardcoded values (but still allow override via CLI if someone wants)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     seed = args.seed
@@ -272,7 +288,6 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_seed = seed
-    rng = random.Random(base_seed)
     processed = get_previously_processed_files(output_dir/"merged_bundle.zip")
     global_pauses = set()
     zip_items = []
@@ -286,7 +301,7 @@ def main():
 
         log = {"group": grp.name, "versions": []}
         for v in range(1, args.versions + 1):
-            # use rng for most choices; give each version a derived RNG
+            # per-version RNG deterministically derived
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, pauses, excl, total = generate_version(
                 files, version_rng, base_seed, v, args, global_pauses
