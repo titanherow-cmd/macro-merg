@@ -1,4 +1,4 @@
-name: Merge Macros (very simple UI)
+name: Merge Macros (compact UI)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: '1'
       force:
-        description: 'Force run (re-generate even if outputs exist)'
+        description: 'Re-run even if outputs exist (true/false)'
         required: false
         default: 'false'
       pause_target:
@@ -18,22 +18,18 @@ on:
         options:
           - between
           - within
-      pause_min:
-        description: "Shortest pause (examples: 10s, 1m, 1:30)"
+      pause_range:
+        description: "Pause length range MIN-MAX (e.g. '10s-4m53s' or '1m-2m47s')"
         required: true
-        default: '10s'
-      pause_max:
-        description: "Longest pause (examples: 30s, 2m47s, 4m53s)"
-        required: true
-        default: '4m53s'
-      min_pauses:
-        description: 'Minimum pauses per file (used only for "within" mode)'
+        default: '10s-4m53s'
+      pauses_count:
+        description: "Min-Max pauses per file (used for 'within' mode), e.g. '2-9'"
         required: false
-        default: '2'
-      max_pauses:
-        description: 'Maximum pauses per file (used only for "within" mode)'
+        default: '2-9'
+      advanced_overrides:
+        description: "Optional: extra flags (not used by default), e.g. '--seed 999'"
         required: false
-        default: '9'
+        default: ''
 
 jobs:
   merge:
@@ -42,7 +38,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -56,17 +52,20 @@ jobs:
             python -m pip install --upgrade pip
           fi
 
-      - name: Run merge script (simple UI)
+      - name: Run merge_macros (compact)
         env:
           PAUSE_TARGET: ${{ github.event.inputs.pause_target }}
-          PAUSE_MIN: ${{ github.event.inputs.pause_min }}
-          PAUSE_MAX: ${{ github.event.inputs.pause_max }}
-          MIN_PAUSES: ${{ github.event.inputs.min_pauses }}
-          MAX_PAUSES: ${{ github.event.inputs.max_pauses }}
+          PAUSE_RANGE: ${{ github.event.inputs.pause_range }}
+          PAUSES_COUNT: ${{ github.event.inputs.pauses_count }}
+          ADV_OVERRIDES: ${{ github.event.inputs.advanced_overrides }}
         run: |
-          ARGS="--versions ${{ github.event.inputs.versions }} --pause-target '${PAUSE_TARGET}' --pause-min '${PAUSE_MIN}' --pause-max '${PAUSE_MAX}' --min-pauses ${MIN_PAUSES} --max-pauses ${MAX_PAUSES}"
+          ARGS="--versions ${{ github.event.inputs.versions }} --pause-target '${PAUSE_TARGET}' --pause-range '${PAUSE_RANGE}' --pauses-count '${PAUSES_COUNT}'"
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             ARGS="${ARGS} --force"
+          fi
+          # Append advanced overrides verbatim if provided (use carefully)
+          if [ -n "${ADV_OVERRIDES}" ]; then
+            ARGS="${ARGS} ${ADV_OVERRIDES}"
           fi
           echo "Running: python merge_macros.py $ARGS"
           python merge_macros.py $ARGS
