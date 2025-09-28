@@ -1,8 +1,6 @@
-name: Merge Macros
+name: Merge Macros (simple UI)
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       input_dir:
@@ -18,87 +16,29 @@ on:
         required: false
         default: '5'
       seed:
-        description: 'Random seed (leave empty for random)'
+        description: 'Random seed (empty = random)'
         required: false
         default: ''
       force:
         description: 'Force processing even if previously processed'
         required: false
         default: 'false'
-      exclude_count:
-        description: 'How many files to randomly exclude per version'
-        required: false
-        default: '1'
       intra_file_enabled:
         description: 'Enable intra-file pauses'
         required: false
         default: 'false'
-
-      # Intra-file tunables (express times as e.g. 1m, 2m47s, 30s, 1:30, or 90)
-      intra_long_prob:
-        description: 'Percent chance to use long intra pauses (0-100)'
+      preset:
+        description: 'Preset to use for pause rules'
         required: false
-        default: '70'
-      intra_long_min_count:
-        description: 'Min long intra pauses'
+        default: 'default'
+        options:
+          - default
+          - aggressive
+          - relaxed
+      advanced_overrides:
+        description: 'Optional extra CLI flags (e.g. \"--inter-insert-prob 40 --intra-long-min 90s\")'
         required: false
-        default: '2'
-      intra_long_max_count:
-        description: 'Max long intra pauses'
-        required: false
-        default: '9'
-      intra_long_min:
-        description: "Long intra min (e.g. '1m')"
-        required: false
-        default: '1m'
-      intra_long_max:
-        description: "Long intra max (e.g. '2m47s')"
-        required: false
-        default: '2m47s'
-      intra_short_min:
-        description: "Short intra min (e.g. '6s')"
-        required: false
-        default: '6s'
-      intra_short_max:
-        description: "Short intra max (e.g. '30s')"
-        required: false
-        default: '30s'
-      intra_max_pauses_cap:
-        description: 'Hard cap on number of intra pauses per file'
-        required: false
-        default: '9'
-
-      # Inter-file tunables (times in m/s formats)
-      inter_insert_prob:
-        description: 'Percent chance to insert inter-file pause at each file (0-100)'
-        required: false
-        default: '60'
-      inter_long_prob:
-        description: 'Percent chance to choose LONG inter-file band when inserting a pause (0-100)'
-        required: false
-        default: '20'
-      inter_short_max:
-        description: "Inter short band max (e.g. '4m53s')"
-        required: false
-        default: '4m53s'
-      inter_long_min:
-        description: "Inter long band min (e.g. '7m')"
-        required: false
-        default: '7m'
-      inter_long_max:
-        description: "Inter long band max (e.g. '10m')"
-        required: false
-        default: '10m'
-
-      # Post-file buffer
-      post_buffer_min:
-        description: "Per-file post buffer min (e.g. '10s')"
-        required: false
-        default: '10s'
-      post_buffer_max:
-        description: "Per-file post buffer max (e.g. '30s')"
-        required: false
-        default: '30s'
+        default: ''
 
 jobs:
   merge:
@@ -112,7 +52,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies if requirements.txt exists
+      - name: Install dependencies (if any)
         run: |
           if [ -f requirements.txt ]; then
             python -m pip install --upgrade pip
@@ -121,15 +61,15 @@ jobs:
             python -m pip install --upgrade pip
           fi
 
-      - name: Ensure output dir exists
-        run: mkdir -p ${{ github.workspace }}/${{ github.event.inputs.output_dir }}
-
-      - name: Run merge_macros.py
+      - name: Prepare args and run
         env:
           INPUT_DIR: ${{ github.event.inputs.input_dir }}
           OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
+          PRESET: ${{ github.event.inputs.preset }}
+          ADV: ${{ github.event.inputs.advanced_overrides }}
         run: |
-          ARGS="--input-dir '${INPUT_DIR}' --output-dir '${OUTPUT_DIR}' --versions ${{ github.event.inputs.versions }} --exclude-count ${{ github.event.inputs.exclude_count }}"
+          ARGS="--input-dir '${INPUT_DIR}' --output-dir '${OUTPUT_DIR}' --versions '${{ github.event.inputs.versions }}' --exclude-count 1"
+
           if [ -n "${{ github.event.inputs.seed }}" ]; then
             ARGS="${ARGS} --seed ${{ github.event.inputs.seed }}"
           fi
@@ -140,26 +80,27 @@ jobs:
             ARGS="${ARGS} --intra-file-enabled"
           fi
 
-          # Intra options
-          ARGS="${ARGS} --intra-long-prob ${{ github.event.inputs.intra_long_prob }}"
-          ARGS="${ARGS} --intra-long-min-count ${{ github.event.inputs.intra_long_min_count }}"
-          ARGS="${ARGS} --intra-long-max-count ${{ github.event.inputs.intra_long_max_count }}"
-          ARGS="${ARGS} --intra-long-min '${{ github.event.inputs.intra_long_min }}'"
-          ARGS="${ARGS} --intra-long-max '${{ github.event.inputs.intra_long_max }}'"
-          ARGS="${ARGS} --intra-short-min '${{ github.event.inputs.intra_short_min }}'"
-          ARGS="${ARGS} --intra-short-max '${{ github.event.inputs.intra_short_max }}'"
-          ARGS="${ARGS} --intra-max-pauses-cap ${{ github.event.inputs.intra_max_pauses_cap }}"
+          # Preset mapping: minimal, editable here
+          case "${PRESET}" in
+            default)
+              # matches the script defaults
+              PRESET_FLAGS="--intra-long-prob 70 --intra-long-min 1m --intra-long-max 2m47s --intra-long-min-count 2 --intra-long-max-count 9 --intra-short-min 6s --intra-short-max 30s --intra-max-pauses-cap 9 --inter-insert-prob 60 --inter-long-prob 20 --inter-short-max 4m53s --inter-long-min 7m --inter-long-max 10m --post-buffer-min 10s --post-buffer-max 30s"
+              ;;
+            aggressive)
+              # more and longer pauses
+              PRESET_FLAGS="--intra-long-prob 85 --intra-long-min 1m --intra-long-max 3m --intra-long-min-count 3 --intra-long-max-count 9 --intra-short-min 10s --intra-short-max 45s --intra-max-pauses-cap 9 --inter-insert-prob 80 --inter-long-prob 40 --inter-short-max 6m --inter-long-min 8m --inter-long-max 12m --post-buffer-min 15s --post-buffer-max 45s"
+              ;;
+            relaxed)
+              # fewer and shorter pauses
+              PRESET_FLAGS="--intra-long-prob 50 --intra-long-min 1m --intra-long-max 2m --intra-long-min-count 2 --intra-long-max-count 5 --intra-short-min 4s --intra-short-max 20s --intra-max-pauses-cap 5 --inter-insert-prob 40 --inter-long-prob 10 --inter-short-max 3m --inter-long-min 7m --inter-long-max 9m --post-buffer-min 8s --post-buffer-max 20s"
+              ;;
+            *)
+              PRESET_FLAGS=""
+              ;;
+          esac
 
-          # Inter options
-          ARGS="${ARGS} --inter-insert-prob ${{ github.event.inputs.inter_insert_prob }}"
-          ARGS="${ARGS} --inter-long-prob ${{ github.event.inputs.inter_long_prob }}"
-          ARGS="${ARGS} --inter-short-max '${{ github.event.inputs.inter_short_max }}'"
-          ARGS="${ARGS} --inter-long-min '${{ github.event.inputs.inter_long_min }}'"
-          ARGS="${ARGS} --inter-long-max '${{ github.event.inputs.inter_long_max }}'"
-
-          # Post buffer
-          ARGS="${ARGS} --post-buffer-min '${{ github.event.inputs.post_buffer_min }}'"
-          ARGS="${ARGS} --post-buffer-max '${{ github.event.inputs.post_buffer_max }}'"
+          # Append preset flags and any advanced overrides
+          ARGS="${ARGS} ${PRESET_FLAGS} ${ADV}"
 
           echo "Running: python merge_macros.py $ARGS"
           python merge_macros.py $ARGS
