@@ -1,145 +1,243 @@
 #!/usr/bin/env python3
+"""
+merge_macros.py
+
+Features:
+ - Groups = subfolders in --input-dir
+ - Multiple versions per group (--versions)
+ - Random exclusions, duplicates, extra copies (non-adjacent)
+ - Inter-file pauses (60% chance, first file 2–3 min, others 2–13 min, unique)
+ - Optional intra-file pauses (up to 4 per file, 1–3 min)
+ - Shifts event times correctly
+ - Outputs top-level JSON arrays
+ - Per-group logs as .txt
+ - ZIP with per-group folders
+ - Deterministic with --seed
+ - Filename scheme:
+     * Each file part: all letters & numbers from original filename (no .json) + playtime in minutes [Xm], with space
+     * Version suffix: _vN
+     * Total playtime appended: [Ym]
+     * Example: EGfile1[3m] A2file[5m] xyz123[2m]_v1[10m].json
+"""
+
+from pathlib import Path
 import argparse
-import os
+import json
+import glob
 import random
-import zipfile
-from collections import defaultdict
+from copy import deepcopy
+from zipfile import ZipFile
+import sys
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Merge macros into a bundle.")
-    parser.add_argument("--input-dir", required=True, help="Directory containing original files")
-    parser.add_argument("--output-dir", required=True, help="Directory to save merged files")
-    parser.add_argument("--versions", type=int, default=1, help="Number of versions to create")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed")
-    parser.add_argument("--intra-file-enabled", action="store_true", help="Enable intra-file processing")
-    parser.add_argument("--force", action="store_true", help="Force processing even if previously done")
-    return parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--input-dir", required=True, help="Parent directory containing group subfolders")
+    p.add_argument("--output-dir", required=True, help="Directory to write merged files and ZIP")
+    p.add_argument("--versions", type=int, default=5, help="Number of versions per group")
+    p.add_argument("--seed", type=int, default=None, help="Base random seed (optional)")
+    p.add_argument("--force", action="store_true", help="Force processing groups even if previously processed")
+    p.add_argument("--exclude-count", type=int, default=1, help="How many files to randomly exclude per version")
+    p.add_argument("--intra-file-enabled", action="store_true", help="Enable intra-file random pauses")
+    p.add_argument("--intra-file-max", type=int, default=4, help="Max intra-file pauses per file")
+    p.add_argument("--intra-file-min-mins", type=int, default=1, help="Min intra-file pause length (minutes)")
+    p.add_argument("--intra-file-max-mins", type=int, default=3, help="Max intra-file pause length (minutes)")
+    return p.parse_args()
 
-def merge_files(input_dir, output_dir, versions, intra_enabled, force):
-    if versions < 1:
-        raise ValueError("Versions must be >= 1")
-    os.makedirs(output_dir, exist_ok=True)
+def load_json(path: Path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as e:
+        print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
+        return None
 
-    for i in range(1, versions + 1):
-        version_folder = os.path.join(output_dir, f"version_{i}")
-        os.makedirs(version_folder, exist_ok=True)
+def normalize_json(data):
+    if isinstance(data, dict) and "events" in data and isinstance(data["events"], list):
+        return data["events"]
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("items","entries","records","actions","eventsList","events_array"):
+            if k in data and isinstance(data[k], list):
+                return data[k]
+        return [data]
+    return []
 
-        for root, _, files in os.walk(input_dir):
-            for filename in files:
-                input_path = os.path.join(root, filename)
+def find_groups(input_dir: Path):
+    return [p for p in sorted(input_dir.iterdir()) if p.is_dir()]
 
-                # Compute relative path from input_dir so we can reconstruct structure
-                rel_dir = os.path.relpath(root, input_dir)  # '.' if root==input_dir
-                if rel_dir == ".":
-                    rel_dir = ""  # will write directly under version folder (grouping handles root)
-                output_subdir = os.path.join(version_folder, rel_dir) if rel_dir else version_folder
-                os.makedirs(output_subdir, exist_ok=True)
+def find_json_files(group_path: Path):
+    return sorted(glob.glob(str(group_path / "*.json")))
 
-                base, ext = os.path.splitext(filename)
-                output_file = os.path.join(output_subdir, f"{base}_v{i}{ext}")
+def apply_shifts(events, shift_ms):
+    shifted = []
+    for e in events:
+        try:
+            t = int(e.get("Time", 0))
+        except Exception:
+            try: 
+                t = int(float(e.get("Time", 0)))
+            except: 
+                t = 0
+        new = {
+            "Type": e.get("Type"),
+            "Time": t + int(shift_ms),
+            "X": e.get("X"),
+            "Y": e.get("Y"),
+            "Delta": e.get("Delta"),
+            "KeyCode": e.get("KeyCode")
+        }
+        shifted.append(new)
+    return shifted
 
-                if not force and os.path.exists(output_file):
-                    print(f"Skipping {output_file}, already exists.")
-                    continue
+def get_previously_processed_files(zip_path: Path):
+    processed = set()
+    if zip_path.exists():
+        try:
+            with ZipFile(zip_path, "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith(".json") and not name.endswith("_log.txt"):
+                        processed.add(Path(name).name)
+        except:
+            pass
+    return processed
 
-                print(f"Processing {input_path} -> {output_file}")
+def part_from_filename(fname: str):
+    # Keep all letters and numbers from the filename **without the extension**
+    stem = Path(fname).stem
+    return ''.join(ch for ch in stem if ch.isalnum())
 
-                # Write in chunks to avoid truncation
-                with open(input_path, 'rb') as f_in, open(output_file, 'wb') as f_out:
-                    while chunk := f_in.read(1024 * 1024):
-                        f_out.write(chunk)
-                    # context managers ensure flush/close
+def insert_intra_pauses_fixed(events, rng, max_pauses, min_minutes, max_minutes, intra_log):
+    if not events or max_pauses <= 0:
+        return deepcopy(events)
+    evs = deepcopy(events)
+    n = len(evs)
+    if n < 2:
+        return evs
+    k = rng.randint(0, min(max_pauses, n-1))
+    if k == 0:
+        return evs
+    chosen = rng.sample(range(n-1), k)
+    for gap_idx in sorted(chosen):
+        pause_ms = rng.randint(min_minutes, max_minutes) * 60000
+        for j in range(gap_idx+1, n):
+            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+        intra_log.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
+    return evs
 
-                # Optional intra-file processing
-                if intra_enabled:
-                    with open(output_file, 'ab') as f_out:
-                        f_out.write(b"\n# Intra-file processing done\n")
+def generate_version(files, seed, global_pause_set, version_num, exclude_count,
+                     intra_enabled, intra_max, intra_min_mins, intra_max_mins):
+    rng = random.Random(seed)
+    if not files:
+        return None, [], [], {}, [], 0
+    m = len(files)
+    exclude_count = max(0, min(exclude_count, m-1))
+    excluded = rng.sample(files, k=exclude_count) if exclude_count else []
+    included = [f for f in files if f not in excluded]
+    dup_files = rng.sample(included or files, min(2, len(included or files)))
+    final_files = included + dup_files
+    if included:
+        extra_files = rng.sample(included, k=rng.choice([1,2]))
+        for ef in extra_files:
+            pos = rng.randrange(len(final_files)+1)
+            if pos > 0 and final_files[pos-1] == ef:
+                pos += 1
+            final_files.insert(min(pos, len(final_files)), ef)
+    rng.shuffle(final_files)
 
-                print(f"Merged file size: {os.path.getsize(output_file)} bytes")
+    merged, pause_log, time_cursor = [], {"inter_file_pauses":[], "intra_file_pauses":[]}, 0
+    play_times = {}
 
-def _top_level_group_from_relpath(relpath):
-    """
-    Given a relative path like:
-        'folderA/sub/f.txt' -> 'folderA'
-        'file_at_root.txt'  -> '__root__'
-        ''                  -> '__root__' (edge)
-    """
-    if not relpath or relpath == ".":
-        return "__root__"
-    parts = relpath.split(os.sep)
-    return parts[0] if parts[0] else "__root__"
+    for idx, f in enumerate(final_files):
+        evs = normalize_json(load_json(Path(f)) or [])
+        intra_log_local = []
+        if intra_enabled and evs:
+            intra_rng = random.Random((hash(f)&0xffffffff) ^ (seed+version_num))
+            evs = insert_intra_pauses_fixed(evs, intra_rng, intra_max,
+                                            intra_min_mins, intra_max_mins, intra_log_local)
+        if intra_log_local:
+            pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
+        if rng.random() < 0.6:
+            while True:
+                inter_ms = rng.randint(120000,180000) if idx==0 else rng.randint(120000,780000)
+                if inter_ms not in global_pause_set:
+                    global_pause_set.add(inter_ms)
+                    break
+            time_cursor += inter_ms
+            pause_log["inter_file_pauses"].append({"after_file": Path(f).name,
+                                                   "pause_ms": inter_ms,
+                                                   "is_before_index": idx})
+        shifted = apply_shifts(evs, time_cursor)
+        merged.extend(shifted)
+        if shifted:
+            max_t = max(int(e.get("Time", 0)) for e in shifted)
+            min_t = min(int(e.get("Time", 0)) for e in shifted)
+            play_times[f] = max_t - min_t
 
-def create_grouped_zip(input_dir, output_dir, zip_name="merged_bundle.zip"):
-    """
-    Create a zip that groups merged files by the original top-level subfolder.
-    Only write groups that have at least one file (so __root__ won't appear if empty).
-    """
-    zip_path = os.path.join(output_dir, zip_name)
-    print(f"Creating grouped zip: {zip_path}")
+            # Randomized post-file buffer between 10s and 30s (in ms), deterministic via rng
+            buffer_ms = rng.randint(10_000, 30_000)
+            time_cursor = max_t + buffer_ms
 
-    # Collect files grouped by top-level original folder
-    groups = defaultdict(list)  # group_name -> list of (file_path, arcname)
-    for root, _, files in os.walk(output_dir):
-        for file in files:
-            if file == zip_name:
-                continue  # skip the zip itself
-            file_path = os.path.join(root, file)
-            # Path relative to output_dir, e.g. 'version_1/folderA/sub/file_v1.ext'
-            rel_to_out = os.path.relpath(file_path, output_dir)
-            parts = rel_to_out.split(os.sep)
+            # record the buffer in the pause log so you can inspect it later
+            pause_log.setdefault("post_file_buffers", []).append({
+                "file": Path(f).name,
+                "buffer_ms": buffer_ms
+            })
+        else:
+            play_times[f] = 0
 
-            if len(parts) >= 2 and parts[0].startswith("version_"):
-                # parts[1:] correspond to original paths inside that version
-                orig_rel_path = os.path.join(*parts[1:]) if len(parts) > 1 else ""
-                orig_rel_dir = os.path.dirname(orig_rel_path)
-            else:
-                # Unexpected placement (file directly under out/): treat as root-origin
-                orig_rel_path = rel_to_out
-                orig_rel_dir = os.path.dirname(orig_rel_path)
-
-            top_group = _top_level_group_from_relpath(orig_rel_dir)
-            # Arcname within zip should be: <top_group>/<rel_to_out>, preserving versions and subpaths
-            arcname = os.path.join(top_group, rel_to_out)
-            groups[top_group].append((file_path, arcname))
-
-    files_added = 0
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        # Write only groups that have files (so empty __root__ won't be created)
-        for group_name in sorted(groups.keys()):
-            entries = groups[group_name]
-            if not entries:
-                continue
-            for file_path, arcname in entries:
-                zipf.write(file_path, arcname)
-                files_added += 1
-
-    if files_added == 0:
-        print("Warning: No files were added to the zip!")
-    else:
-        print(f"Grouped zip created successfully with {files_added} files, size: {os.path.getsize(zip_path)} bytes")
-
-    return zip_path
+    parts = [part_from_filename(f) + f"[{round((play_times[f] or 0)/60000)}m] "
+             for f in final_files]  # space after each part
+    total_minutes = round(sum(play_times.values()) / 60000)
+    merged_fname = "".join(parts).rstrip() + f"_v{version_num}[{total_minutes}m].json"
+    return merged_fname, merged, final_files, pause_log, excluded, total_minutes
 
 def main():
-    args = parse_args()
+    a = parse_args()
+    in_dir, out_dir = Path(a.input_dir), Path(a.output_dir)
+    
+    # Ensure output folder exists
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.seed is not None:
-        random.seed(args.seed)
+    base_seed = a.seed if a.seed is not None else random.randrange(2**31)
+    processed = get_previously_processed_files(out_dir/"merged_bundle.zip")
+    global_pauses, zip_items = set(), []
 
-    merge_files(args.input_dir, args.output_dir, args.versions, args.intra_file_enabled, args.force)
+    for gi, grp in enumerate(find_groups(in_dir)):
+        files = find_json_files(grp)
+        if not files:
+            continue
+        if not a.force and all(Path(f).name in processed for f in files):
+            continue
+        log = {"group": grp.name, "versions": []}
+        for v in range(1, a.versions+1):
+            fname, merged, finals, pauses, excl, total = generate_version(
+                files, base_seed+gi*1000+v, global_pauses, v,
+                a.exclude_count, a.intra_file_enabled, a.intra_file_max,
+                a.intra_file_min_mins, a.intra_file_max_mins)
+            if not fname:
+                continue
+            out_file_path = out_dir / fname
+            with open(out_file_path, "w", encoding="utf-8") as fh:
+                json.dump(merged, fh, indent=2, ensure_ascii=False)
+            zip_items.append((grp.name, out_file_path))
+            log["versions"].append({"version": v, "filename": fname,
+                                    "excluded": [Path(x).name for x in excl],
+                                    "final_order": [Path(x).name for x in finals],
+                                    "pause_details": pauses,
+                                    "total_minutes": total})
+        log_file_path = out_dir / f"{grp.name}_log.txt"
+        with open(log_file_path, "w", encoding="utf-8") as fh:
+            json.dump(log, fh, indent=2, ensure_ascii=False)
+        zip_items.append((grp.name, log_file_path))
 
-    print("Files in output directory before zipping:")
-    for root, _, files in os.walk(args.output_dir):
-        for f in files:
-            print(f" - {os.path.relpath(os.path.join(root, f), args.output_dir)}")
+    # --- Create ZIP ---
+    zip_path = out_dir / "merged_bundle.zip"
+    with ZipFile(zip_path, "w") as zf:
+        for group_name, file_path in zip_items:
+            zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
-    zip_file = create_grouped_zip(args.input_dir, args.output_dir)
-
-    # Debug: list contents of zip
-    print("Contents of grouped merged zip:")
-    with zipfile.ZipFile(zip_file, 'r') as zipf:
-        for f in zipf.namelist():
-            print(f" - {f}")
+    print("DONE.")
 
 if __name__ == "__main__":
     main()
