@@ -1,117 +1,43 @@
 name: Merge Macros
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      input_dir:
-        description: 'Input directory (relative to repo root)'
-        required: true
-        default: 'input'
-      output_dir:
-        description: 'Output directory (relative to repo root)'
-        required: true
-        default: 'output'
-      versions:
-        description: 'Number of versions per group'
-        required: false
-        default: '5'
-      seed:
-        description: 'Random seed (empty for random)'
-        required: false
-        default: ''
       force:
-        description: 'Force processing even if previously processed (true/false)'
+        description: 'Force processing groups even if previously processed'
         required: false
         default: 'false'
-      exclude_count:
-        description: 'How many files to randomly exclude per version'
-        required: false
-        default: '1'
-      intra_file_enabled:
-        description: 'Enable intra-file pauses (true/false)'
-        required: false
-        default: 'false'
-      python-version:
-        description: 'Python version to use'
-        required: false
-        default: '3.11'
+        type: boolean
 
 jobs:
-  merge:
+  merge-macros:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [ ${{ github.event.inputs.python-version || '3.11' }} ]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.x"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies (if any)
+      - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-          else
-            python -m pip install --upgrade pip
-          fi
-
-      - name: Ensure output dir exists
-        run: mkdir -p ${{ github.workspace }}/${{ github.event.inputs.output_dir }}
+          python -m pip install --upgrade pip
 
       - name: Run merge_macros.py
-        # Using workflow_dispatch inputs (or defaults)
-        env:
-          INPUT_DIR: ${{ github.event.inputs.input_dir }}
-          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
         run: |
-          # Build CLI args from inputs
-          ARGS="--input-dir '${INPUT_DIR}' --output-dir '${OUTPUT_DIR}' --versions ${VERSION:-${{ github.event.inputs.versions }}} --exclude-count ${EXCLUDE:-${{ github.event.inputs.exclude_count }}}"
-          # Add seed if provided
-          if [ -n "${{ github.event.inputs.seed }}" ]; then
-            ARGS="${ARGS} --seed ${{ github.event.inputs.seed }}"
-          fi
-          # Force flag
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            ARGS="${ARGS} --force"
-          fi
-          # Intra-file pauses
-          if [ "${{ github.event.inputs.intra_file_enabled }}" = "true" ]; then
-            ARGS="${ARGS} --intra-file-enabled"
-          fi
-          echo "Running: python merge_macros.py $ARGS"
-          python merge_macros.py $ARGS
+          python merge_macros.py \
+            --input-dir originals \
+            --output-dir out \
+            --versions 5 \
+            --seed $RANDOM \
+            --intra-file-enabled \
+            $([[ "${{ github.event.inputs.force }}" == 'true' ]] && echo "--force" || echo "")
 
-      - name: List output files for debugging
-        run: ls -la ${{ github.workspace }}/${{ github.event.inputs.output_dir }} || true
-
-      - name: Upload merged ZIP artifact
-        if: always()
+      - name: Upload merged bundle
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
-          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/merged_bundle.zip
-
-      - name: Upload per-group logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: group-logs
-          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/*_log.txt
+          path: out/merged_bundle.zip
