@@ -46,13 +46,28 @@ jobs:
       - name: Debug output directory
         run: |
           echo "Listing contents of out/:"
-          ls -lh out/ || echo "Output directory is empty"
+          ls -lah out/ || echo "Output directory is empty"
 
           echo "Listing all files recursively:"
           find out/ -type f || echo "No files found"
 
           echo "Listing all .zip files:"
           ls -lh out/*.zip || echo "No zip files found"
+
+      - name: Ensure merged zip exists and is not empty
+        run: |
+          ZIP=out/merged_bundle.zip
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: $ZIP not found. Directory listing:"
+            ls -lah out || true
+            exit 1
+          fi
+          if [ ! -s "$ZIP" ]; then
+            echo "ERROR: $ZIP exists but is empty (size=0)."
+            ls -lah "$ZIP"
+            exit 1
+          fi
+          echo "$ZIP is present and non-empty (size: $(stat -c%s "$ZIP") bytes)."
 
       - name: Upload merged bundle
         uses: actions/upload-artifact@v4
