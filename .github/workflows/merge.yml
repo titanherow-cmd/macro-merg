@@ -1,76 +1,117 @@
 name: Merge Macros
 
 on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      force:
-        description: 'Force processing groups even if previously processed'
+      input_dir:
+        description: 'Input directory (relative to repo root)'
+        required: true
+        default: 'input'
+      output_dir:
+        description: 'Output directory (relative to repo root)'
+        required: true
+        default: 'output'
+      versions:
+        description: 'Number of versions per group'
         required: false
-        default: false
-        type: boolean  # Checkbox in GitHub UI
+        default: '5'
+      seed:
+        description: 'Random seed (empty for random)'
+        required: false
+        default: ''
+      force:
+        description: 'Force processing even if previously processed (true/false)'
+        required: false
+        default: 'false'
+      exclude_count:
+        description: 'How many files to randomly exclude per version'
+        required: false
+        default: '1'
+      intra_file_enabled:
+        description: 'Enable intra-file pauses (true/false)'
+        required: false
+        default: 'false'
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.11'
 
 jobs:
-  merge-macros:
+  merge:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ ${{ github.event.inputs.python-version || '3.11' }} ]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
         with:
-          python-version: "3.x"
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies (if any)
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          else
+            python -m pip install --upgrade pip
+          fi
+
+      - name: Ensure output dir exists
+        run: mkdir -p ${{ github.workspace }}/${{ github.event.inputs.output_dir }}
 
       - name: Run merge_macros.py
+        # Using workflow_dispatch inputs (or defaults)
+        env:
+          INPUT_DIR: ${{ github.event.inputs.input_dir }}
+          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
         run: |
-          CMD="python merge_macros.py \
-            --input-dir 'originals' \
-            --output-dir 'out' \
-            --versions 5 \
-            --seed $RANDOM \
-            --intra-file-enabled"
-
-          if [ "${{ github.event.inputs.force }}" == "true" ]; then
-            CMD="$CMD --force"
+          # Build CLI args from inputs
+          ARGS="--input-dir '${INPUT_DIR}' --output-dir '${OUTPUT_DIR}' --versions ${VERSION:-${{ github.event.inputs.versions }}} --exclude-count ${EXCLUDE:-${{ github.event.inputs.exclude_count }}}"
+          # Add seed if provided
+          if [ -n "${{ github.event.inputs.seed }}" ]; then
+            ARGS="${ARGS} --seed ${{ github.event.inputs.seed }}"
           fi
-
-          echo "Running command: $CMD"
-          eval "$CMD"
-
-      - name: Debug output directory
-        run: |
-          echo "Listing contents of out/:"
-          ls -lah out/ || echo "Output directory is empty"
-
-          echo "Listing all files recursively:"
-          find out/ -type f || echo "No files found"
-
-          echo "Listing all .zip files:"
-          ls -lh out/*.zip || echo "No zip files found"
-
-      - name: Ensure merged zip exists and is not empty
-        run: |
-          ZIP=out/merged_bundle.zip
-          if [ ! -f "$ZIP" ]; then
-            echo "ERROR: $ZIP not found. Directory listing:"
-            ls -lah out || true
-            exit 1
+          # Force flag
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="${ARGS} --force"
           fi
-          if [ ! -s "$ZIP" ]; then
-            echo "ERROR: $ZIP exists but is empty (size=0)."
-            ls -lah "$ZIP"
-            exit 1
+          # Intra-file pauses
+          if [ "${{ github.event.inputs.intra_file_enabled }}" = "true" ]; then
+            ARGS="${ARGS} --intra-file-enabled"
           fi
-          echo "$ZIP is present and non-empty (size: $(stat -c%s "$ZIP") bytes)."
+          echo "Running: python merge_macros.py $ARGS"
+          python merge_macros.py $ARGS
 
-      - name: Upload merged bundle
+      - name: List output files for debugging
+        run: ls -la ${{ github.workspace }}/${{ github.event.inputs.output_dir }} || true
+
+      - name: Upload merged ZIP artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
-          path: out/merged_bundle.zip
+          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/merged_bundle.zip
+
+      - name: Upload per-group logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: group-logs
+          path: ${{ github.workspace }}/${{ github.event.inputs.output_dir }}/*_log.txt
