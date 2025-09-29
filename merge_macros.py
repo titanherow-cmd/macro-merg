@@ -2,9 +2,14 @@
 """
 merge_macros.py
 
-Merged script with defensive fixes and recursive group discovery.
-Filename format changed so total merged time is at the start inside {}
-Example: {34m}v1.EGfile1[3m] A2file[5m] xyz123[2m].json
+Features:
+ - Recursively finds groups under 'originals' (default input)
+ - Randomly exclude files per generated version; max controlled by --exclude-max
+ - Avoids adjacent duplicates where possible
+ - Ensures inter-file pause values are unique across the run to reduce "erratic clicking"
+ - Intra-file pauses inserted (except for first file) using a deterministic per-file RNG
+ - Safe random.sample usage and other robustness fixes
+ - Filenames: total minutes at start in braces, e.g. {34m}v1.EGfile1[3m] ...
 """
 from pathlib import Path
 import argparse
@@ -21,8 +26,9 @@ import os
 DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
+DEFAULT_EXCLUDE_MAX = 3
 
-# --- time parsing ---
+# ---------- time parsing ----------
 def parse_time_str_to_seconds(s: str):
     if s is None:
         raise ValueError("time string is None")
@@ -57,7 +63,7 @@ def parse_time_str_to_seconds(s: str):
 
     raise ValueError(f"Could not parse time value '{s}'")
 
-# --- I/O helpers ---
+# ---------- I/O helpers ----------
 def load_json(path: Path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -82,7 +88,7 @@ def part_from_filename(fname: str):
     stem = Path(fname).stem
     return ''.join(ch for ch in stem if ch.isalnum())
 
-# --- group discovery: recursive ---
+# --- recursive group discovery ---
 def find_groups_recursive(input_dir: Path):
     groups = []
     for root, dirs, files in os.walk(input_dir):
@@ -128,7 +134,7 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
-# --- avoid adjacent duplicates helper ---
+# --- helper to avoid adjacent duplicates ---
 def _find_non_adjacent_insertion_pos(final_files, candidate):
     n = len(final_files)
     for pos in range(0, n+1):
@@ -146,14 +152,37 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
             return pos
     return n//2
 
-# --- core merging ---
+# ---------- core merging ----------
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
+    """
+    files: list of file paths (strings)
+    rng: per-version random.Random
+    seed_for_intra: base seed for per-file intra RNG generation
+    """
     if not files:
         return None, [], [], {}, [], 0
 
-    excluded = []
-    included = [f for f in files if f not in excluded]
+    # --- RANDOM EXCLUSION: choose 1..max_excl files to exclude (clamped) ---
+    if len(files) <= 1:
+        excluded = []
+        included = list(files)
+    else:
+        # max_excl controlled by CLI --exclude-max
+        max_excl = min(args.exclude_max, len(files)-1)
+        # ensure at least 1 (if max_excl >= 1)
+        if max_excl >= 1:
+            excl_count = rng.randint(1, max_excl)
+            excluded = rng.sample(files, excl_count) if excl_count > 0 else []
+        else:
+            excluded = []
+        included = [f for f in files if f not in excluded]
 
+    # if somehow included empty (defensive), restore at least one
+    if not included and files:
+        included = [files[0]]
+        excluded = [f for f in files if f != files[0]]
+
+    # --- duplicates & extras, operate on included ---
     population = included or files
     dup_count = min(2, len(population))
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
@@ -180,12 +209,13 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     within_max_p = max(1, args.within_max_pauses)
     between_max_p = max(1, args.between_max_pauses)
 
+    # Use the per-version rng for inter-file pauses selection; ensure uniqueness via global_pause_set
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE (skip first file)
+        # INTRA-FILE: apply for all except first file
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -196,20 +226,33 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                 chosen_gaps = intra_rng.sample(range(n_gaps), sample_k) if sample_k > 0 else []
                 for gap_idx in sorted(chosen_gaps):
                     pause_ms = intra_rng.randint(1000, within_max_ms)
+                    # shift subsequent events
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
                     intra_log_local.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
         if intra_log_local:
             pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
 
-        # INTER-FILE (before this file, except first)
+        # INTER-FILE: before this file (except before first)
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
             total_inter_ms = 0
             inter_list = []
             for i in range(k):
-                inter_ms = rng.randint(1000, between_max_ms)
+                # pick an inter_ms not used elsewhere in this run if possible
+                attempts = 0
+                inter_ms = None
+                while attempts < 200:
+                    candidate = rng.randint(1000, between_max_ms)
+                    if candidate not in global_pause_set:
+                        inter_ms = candidate
+                        global_pause_set.add(candidate)
+                        break
+                    attempts += 1
+                if inter_ms is None:
+                    # fallback to any value
+                    inter_ms = rng.randint(1000, between_max_ms)
                 total_inter_ms += inter_ms
                 inter_list.append(inter_ms)
             time_cursor += total_inter_ms
@@ -223,6 +266,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
 
+            # post-file buffer (10-30s)
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
             pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
@@ -232,16 +276,13 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
 
-    # parts list — each part ends with a space to separate names
     parts = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m] " for f in final_files]
     parts_joined = "".join(parts).rstrip()
-
-    # NEW FILENAME SCHEME: put total minutes in {} at start, then vN., then the parts
     merged_fname = f"{{{total_minutes}m}}v{version_num}." + parts_joined + ".json"
 
     return merged_fname, merged, final_files, pause_log, excluded, total_minutes
 
-# --- CLI ---
+# ---------- CLI ----------
 def parse_args():
     p = argparse.ArgumentParser(description="Merge macros - recursive group discovery (defaults to 'originals').")
     p.add_argument("--versions", type=int, default=6, help="How many versions per group")
@@ -250,6 +291,7 @@ def parse_args():
     p.add_argument("--within-max-pauses", type=int, required=True, help="Max number of pauses to add inside each file")
     p.add_argument("--between-max-time", required=True, help="Between-files max pause time (e.g. 10s, 1m)")
     p.add_argument("--between-max-pauses", type=int, required=True, help="Max number of pauses to insert between files (usually 1)")
+    p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (min 1)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
@@ -257,6 +299,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # validate exclude-max
+    if args.exclude_max is None or args.exclude_max < 1:
+        print("ERROR: --exclude-max must be an integer >= 1", file=sys.stderr)
+        sys.exit(2)
 
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
