@@ -1,4 +1,4 @@
-name: Merge Macros (compact UI) - minimal
+name: Merge Macros (compact UI) - originals
 
 on:
   workflow_dispatch:
@@ -38,45 +38,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show originals folder (debug)
+        run: |
+          echo "=== originals tree ==="
+          if [ -d originals ]; then
+            find originals -maxdepth 4 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
+          else
+            echo "No originals/ folder found in repo root."
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Ensure input folder exists
-        run: |
-          mkdir -p input
-          echo "Ensured input/ exists."
-
-      - name: Create small sample input if none present
-        run: |
-          found=0
-          for d in input/*/ ; do
-            if [ -d "$d" ]; then
-              shopt -s nullglob
-              files=( "$d"/*.json )
-              if [ "${#files[@]}" -gt 0 ]; then
-                found=1
-                break
-              fi
-            fi
-          done
-          if [ "$found" -eq 0 ]; then
-            mkdir -p input/group1
-            # create a tiny JSON file using printf (avoid heredoc)
-            printf '[\n  {"Type":"Move","Time":0,"X":100,"Y":100},\n  {"Type":"Click","Time":500,"X":100,"Y":100}\n]\n' > input/group1/example.json
-            echo "Created sample input/group1/example.json"
-          else
-            echo "Found existing input JSON(s); not creating sample."
-          fi
-
-      - name: Run merge_macros.py
+      - name: Run merge_macros.py (direct args)
         env:
+          FORCE_CHOICE: ${{ github.event.inputs.force }}
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
-          FORCE_CHOICE: ${{ github.event.inputs.force }}
         run: |
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
@@ -91,28 +73,21 @@ jobs:
           echo "=== output ==="
           ls -la output || true
 
-      - name: Ensure placeholder log exists if none
+      - name: Ensure placeholder log if none
         run: |
           shopt -s nullglob
           logs=(output/*_log.txt)
           if [ "${#logs[@]}" -eq 0 ]; then
             mkdir -p output
-            echo '{"notice":"placeholder log created by workflow"}' > output/placeholder_log.txt
-            echo "Created output/placeholder_log.txt"
+            echo '{"notice":"placeholder log"}' > output/placeholder_log.txt
+            echo "Created placeholder log"
           else
-            echo "Found ${#logs[@]} log(s)."
+            echo "Found logs"
           fi
 
-      - name: Upload merged bundle (zip)
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
           path: output/merged_bundle.zip
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: group-logs
-          path: output/*_log.txt
