@@ -43,14 +43,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Ensure input/ exists (avoid failure)
       - name: Ensure input folder exists
         run: |
           mkdir -p input
           echo "Ensured input/ exists. Place group subfolders with .json files inside input/."
 
-      # If input/ has no group subfolders with .json, create a tiny example so the script will produce outputs.
-      # This is optional but helpful for first-time runs. It will not overwrite existing files.
       - name: Create sample input if empty
         run: |
           shopt -s nullglob
@@ -81,7 +78,7 @@ JSON
             echo "Found existing group JSON(s); not creating a sample."
           fi
 
-      - name: Run merge_macros (compact) - direct args (safe quoting)
+      - name: Run merge_macros (compact) - direct args
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
@@ -106,7 +103,6 @@ JSON
           echo "=== output/*_log.txt ==="
           ls -la output/*_log.txt || true
 
-      # If no log files exist, create a small placeholder so artifact upload has something to pick up.
       - name: Ensure at least one log file exists (placeholder if necessary)
         run: |
           shopt -s nullglob
