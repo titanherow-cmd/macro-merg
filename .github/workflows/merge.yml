@@ -45,15 +45,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies (if any)
-        run: |
-          if [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-          else
-            python -m pip install --upgrade pip
-          fi
-
       - name: Run merge_macros (compact) - direct args (no quoting bug)
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
