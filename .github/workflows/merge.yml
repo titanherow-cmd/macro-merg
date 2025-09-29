@@ -1,4 +1,4 @@
-name: Merge Macros (compact UI)
+name: Merge Macros (compact UI) - robust
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ on:
         options:
           - Yes
           - No
-      # WITHIN (time first, then pauses)
       within_max_time:
         description: "Within-file maximum pause time (examples: '1.30', '1:30', '1m30s')"
         required: true
@@ -23,7 +22,6 @@ on:
         description: "Max pauses to insert inside each file (we pick 1..this)"
         required: true
         default: '5'
-      # BETWEEN (time first, then pauses)
       between_max_time:
         description: "Between-files maximum pause time (examples: '10s', '1m')"
         required: true
@@ -45,12 +43,45 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Ensure input folder exists (avoid failure if missing)
+      # Ensure input/ exists (avoid failure)
+      - name: Ensure input folder exists
         run: |
           mkdir -p input
           echo "Ensured input/ exists. Place group subfolders with .json files inside input/."
 
-      - name: Run merge_macros (compact) - direct args (no quoting bug)
+      # If input/ has no group subfolders with .json, create a tiny example so the script will produce outputs.
+      # This is optional but helpful for first-time runs. It will not overwrite existing files.
+      - name: Create sample input if empty
+        run: |
+          shopt -s nullglob
+          groups=(input/*)
+          jsons_found=0
+          for g in "${groups[@]:-}"; do
+            if [ -d "$g" ]; then
+              shopt -s nullglob
+              files=("$g"/*.json)
+              if [ "${#files[@]}" -gt 0 ]; then
+                jsons_found=1
+                break
+              fi
+            fi
+          done
+          if [ "$jsons_found" -eq 0 ]; then
+            echo "No groups/json found under input/. Creating sample input/group1/example.json for test runs."
+            mkdir -p input/group1
+            cat > input/group1/example.json <<'JSON'
+[
+  {"Type":"Move","Time":0,"X":100,"Y":100},
+  {"Type":"Click","Time":500,"X":100,"Y":100},
+  {"Type":"Move","Time":1500,"X":200,"Y":200},
+  {"Type":"Click","Time":2000,"X":200,"Y":200}
+]
+JSON
+          else
+            echo "Found existing group JSON(s); not creating a sample."
+          fi
+
+      - name: Run merge_macros (compact) - direct args (safe quoting)
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
@@ -66,10 +97,28 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             $( [ "${FORCE_CHOICE}" = "Yes" ] && echo "--force" || echo "" )
 
-      - name: List outputs
-        run: ls -la output || true
+      - name: Show output dir contents
+        run: |
+          echo "=== output/ ==="
+          ls -la output || true
+          echo "=== output/*.json ==="
+          ls -la output/*.json || true
+          echo "=== output/*_log.txt ==="
+          ls -la output/*_log.txt || true
 
-      - name: Upload merged bundle
+      # If no log files exist, create a small placeholder so artifact upload has something to pick up.
+      - name: Ensure at least one log file exists (placeholder if necessary)
+        run: |
+          shopt -s nullglob
+          logs=(output/*_log.txt)
+          if [ "${#logs[@]}" -eq 0 ]; then
+            echo '{"notice":"no logs were generated; workflow created this placeholder"}' > output/placeholder_log.txt
+            echo "Created output/placeholder_log.txt"
+          else
+            echo "Found ${#logs[@]} log(s)."
+          fi
+
+      - name: Upload merged bundle (zip)
         if: always()
         uses: actions/upload-artifact@v4
         with:
