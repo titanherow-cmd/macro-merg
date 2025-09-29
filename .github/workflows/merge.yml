@@ -45,6 +45,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Ensure input folder exists (avoid failure if missing)
+        run: |
+          mkdir -p input
+          echo "Ensured input/ exists. Place group subfolders with .json files inside input/."
+
       - name: Run merge_macros (compact) - direct args (no quoting bug)
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
