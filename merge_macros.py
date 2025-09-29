@@ -161,15 +161,23 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     included = [f for f in files if f not in excluded]
 
     # duplicates & extras (preserve earlier behavior)
-    dup_files = rng.sample(included or files, min(2, len(included or files)))
+    # ensure sample sizes are never larger than the population
+    dup_count = min(2, len(included or files))
+    dup_files = rng.sample(included or files, dup_count) if (included or files) else []
     final_files = included + dup_files
+
     if included:
-        extra_files = rng.sample(included, k=rng.choice([1,2]))
-        for ef in extra_files:
-            pos = rng.randrange(len(final_files)+1)
-            if pos > 0 and final_files[pos-1] == ef:
-                pos += 1
-            final_files.insert(min(pos, len(final_files)), ef)
+        # choose k in [1,2] but clamp to len(included)
+        k_choice = rng.choice([1,2])
+        k = min(k_choice, len(included))
+        if k > 0:
+            extra_files = rng.sample(included, k=k)
+            for ef in extra_files:
+                pos = rng.randrange(len(final_files)+1)
+                if pos > 0 and final_files[pos-1] == ef:
+                    pos += 1
+                final_files.insert(min(pos, len(final_files)), ef)
+
     rng.shuffle(final_files)
 
     merged = []
@@ -194,7 +202,9 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             chosen_count = intra_rng.randint(1, within_max_p)
             chosen_count = min(chosen_count, n_gaps)
             if chosen_count > 0:
-                chosen_gaps = intra_rng.sample(range(n_gaps), chosen_count)
+                # clamp sampling
+                sample_k = min(chosen_count, n_gaps)
+                chosen_gaps = intra_rng.sample(range(n_gaps), sample_k)
                 for gap_idx in sorted(chosen_gaps):
                     pause_ms = intra_rng.randint(1000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
@@ -206,6 +216,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         # INTER-FILE: before this file (except before first file)
         if idx != 0:
             k = rng.randint(1, between_max_p)
+            k = min(k, 50)  # safety cap to avoid pathological sums
             total_inter_ms = 0
             inter_list = []
             for i in range(k):
@@ -223,6 +234,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
 
+            # post-file buffer (10-30s) deterministic via rng
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
             pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
@@ -269,7 +281,7 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    # If input doesn't exist, create it and exit with notice (so user can add files via web)
+    # If input doesn't exist, create it and exit with notice
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
         try:
@@ -302,7 +314,7 @@ def main():
             )
             if not fname:
                 continue
-            out_file_path = output_dir / fname
+            out_file_path = Path(args.output_dir) / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             zip_items.append((grp.name, out_file_path))
@@ -315,13 +327,13 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = output_dir / f"{grp.name}_log.txt"
+        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
     # create ZIP
-    zip_path = output_dir / "merged_bundle.zip"
+    zip_path = Path(args.output_dir) / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
             zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
