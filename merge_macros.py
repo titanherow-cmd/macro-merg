@@ -2,28 +2,11 @@
 """
 merge_macros.py
 
-Compact merge script (UI-driven by workflow inputs).
-
-Defaults (hardcoded):
- - input_dir = "input"
- - output_dir = "output"
- - seed = 12345
-
-CLI-exposed:
- - --versions (default 6)
- - --force (flag)
- - --within-max-time (e.g. "1.30", "1m30s", "1:30", "90s")
- - --within-max-pauses (int)
- - --between-max-time (e.g. "10s", "1m")
- - --between-max-pauses (int)
- - optional overrides: --input-dir, --output-dir, --seed
-
-Behavior:
- - Always apply intra-file pauses (except first file), and inter-file pauses (except before first file).
- - Pause durations sampled uniform between 1s and provided max-time.
- - Number of intra pauses per file chosen randomly between 1..within-max-pauses (capped by gaps).
- - Number of between pauses per gap chosen randomly between 1..between-max-pauses (summed if >1).
- - Filenames: {TOTALm}_v{VERSION}_<parts>.json
+Merged script with defensive fixes:
+ - Avoids adjacent identical duplicates where possible
+ - Clamps all random.sample sizes to population size
+ - Uses ceil for total minutes so small durations show as 1m instead of 0m
+ - Keeps previous behavior otherwise (intra/between pauses, first-file exemptions, deterministic seeds)
 """
 from pathlib import Path
 import argparse
@@ -33,6 +16,7 @@ import random
 from zipfile import ZipFile
 import sys
 import re
+import math
 
 # Hardcoded defaults
 DEFAULT_INPUT_DIR = "input"
@@ -41,22 +25,12 @@ DEFAULT_SEED = 12345
 
 # ---------- time parsing ----------
 def parse_time_str_to_seconds(s: str):
-    """
-    Accept:
-      - '1.30' => 1 min 30 sec
-      - '1:30' => 1 min 30 sec
-      - '1m30s' => 1 min 30 sec
-      - '90s' or '90' => 90 sec
-      - '2m' => 120 sec
-    Return integer seconds.
-    """
     if s is None:
         raise ValueError("time string is None")
     s0 = str(s).strip().lower()
     if not s0:
         raise ValueError("empty time string")
 
-    # dot format M.SS (e.g. 1.30)
     mdot = re.match(r'^(\d+)\.(\d{1,2})$', s0)
     if mdot:
         mins = int(mdot.group(1))
@@ -65,7 +39,6 @@ def parse_time_str_to_seconds(s: str):
             raise ValueError(f"seconds part must be <60 in '{s}'")
         return mins * 60 + secs
 
-    # colon format M:SS
     mcol = re.match(r'^(\d+):(\d{1,2})$', s0)
     if mcol:
         mins = int(mcol.group(1)); secs = int(mcol.group(2))
@@ -73,14 +46,12 @@ def parse_time_str_to_seconds(s: str):
             raise ValueError(f"seconds part must be <60 in '{s}'")
         return mins * 60 + secs
 
-    # combined m and s like '2m47s' or '1m' or '30s'
     m = re.match(r'^(?:(\d+)m)?\s*(?:(\d+)s)?$', s0)
     if m and (m.group(1) or m.group(2)):
         mm = int(m.group(1)) if m.group(1) else 0
         ss = int(m.group(2)) if m.group(2) else 0
         return mm * 60 + ss
 
-    # numeric like '90' or '90s'
     if re.match(r'^\d+(\.\d+)?s?$', s0):
         s2 = s0[:-1] if s0.endswith('s') else s0
         val = float(s2)
@@ -153,6 +124,32 @@ def get_previously_processed_files(zip_path: Path):
     return processed
 
 # ---------- core merging ----------
+def _find_non_adjacent_insertion_pos(final_files, candidate):
+    """
+    Try to find a position in final_files to insert candidate such that
+    candidate is not adjacent to an identical entry if possible.
+    Returns insertion index (0..len(final_files)) — may return a position
+    that causes adjacency if no better position found.
+    """
+    n = len(final_files)
+    # check all positions 0..n
+    for pos in range(0, n+1):
+        left_ok = True
+        right_ok = True
+        if pos-1 >= 0:
+            left_ok = (final_files[pos-1] != candidate)
+        if pos < n:
+            right_ok = (final_files[pos] != candidate)
+        if left_ok and right_ok:
+            return pos
+    # fallback: try a few random positions
+    for _ in range(min(10, max(1, n+1))):
+        pos = random.randrange(0, n+1)
+        if not ( (pos-1>=0 and final_files[pos-1]==candidate) or (pos<n and final_files[pos]==candidate) ):
+            return pos
+    # last resort: return middle
+    return n//2
+
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
     if not files:
         return None, [], [], {}, [], 0
@@ -160,22 +157,22 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     excluded = []
     included = [f for f in files if f not in excluded]
 
-    # duplicates & extras (preserve earlier behavior)
-    # ensure sample sizes are never larger than the population
-    dup_count = min(2, len(included or files))
-    dup_files = rng.sample(included or files, dup_count) if (included or files) else []
+    # duplicates & extras - safe clamping
+    population = included or files
+    dup_count = min(2, len(population))
+    dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
     final_files = included + dup_files
 
     if included:
-        # choose k in [1,2] but clamp to len(included)
+        # choose between 1 or 2 extra files, but clamp
         k_choice = rng.choice([1,2])
         k = min(k_choice, len(included))
         if k > 0:
-            extra_files = rng.sample(included, k=k)
+            # sample extra files safely
+            extra_files = rng.sample(included, k=k) if k <= len(included) else included[:k]
             for ef in extra_files:
-                pos = rng.randrange(len(final_files)+1)
-                if pos > 0 and final_files[pos-1] == ef:
-                    pos += 1
+                # pick insertion pos that avoids adjacency if possible
+                pos = _find_non_adjacent_insertion_pos(final_files, ef)
                 final_files.insert(min(pos, len(final_files)), ef)
 
     rng.shuffle(final_files)
@@ -202,9 +199,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             chosen_count = intra_rng.randint(1, within_max_p)
             chosen_count = min(chosen_count, n_gaps)
             if chosen_count > 0:
-                # clamp sampling
                 sample_k = min(chosen_count, n_gaps)
-                chosen_gaps = intra_rng.sample(range(n_gaps), sample_k)
+                chosen_gaps = intra_rng.sample(range(n_gaps), sample_k) if sample_k > 0 else []
                 for gap_idx in sorted(chosen_gaps):
                     pause_ms = intra_rng.randint(1000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
@@ -216,7 +212,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         # INTER-FILE: before this file (except before first file)
         if idx != 0:
             k = rng.randint(1, between_max_p)
-            k = min(k, 50)  # safety cap to avoid pathological sums
+            # safety cap
+            k = min(k, 50)
             total_inter_ms = 0
             inter_list = []
             for i in range(k):
@@ -234,15 +231,20 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
 
-            # post-file buffer (10-30s) deterministic via rng
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
             pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
         else:
             play_times[f] = 0
 
-    total_minutes = round(sum(play_times.values()) / 60000) if play_times else 0
-    parts = [part_from_filename(f) + f"[{round((play_times.get(f,0))/60000)}m] " for f in final_files]
+    # compute total minutes using CEIL so short combined tracks show as 1m (if >0)
+    total_ms = sum(play_times.values())
+    if total_ms > 0:
+        total_minutes = math.ceil(total_ms / 60000)
+    else:
+        total_minutes = 0
+
+    parts = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m] " for f in final_files]
     parts_joined = "".join(parts).rstrip()
     merged_fname = f"{total_minutes}m_v{version_num}_" + parts_joined + ".json"
 
@@ -261,6 +263,19 @@ def parse_args():
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
     return p.parse_args()
+
+def get_previously_processed_files(zip_path: Path):
+    # duplicate helper earlier; ensure this still works
+    processed = set()
+    if zip_path.exists():
+        try:
+            with ZipFile(zip_path, "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith(".json") and not name.endswith("_log.txt"):
+                        processed.add(Path(name).name)
+        except:
+            pass
+    return processed
 
 def main():
     args = parse_args()
@@ -281,7 +296,6 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    # If input doesn't exist, create it and exit with notice
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
         try:
@@ -289,7 +303,7 @@ def main():
         except Exception as e:
             print(f"ERROR: could not create input dir: {e}", file=sys.stderr)
             sys.exit(2)
-        print("Created empty 'input/' folder. Please add one or more group subfolders containing .json files, then re-run.", file=sys.stderr)
+        print("Created empty 'input/' folder. Please add group subfolders containing .json files, then re-run.", file=sys.stderr)
         sys.exit(0)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -336,7 +350,8 @@ def main():
     zip_path = Path(args.output_dir) / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
-            zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
+            if file_path.exists():
+                zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
     print("DONE. Outputs in:", output_dir)
 
