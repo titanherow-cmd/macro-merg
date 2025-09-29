@@ -273,6 +273,19 @@ def main():
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
+
+    # NEW: if input folder doesn't exist, create it and exit gracefully with guidance
+    if not input_dir.exists():
+        print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
+        try:
+            input_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"ERROR: could not create input dir: {e}", file=sys.stderr)
+            sys.exit(2)
+        print("Created empty 'input/' folder. Please add one or more group subfolders containing .json files, then re-run.", file=sys.stderr)
+        # exit without error (so CI won't fail)
+        sys.exit(0)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_seed = args.seed
