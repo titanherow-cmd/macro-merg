@@ -291,11 +291,11 @@ def main():
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, pauses, excl, total = generate_version(
-                files, version_rng, base_seed, v, args, global_pauses
+                files, version_rng, base_seed, v, args, global_pause_set
             )
             if not fname:
                 continue
-            out_file_path = output_dir / fname
+            out_file_path = Path(args.output_dir) / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             zip_items.append((grp.name, out_file_path))
@@ -308,18 +308,18 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = output_dir / f"{grp.name}_log.txt"
+        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
     # create ZIP
-    zip_path = output_dir / "merged_bundle.zip"
+    zip_path = Path(args.output_dir) / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
             zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
-    print("DONE. Outputs in:", output_dir)
+    print("DONE. Outputs in:", args.output_dir)
 
 if __name__ == "__main__":
     main()
