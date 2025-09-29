@@ -2,14 +2,9 @@
 """
 merge_macros.py
 
-Reads group folders recursively under DEFAULT_INPUT_DIR (now "originals").
-Each subdirectory that contains one or more .json files is treated as a group.
-
-Behavior:
- - Defaults input dir -> "originals" (so script will read your originals/ tree)
- - Recursively finds directories containing .json files (any depth)
- - Logs discovered groups and file counts to stdout and per-group log
- - Keeps previous merging + pause rules and robustness fixes
+Merged script with defensive fixes and recursive group discovery.
+Filename format changed so total merged time is at the start inside {}
+Example: {34m}v1.EGfile1[3m] A2file[5m] xyz123[2m].json
 """
 from pathlib import Path
 import argparse
@@ -23,11 +18,11 @@ import math
 import os
 
 # Defaults
-DEFAULT_INPUT_DIR = "originals"   # changed to originals
+DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
 
-# --- time parsing (same as before) ---
+# --- time parsing ---
 def parse_time_str_to_seconds(s: str):
     if s is None:
         raise ValueError("time string is None")
@@ -87,20 +82,17 @@ def part_from_filename(fname: str):
     stem = Path(fname).stem
     return ''.join(ch for ch in stem if ch.isalnum())
 
-# --- group discovery: find directories recursively that contain .json files ---
+# --- group discovery: recursive ---
 def find_groups_recursive(input_dir: Path):
     groups = []
-    # Walk the tree; treat any directory that contains at least one .json as a group root
     for root, dirs, files in os.walk(input_dir):
         jsons = [f for f in files if f.lower().endswith(".json")]
         if jsons:
             groups.append(Path(root))
-    # sort paths for deterministic order
     groups = sorted(groups)
     return groups
 
 def find_json_files(group_path: Path):
-    # return full paths (strings) to json files directly under this directory
     return sorted(glob.glob(str(group_path / "*.json")))
 
 def apply_shifts(events, shift_ms):
@@ -136,7 +128,7 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
-# --- helper to avoid adjacent duplicates when inserting -->
+# --- avoid adjacent duplicates helper ---
 def _find_non_adjacent_insertion_pos(final_files, candidate):
     n = len(final_files)
     for pos in range(0, n+1):
@@ -148,14 +140,13 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
             right_ok = (final_files[pos] != candidate)
         if left_ok and right_ok:
             return pos
-    # fallback
     for _ in range(min(10, n+1)):
         pos = random.randrange(0, n+1)
         if not ((pos-1>=0 and final_files[pos-1]==candidate) or (pos<n and final_files[pos]==candidate)):
             return pos
     return n//2
 
-# --- core merging (keeps previous robust logic) ---
+# --- core merging ---
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
     if not files:
         return None, [], [], {}, [], 0
@@ -194,7 +185,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE: apply for all except first file
+        # INTRA-FILE (skip first file)
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -211,7 +202,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         if intra_log_local:
             pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
 
-        # INTER-FILE: before this file (except before first file)
+        # INTER-FILE (before this file, except first)
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
@@ -241,13 +232,16 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
 
+    # parts list — each part ends with a space to separate names
     parts = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m] " for f in final_files]
     parts_joined = "".join(parts).rstrip()
-    merged_fname = f"{total_minutes}m_v{version_num}_" + parts_joined + ".json"
+
+    # NEW FILENAME SCHEME: put total minutes in {} at start, then vN., then the parts
+    merged_fname = f"{{{total_minutes}m}}v{version_num}." + parts_joined + ".json"
 
     return merged_fname, merged, final_files, pause_log, excluded, total_minutes
 
-# --- CLI parse ---
+# --- CLI ---
 def parse_args():
     p = argparse.ArgumentParser(description="Merge macros - recursive group discovery (defaults to 'originals').")
     p.add_argument("--versions", type=int, default=6, help="How many versions per group")
@@ -282,7 +276,6 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # if input doesn't exist -> create and exit with notice
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
         try:
@@ -293,7 +286,6 @@ def main():
         print(f"Created empty '{input_dir}'. Please add groups (folders) with .json files and re-run.", file=sys.stderr)
         sys.exit(0)
 
-    # discover groups recursively
     groups = find_groups_recursive(input_dir)
     print(f"DEBUG: found {len(groups)} group(s) under '{input_dir}':")
     for g in groups:
@@ -334,18 +326,15 @@ def main():
                 "total_minutes": total
             })
 
-        # write per-group log into output so artifact upload picks it up
         log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
-    # create ZIP
     zip_path = Path(args.output_dir) / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
             if file_path.exists():
-                # store under folder with group name
                 zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
     print("DONE. Outputs in:", output_dir)
