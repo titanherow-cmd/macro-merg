@@ -2,7 +2,7 @@
 """
 merge_macros.py
 
-Simplified script matching the compact UI.
+Compact merge script (UI-driven by workflow inputs).
 
 Defaults (hardcoded):
  - input_dir = "input"
@@ -18,13 +18,12 @@ CLI-exposed:
  - --between-max-pauses (int)
  - optional overrides: --input-dir, --output-dir, --seed
 
-Behavior highlights:
- - Always insert intra-file pauses (within) and inter-file pauses (between),
-   except the first file is exempt from both.
- - Pause durations sampled uniformly between 1s and provided max time.
- - Number of intra pauses per file: random between 1 and within-max-pauses (capped by available gaps).
- - Number of between-file pauses per gap: random between 1 and between-max-pauses (we sum them if more than 1).
- - Filenames use the format: {TOTALm}_v{VERSION}_<parts>.json
+Behavior:
+ - Always apply intra-file pauses (except first file), and inter-file pauses (except before first file).
+ - Pause durations sampled uniform between 1s and provided max-time.
+ - Number of intra pauses per file chosen randomly between 1..within-max-pauses (capped by gaps).
+ - Number of between pauses per gap chosen randomly between 1..between-max-pauses (summed if >1).
+ - Filenames: {TOTALm}_v{VERSION}_<parts>.json
 """
 from pathlib import Path
 import argparse
@@ -43,13 +42,13 @@ DEFAULT_SEED = 12345
 # ---------- time parsing ----------
 def parse_time_str_to_seconds(s: str):
     """
-    Accepts:
-      - '1.30'  -> 1 minute 30 seconds
-      - '1:30'  -> 1 minute 30 seconds
-      - '1m30s' -> 1 minute 30 seconds
-      - '90s' or '90' -> 90 seconds
-      - '2m'   -> 120 seconds
-    Returns integer seconds.
+    Accept:
+      - '1.30' => 1 min 30 sec
+      - '1:30' => 1 min 30 sec
+      - '1m30s' => 1 min 30 sec
+      - '90s' or '90' => 90 sec
+      - '2m' => 120 sec
+    Return integer seconds.
     """
     if s is None:
         raise ValueError("time string is None")
@@ -161,7 +160,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     excluded = []
     included = [f for f in files if f not in excluded]
 
-    # duplicates & extras
+    # duplicates & extras (preserve earlier behavior)
     dup_files = rng.sample(included or files, min(2, len(included or files)))
     final_files = included + dup_files
     if included:
@@ -178,10 +177,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     time_cursor = 0
     play_times = {}
 
-    # convert seconds to ms; minimum duration is 1 second (1000 ms)
     within_max_ms = max(1000, args.within_max_secs * 1000)
     between_max_ms = max(1000, args.between_max_secs * 1000)
-    # within_max_pauses and between_max_pauses are the UI "max" values — we pick 1..max
     within_max_p = max(1, args.within_max_pauses)
     between_max_p = max(1, args.between_max_pauses)
 
@@ -190,7 +187,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE: apply for all except first file (first file exempt)
+        # INTRA-FILE: apply for all except first file
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -218,7 +215,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             time_cursor += total_inter_ms
             pause_log["inter_file_pauses"].append({"before_file": Path(f).name, "pause_ms_list": inter_list, "is_before_index": idx})
 
-        # apply shifts and append events
+        # apply shifts and append
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
@@ -226,7 +223,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
 
-            # post-file buffer (10-30s) deterministic via rng
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
             pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
@@ -256,7 +252,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # parse times
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
         args.between_max_secs = parse_time_str_to_seconds(args.between_max_time)
@@ -274,7 +269,7 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    # NEW: if input folder doesn't exist, create it and exit gracefully with guidance
+    # If input doesn't exist, create it and exit with notice (so user can add files via web)
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
         try:
@@ -283,14 +278,13 @@ def main():
             print(f"ERROR: could not create input dir: {e}", file=sys.stderr)
             sys.exit(2)
         print("Created empty 'input/' folder. Please add one or more group subfolders containing .json files, then re-run.", file=sys.stderr)
-        # exit without error (so CI won't fail)
         sys.exit(0)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_seed = args.seed
     processed = get_previously_processed_files(output_dir/"merged_bundle.zip")
-    global_pauses = set()
+    global_pause_set = set()
     zip_items = []
 
     for gi, grp in enumerate(find_groups(input_dir)):
@@ -308,7 +302,7 @@ def main():
             )
             if not fname:
                 continue
-            out_file_path = Path(args.output_dir) / fname
+            out_file_path = output_dir / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             zip_items.append((grp.name, out_file_path))
@@ -321,18 +315,18 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
+        log_file_path = output_dir / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
     # create ZIP
-    zip_path = Path(args.output_dir) / "merged_bundle.zip"
+    zip_path = output_dir / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
             zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
-    print("DONE. Outputs in:", args.output_dir)
+    print("DONE. Outputs in:", output_dir)
 
 if __name__ == "__main__":
     main()
