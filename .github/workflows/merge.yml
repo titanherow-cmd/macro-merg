@@ -85,10 +85,7 @@ jobs:
         run: |
           if [ -d output ]; then
             echo "Output (absolute):"
-            python - <<'PY'
-import os
-print(os.path.abspath("output"))
-PY
+            python -c "import os; print(os.path.abspath('output'))"
             ls -la output || true
           else
             echo "No output/ created."
