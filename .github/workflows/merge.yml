@@ -123,16 +123,16 @@ jobs:
             echo "No output/ created."
           fi
 
-      - name: Ensure placeholder log if none
+      - name: Ensure placeholder artifact if none
         run: |
           shopt -s nullglob
-          logs=(output/*_log.txt)
-          if [ "${#logs[@]}" -eq 0 ]; then
+          zips=(output/merged_bundle_*.zip)
+          if [ "${#zips[@]}" -eq 0 ]; then
             mkdir -p output
-            echo '{"notice":"placeholder log"}' > output/placeholder_log.txt
-            echo "Created placeholder log"
+            echo '{}' > output/placeholder.json
+            echo "Created placeholder"
           else
-            echo "Found logs"
+            echo "Found zipped bundles"
           fi
 
       - name: Upload zipped bundles
@@ -141,10 +141,3 @@ jobs:
         with:
           name: merged-bundles
           path: output/merged_bundle_*.zip
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: group-logs
-          path: output/*_log.txt
