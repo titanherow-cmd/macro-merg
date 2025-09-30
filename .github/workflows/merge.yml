@@ -46,7 +46,7 @@ jobs:
         run: |
           echo "=== originals tree ==="
           if [ -d originals ]; then
-            find originals -maxdepth 6 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
+            find originals -maxdepth 8 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
           else
             echo "No originals/ folder found in repo root."
           fi
