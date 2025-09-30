@@ -69,6 +69,7 @@ def load_json(path: Path):
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception as e:
+        # no log files — print warning to stdout/stderr only
         print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
         return None
 
@@ -170,7 +171,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                 final_files.insert(min(pos, len(final_files)), ef)
     rng.shuffle(final_files)
     merged = []
-    pause_log = {"inter_file_pauses": [], "intra_file_pauses": [], "post_file_buffers": []}
     time_cursor = 0
     play_times = {}
     within_max_ms = max(1000, args.within_max_secs * 1000)
@@ -180,7 +180,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
-        intra_log_local = []
         # INTRA-FILE: skip for first file (idx==0)
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
@@ -194,15 +193,11 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                     pause_ms = intra_rng.randint(1000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-                    intra_log_local.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
-        if intra_log_local:
-            pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
         # INTER-FILE: before this file (except before first)
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
             total_inter_ms = 0
-            inter_list = []
             for i in range(k):
                 attempts = 0
                 inter_ms = None
@@ -216,9 +211,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                 if inter_ms is None:
                     inter_ms = rng.randint(1000, between_max_ms)
                 total_inter_ms += inter_ms
-                inter_list.append(inter_ms)
             time_cursor += total_inter_ms
-            pause_log["inter_file_pauses"].append({"before_file": Path(f).name, "pause_ms_list": inter_list, "is_before_index": idx})
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
@@ -227,7 +220,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             play_times[f] = max_t - min_t
             buffer_ms = rng.randint(10_000, 30_000)
             time_cursor = max_t + buffer_ms
-            pause_log["post_file_buffers"].append({"file": Path(f).name, "buffer_ms": buffer_ms})
         else:
             play_times[f] = 0
     total_ms = sum(play_times.values())
@@ -236,7 +228,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     parts_joined = "- ".join(parts_list)
     letters = index_to_letters(version_num)
     merged_fname = f"V{letters}_{total_minutes}m= {parts_joined}.json"
-    return merged_fname, merged, final_files, pause_log, excluded, total_minutes
+    return merged_fname, merged, final_files, {}, [], total_minutes
 
 def parse_args():
     p = argparse.ArgumentParser(description="Merge macros - recursive group discovery (defaults to 'originals').")
@@ -254,16 +246,16 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # parse & validate times; print what we parsed (debug)
-    parsed_ok = True
+    # parse & validate times
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
         args.between_max_secs = parse_time_str_to_seconds(args.between_max_time)
     except Exception as e:
         print("ERROR parsing time inputs:", e, file=sys.stderr)
+        # continue to produce placeholder zip later
         parsed_ok = False
     else:
-        print(f"DEBUG: parsed within_max_secs={args.within_max_secs}, between_max_secs={args.between_max_secs}")
+        parsed_ok = True
     if args.exclude_max is None or args.exclude_max < 0:
         print("ERROR: --exclude-max must be an integer >= 0", file=sys.stderr)
         sys.exit(2)
@@ -271,18 +263,13 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if not input_dir.exists():
-        print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
-        input_dir.mkdir(parents=True, exist_ok=True)
+        # create placeholder zip and exit
         placeholder = output_dir / "merged_bundle.zip"
         with ZipFile(placeholder, "w") as zf:
             zf.writestr("placeholder.txt", "No originals folder found.")
         print("Wrote placeholder zip:", placeholder)
         sys.exit(0)
     groups = find_groups_recursive(input_dir)
-    print(f"DEBUG: found {len(groups)} group(s) under '{input_dir}':")
-    for g in groups:
-        files = find_json_files(g)
-        print(f" - {g}  -> {len(files)} json file(s)")
     base_seed = args.seed
     global_pause_set = set()
     merged_outputs = []
@@ -292,7 +279,7 @@ def main():
             continue
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
-            fname, merged, finals, pauses, excl, total = generate_version(
+            fname, merged, finals, _, excl, total = generate_version(
                 files, version_rng, base_seed, v, args, global_pause_set
             )
             if not fname:
@@ -301,7 +288,6 @@ def main():
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             merged_outputs.append((grp, out_file_path))
-    # Create merged_bundle.zip that contains only merged JSONs.
     bundle_path = output_dir / "merged_bundle.zip"
     bundle_seq = os.environ.get("BUNDLE_SEQ", "").strip()
     top_folder = f"merged_bundle_{bundle_seq}" if bundle_seq else None
@@ -319,14 +305,12 @@ def main():
                 else:
                     arc = rel_group / file_path.name
                 zf.write(file_path, arcname=str(arc.as_posix()))
-        print("Created merged bundle with", len(merged_outputs), "files.")
     else:
         with ZipFile(bundle_path, "w") as zf:
             txt = "No merged files were produced.\n"
             if not parsed_ok:
                 txt += "Note: time parsing failed; check inputs.\n"
             zf.writestr("placeholder.txt", txt)
-        print("No merged outputs; created placeholder merged_bundle.zip")
     print("DONE. Outputs in:", str(output_dir.resolve()))
     print("Created:", bundle_path.name)
 
