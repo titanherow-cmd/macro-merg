@@ -1,6 +1,5 @@
 name: Merge Macros (compact UI) - originals
 
-# Allow this workflow to push changes (we update counter file)
 permissions:
   contents: write
 
@@ -28,7 +27,7 @@ on:
         required: true
         default: '1'
       exclude_max:
-        description: 'Max files to randomly exclude per version (1..N-1)'
+        description: 'Max files to randomly exclude per version (0..N-1)'
         required: false
         default: '3'
 
@@ -39,7 +38,6 @@ jobs:
       - name: Checkout repository (with write access)
         uses: actions/checkout@v4
         with:
-          # persist credentials so we can push the counter file
           persist-credentials: true
 
       - name: Prepare/increment bundle counter
@@ -47,10 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           COUNTER_FILE=".github/merge_bundle_counter.txt"
-
-          # ensure directory exists
           mkdir -p "$(dirname "$COUNTER_FILE")"
-
           if [ -f "$COUNTER_FILE" ]; then
             n=$(cat "$COUNTER_FILE" | tr -d '[:space:]' || echo 0)
             if ! echo "$n" | grep -Eq '^[0-9]+$'; then
@@ -59,21 +54,13 @@ jobs:
           else
             n=0
           fi
-
           n=$((n + 1))
           echo "$n" > "$COUNTER_FILE"
-
-          # Commit & push the updated counter file back to the repo so next runs see it
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$COUNTER_FILE"
-          # If there's nothing to commit (very unlikely) don't fail
           git commit -m "ci: bump merged bundle counter to ${n} [skip ci]" || true
-
-          # Attempt to push. If this fails (branch protection), we'll still continue and use the counter locally.
           git push || echo "WARNING: git push failed - counter will not be persisted."
-
-          # Export to environment for later steps
           echo "BUNDLE_SEQ=${n}" >> $GITHUB_ENV
           echo "BUNDLE_SEQ=${n}"
 
@@ -100,7 +87,6 @@ jobs:
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
         run: |
           set -euo pipefail
-
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
@@ -115,10 +101,9 @@ jobs:
           set -euo pipefail
           SEQ="${BUNDLE_SEQ:-}"
           if [ -z "$SEQ" ]; then
-            echo "BUNDLE_SEQ not set; aborting rename step."
+            echo "BUNDLE_SEQ not set; skipping rename."
             exit 0
           fi
-
           mkdir -p output
           if [ -f output/merged_bundle.zip ]; then
             numbered="output/merged_bundle_${SEQ}.zip"
