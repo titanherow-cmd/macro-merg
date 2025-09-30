@@ -7,6 +7,7 @@ Produces merged JSONs and a single output/merged_bundle.zip containing merged JS
  - If env var BUNDLE_SEQ is set, the zip will include a top-level folder named merged_bundle_<SEQ>/,
    so the counter appears inside the zip folder structure as well as in the workflow filename.
  - If no merged outputs are produced, a small placeholder zip is written so workflow artifacts always exist.
+Naming scheme: <UPPER_LETTERS>_<TotalMinutes>m= <part1>[Xm]- <part2>[Ym].json
 """
 from pathlib import Path
 import argparse
@@ -25,13 +26,14 @@ DEFAULT_SEED = 12345
 DEFAULT_EXCLUDE_MAX = 3
 
 def index_to_letters(idx: int) -> str:
+    """1->'A', 2->'B', ..., 26->'Z', 27->'AA'."""
     if idx < 1:
-        return "a"
+        return "A"
     s = ""
     n = idx
     while n > 0:
         n -= 1
-        s = chr(ord('a') + (n % 26)) + s
+        s = chr(ord('A') + (n % 26)) + s
         n //= 26
     return s
 
@@ -69,7 +71,6 @@ def load_json(path: Path):
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception as e:
-        # no log files — print warning to stdout/stderr only
         print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
         return None
 
@@ -180,7 +181,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
-        # INTRA-FILE: skip for first file (idx==0)
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -193,7 +193,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                     pause_ms = intra_rng.randint(1000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        # INTER-FILE: before this file (except before first)
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
@@ -227,7 +226,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     parts_list = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m]" for f in final_files]
     parts_joined = "- ".join(parts_list)
     letters = index_to_letters(version_num)
-    merged_fname = f"V{letters}_{total_minutes}m= {parts_joined}.json"
+    merged_fname = f"{letters}_{total_minutes}m= {parts_joined}.json"
     return merged_fname, merged, final_files, {}, [], total_minutes
 
 def parse_args():
@@ -246,16 +245,13 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # parse & validate times
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
         args.between_max_secs = parse_time_str_to_seconds(args.between_max_time)
+        parsed_ok = True
     except Exception as e:
         print("ERROR parsing time inputs:", e, file=sys.stderr)
-        # continue to produce placeholder zip later
         parsed_ok = False
-    else:
-        parsed_ok = True
     if args.exclude_max is None or args.exclude_max < 0:
         print("ERROR: --exclude-max must be an integer >= 0", file=sys.stderr)
         sys.exit(2)
@@ -263,7 +259,6 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if not input_dir.exists():
-        # create placeholder zip and exit
         placeholder = output_dir / "merged_bundle.zip"
         with ZipFile(placeholder, "w") as zf:
             zf.writestr("placeholder.txt", "No originals folder found.")
