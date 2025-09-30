@@ -1,5 +1,9 @@
 name: Merge Macros (compact UI) - originals
 
+# Allow this workflow to push changes (we update counter file)
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,13 +11,6 @@ on:
         description: 'How many versions per group'
         required: false
         default: '6'
-      force:
-        description: 'Re-run even if outputs exist'
-        required: false
-        default: 'Yes'
-        options:
-          - Yes
-          - No
       within_max_time:
         description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
         required: true
@@ -31,7 +28,7 @@ on:
         required: true
         default: '1'
       exclude_max:
-        description: 'Maximum number of files to randomly exclude per version (1..N-1)'
+        description: 'Max files to randomly exclude per version (1..N-1)'
         required: false
         default: '3'
 
@@ -39,32 +36,71 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository (with write access)
         uses: actions/checkout@v4
+        with:
+          # persist credentials so we can push the counter file
+          persist-credentials: true
+
+      - name: Prepare/increment bundle counter
+        id: bump_counter
+        run: |
+          set -euo pipefail
+          COUNTER_FILE=".github/merge_bundle_counter.txt"
+
+          # ensure directory exists
+          mkdir -p "$(dirname "$COUNTER_FILE")"
+
+          if [ -f "$COUNTER_FILE" ]; then
+            n=$(cat "$COUNTER_FILE" | tr -d '[:space:]' || echo 0)
+            if ! echo "$n" | grep -Eq '^[0-9]+$'; then
+              n=0
+            fi
+          else
+            n=0
+          fi
+
+          n=$((n + 1))
+          echo "$n" > "$COUNTER_FILE"
+
+          # Commit & push the updated counter file back to the repo so next runs see it
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$COUNTER_FILE"
+          # If there's nothing to commit (very unlikely) don't fail
+          git commit -m "ci: bump merged bundle counter to ${n} [skip ci]" || true
+
+          # Attempt to push. If this fails (branch protection), we'll still continue and use the counter locally.
+          git push || echo "WARNING: git push failed - counter will not be persisted."
+
+          # Export to environment for later steps
+          echo "BUNDLE_SEQ=${n}" >> $GITHUB_ENV
+          echo "BUNDLE_SEQ=${n}"
 
       - name: Show originals folder (debug)
         run: |
           echo "=== originals tree ==="
           if [ -d originals ]; then
-            find originals -maxdepth 6 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
+            find originals -maxdepth 8 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
           else
             echo "No originals/ folder found in repo root."
           fi
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py (direct args)
+      - name: Run merge_macros.py (force hardcoded)
         env:
-          FORCE_CHOICE: ${{ github.event.inputs.force }}
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
         run: |
+          set -euo pipefail
+
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
@@ -72,12 +108,35 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
-            $( [ "${FORCE_CHOICE}" = "Yes" ] && echo "--force" || echo "" )
+            --force
 
-      - name: Show output dir
+      - name: Rename merged_bundle.zip to numbered zip (use counter)
         run: |
-          echo "=== output ==="
-          ls -la output || true
+          set -euo pipefail
+          SEQ="${BUNDLE_SEQ:-}"
+          if [ -z "$SEQ" ]; then
+            echo "BUNDLE_SEQ not set; aborting rename step."
+            exit 0
+          fi
+
+          mkdir -p output
+          if [ -f output/merged_bundle.zip ]; then
+            numbered="output/merged_bundle_${SEQ}.zip"
+            mv output/merged_bundle.zip "$numbered"
+            echo "Renamed merged_bundle.zip -> $numbered"
+          else
+            echo "No output/merged_bundle.zip found to rename."
+          fi
+
+      - name: Show output dir (absolute)
+        run: |
+          if [ -d output ]; then
+            echo "Output (absolute):"
+            python -c "import os; print(os.path.abspath('output'))"
+            ls -la output || true
+          else
+            echo "No output/ created."
+          fi
 
       - name: Ensure placeholder log if none
         run: |
@@ -91,9 +150,16 @@ jobs:
             echo "Found logs"
           fi
 
-      - name: Upload artifacts
+      - name: Upload zipped bundles
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: merged-bundle
-          path: output/merged_bundle.zip
+          name: merged-bundles
+          path: output/merged_bundle_*.zip
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: group-logs
+          path: output/*_log.txt
