@@ -2,14 +2,10 @@
 """
 merge_macros.py
 
-- Recursively finds groups under --input-dir (default "originals").
-- Randomly excludes 0..--exclude-max files per version (clamped).
-- Inserts intra-file pauses (except first file) and inter-file pauses (unique where possible).
-- Avoids adjacent duplicates when inserting extra copies.
-- Produces merged JSON files in --output-dir (default "output").
-- Writes a single zip "merged_bundle.zip" that contains merged JSON files
-  arranged so the zip starts at the folders under originals (e.g. DESKTOP/...).
-  The workflow will rename merged_bundle.zip to a numbered filename.
+Produces merged JSONs and a single output/merged_bundle.zip containing merged JSONs.
+ - No per-group log files created.
+ - If env var BUNDLE_SEQ is set, the zip will include a top-level folder named merged_bundle_<SEQ>/,
+   so the counter appears inside the zip folder structure as well as (workflow) in the filename.
 """
 from pathlib import Path
 import argparse
@@ -132,18 +128,6 @@ def apply_shifts(events, shift_ms: int):
         }
         shifted.append(new_event)
     return shifted
-
-def get_previously_processed_files(zip_path: Path):
-    processed = set()
-    if zip_path.exists():
-        try:
-            with ZipFile(zip_path, "r") as zf:
-                for name in zf.namelist():
-                    if name.endswith(".json") and not name.endswith("_log.txt"):
-                        processed.add(Path(name).name)
-        except:
-            pass
-    return processed
 
 def _find_non_adjacent_insertion_pos(final_files, candidate):
     n = len(final_files)
@@ -295,10 +279,8 @@ def parse_args():
     return p.parse_args()
 
 def _next_zip_path(output_dir: Path):
-    # we purposely only create merged_bundle.zip here; the workflow is responsible for persistent numbering
-    numbered = output_dir / "merged_bundle.zip"
-    latest = output_dir / "merged_bundle.zip"
-    return numbered, latest
+    # script only creates merged_bundle.zip; workflow will rename to numbered file
+    return output_dir / "merged_bundle.zip", output_dir / "merged_bundle.zip"
 
 def main():
     args = parse_args()
@@ -344,10 +326,9 @@ def main():
         print(f" - {g}  -> {len(files)} json file(s)")
 
     base_seed = args.seed
-    processed = get_previously_processed_files(output_dir/"merged_bundle.zip")
+    processed = set()  # not used when --force is always passed by workflow, kept for compatibility
     global_pause_set = set()
-    merged_outputs = []  # list of tuples (group_path, output_json_path)
-    zip_items_json = []
+    merged_outputs = []
 
     for gi, grp in enumerate(groups):
         files = find_json_files(grp)
@@ -357,7 +338,6 @@ def main():
             print(f"Skipping group '{grp}' (already processed).")
             continue
 
-        log = {"group": grp.name, "group_path": str(grp), "versions": []}
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, pauses, excl, total = generate_version(
@@ -368,25 +348,14 @@ def main():
             out_file_path = output_dir / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
-
-            # record merged json outputs for zipping
             merged_outputs.append((grp, out_file_path))
 
-            log["versions"].append({
-                "version": v,
-                "filename": fname,
-                "excluded": [Path(x).name for x in excl],
-                "final_order": [Path(x).name for x in finals],
-                "pause_details": pauses,
-                "total_minutes": total
-            })
-
-        log_file_path = output_dir / f"{grp.name}_log.txt"
-        with open(log_file_path, "w", encoding="utf-8") as fh:
-            json.dump(log, fh, indent=2, ensure_ascii=False)
-
-    # Create single merged_bundle.zip containing only merged JSONs and placed under paths starting from subfolders under originals.
+    # Create merged_bundle.zip that contains only merged JSONs.
     bundle_path = output_dir / "merged_bundle.zip"
+    # if BUNDLE_SEQ is set in env, use it as a top-level folder inside the zip
+    bundle_seq = os.environ.get("BUNDLE_SEQ", "").strip()
+    top_folder = f"merged_bundle_{bundle_seq}" if bundle_seq else None
+
     with ZipFile(bundle_path, "w") as zf:
         for group_path, file_path in merged_outputs:
             if not file_path.exists():
@@ -395,8 +364,10 @@ def main():
                 rel_group = group_path.relative_to(input_dir)  # e.g. DESKTOP/...
             except Exception:
                 rel_group = Path(group_path.name)
-            arc = rel_group / file_path.name
-            # write using posix style paths
+            if top_folder:
+                arc = Path(top_folder) / rel_group / file_path.name
+            else:
+                arc = rel_group / file_path.name
             zf.write(file_path, arcname=str(arc.as_posix()))
 
     print("DONE. Outputs in:", str(output_dir.resolve()))
