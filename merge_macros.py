@@ -1,9 +1,20 @@
-#!/usr/bin/env python3
+#!/usr/bin//env python3
 """
 merge_macros.py
 
-Same features as before, but zips output such that the zip mirrors the originals/ tree:
-  e.g. inside the zip: originals/DESKTOP/DES- FM- draynor- outz- E/Va_20m= ...
+Features preserved:
+ - recursive group discovery under 'originals'
+ - random exclusion (1..--exclude-max, clamped)
+ - intra-file pauses (except first file) and inter-file pauses
+ - uniqueness of chosen inter-file pause values across the run
+ - avoids adjacent duplicates when inserting extras where possible
+ - robust sampling/clamping and per-group logs
+ - ZIP output at the end
+
+Filename scheme now:
+  V<letters>_<TotalMinutes>m= <part1>[Xm]- <part2>[Ym]- ... .json
+  - Version is encoded as letters starting at 'a' (1 -> 'a', 27 -> 'aa', etc).
+  - No numeric _vN suffix at the end.
 """
 from pathlib import Path
 import argparse
@@ -15,15 +26,16 @@ import sys
 import re
 import math
 import os
-import shutil
 
+# Defaults
 DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
 DEFAULT_EXCLUDE_MAX = 3
 
 # ---------- utilities ----------
-def index_to_letters(idx: int) -> str:
+def index_to_letters(idx):
+    """Convert 1-based index to letters: 1->'a', 2->'b', ..., 26->'z', 27->'aa'."""
     if idx < 1:
         return "a"
     s = ""
@@ -34,7 +46,7 @@ def index_to_letters(idx: int) -> str:
         n //= 26
     return s
 
-def parse_time_str_to_seconds(s: str) -> int:
+def parse_time_str_to_seconds(s: str):
     if s is None:
         raise ValueError("time string is None")
     s0 = str(s).strip().lower()
@@ -89,10 +101,11 @@ def normalize_json(data):
         return [data]
     return []
 
-def part_from_filename(fname: str) -> str:
+def part_from_filename(fname: str):
     stem = Path(fname).stem
     return ''.join(ch for ch in stem if ch.isalnum())
 
+# --- recursive group discovery ---
 def find_groups_recursive(input_dir: Path):
     groups = []
     for root, dirs, files in os.walk(input_dir):
@@ -105,7 +118,7 @@ def find_groups_recursive(input_dir: Path):
 def find_json_files(group_path: Path):
     return sorted(glob.glob(str(group_path / "*.json")))
 
-def apply_shifts(events, shift_ms: int):
+def apply_shifts(events, shift_ms):
     shifted = []
     for e in events:
         try:
@@ -138,6 +151,7 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
+# --- helper to avoid adjacent duplicates ---
 def _find_non_adjacent_insertion_pos(final_files, candidate):
     n = len(final_files)
     for pos in range(0, n+1):
@@ -155,11 +169,18 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
             return pos
     return n//2
 
+# ---------- core merging ----------
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
+    """
+    files: list of file paths (strings)
+    rng: per-version random.Random
+    seed_for_intra: base seed for per-file intra RNG generation
+    version_num: 1-based version index (used to derive letter prefix)
+    """
     if not files:
         return None, [], [], {}, [], 0
 
-    # RANDOM EXCLUSION
+    # --- RANDOM EXCLUSION ---
     if len(files) <= 1:
         excluded = []
         included = list(files)
@@ -176,6 +197,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         included = [files[0]]
         excluded = [f for f in files if f != files[0]]
 
+    # duplicates & extras (safe)
     population = included or files
     dup_count = min(2, len(population))
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
@@ -207,7 +229,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE: skip for first file (idx==0)
+        # INTRA-FILE: apply for all except first file
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -247,6 +269,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             time_cursor += total_inter_ms
             pause_log["inter_file_pauses"].append({"before_file": Path(f).name, "pause_ms_list": inter_list, "is_before_index": idx})
 
+        # apply shifts and append
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
@@ -263,9 +286,13 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
 
+    # parts: sanitized stem + [Nm]
     parts_list = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m]" for f in final_files]
+
+    # join with dash immediately after bracket (no leading space) and a space after dash
     parts_joined = "- ".join(parts_list)
 
+    # version prefix letters
     letters = index_to_letters(version_num)
     merged_fname = f"V{letters}_{total_minutes}m= {parts_joined}.json"
 
@@ -282,27 +309,9 @@ def parse_args():
     p.add_argument("--between-max-pauses", type=int, required=True, help="Max number of pauses to insert between files (usually 1)")
     p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (min 1)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
-    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs (default: ./output)")
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
     return p.parse_args()
-
-def _next_zip_path(output_dir: Path):
-    pattern = "merged_bundle_*.zip"
-    existing = list(output_dir.glob(pattern))
-    max_n = 0
-    for p in existing:
-        m = re.search(r"merged_bundle_(\d+)\.zip$", p.name)
-        if m:
-            try:
-                n = int(m.group(1))
-                if n > max_n:
-                    max_n = n
-            except:
-                pass
-    next_n = max_n + 1
-    numbered = output_dir / f"merged_bundle_{next_n}.zip"
-    latest = output_dir / "merged_bundle.zip"
-    return numbered, latest
 
 def main():
     args = parse_args()
@@ -328,8 +337,6 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    print("Output folder (absolute):", str(output_dir.resolve()))
 
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
@@ -360,9 +367,7 @@ def main():
             print(f"Skipping group '{grp}' (already processed).")
             continue
 
-        group_label = part_from_filename(grp.name) or "group"
         log = {"group": grp.name, "group_path": str(grp), "versions": []}
-
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, pauses, excl, total = generate_version(
@@ -370,12 +375,10 @@ def main():
             )
             if not fname:
                 continue
-            out_file_path = output_dir / fname
+            out_file_path = Path(args.output_dir) / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
-
-            # store the group Path (full folder under originals) and the produced file
-            zip_items.append((grp, out_file_path))
+            zip_items.append((grp.name, out_file_path))
             log["versions"].append({
                 "version": v,
                 "filename": fname,
@@ -385,33 +388,18 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = output_dir / f"{grp.name}_log.txt"
+        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
-        zip_items.append((grp, log_file_path))
+        zip_items.append((grp.name, log_file_path))
 
-    # create numbered zip and also a latest copy, preserving originals/ tree inside the zip
-    numbered_zip, latest_zip = _next_zip_path(output_dir)
-    with ZipFile(numbered_zip, "w") as zf:
-        for group_path, file_path in zip_items:
-            if not file_path.exists():
-                continue
-            try:
-                # relative path under the input_dir (e.g. DESKTOP/.../subgroup)
-                rel_group = group_path.relative_to(input_dir)
-            except Exception:
-                # fallback to group name if relative fails
-                rel_group = Path(group_path.name)
-            # inside zip: originals/<rel_group>/<file_name>
-            arc = Path(input_dir.name) / rel_group / file_path.name
-            zf.write(file_path, arcname=str(arc))
-    try:
-        shutil.copy(numbered_zip, latest_zip)
-    except Exception as e:
-        print(f"WARNING: could not copy {numbered_zip} to {latest_zip}: {e}", file=sys.stderr)
+    zip_path = Path(args.output_dir) / "merged_bundle.zip"
+    with ZipFile(zip_path, "w") as zf:
+        for group_name, file_path in zip_items:
+            if file_path.exists():
+                zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
 
-    print("DONE. Outputs in:", str(output_dir.resolve()))
-    print("Created:", numbered_zip.name, "and updated:", latest_zip.name)
+    print("DONE. Outputs in:", output_dir)
 
 if __name__ == "__main__":
     main()
