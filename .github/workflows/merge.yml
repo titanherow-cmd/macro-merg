@@ -78,14 +78,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py (force hardcoded; no logs captured)
+      - name: Run merge_macros.py (force hardcoded; no logs)
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
-          BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
           set -euo pipefail
           python merge_macros.py \
