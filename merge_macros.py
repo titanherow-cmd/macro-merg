@@ -2,19 +2,13 @@
 """
 merge_macros.py
 
-Features preserved:
- - recursive group discovery under 'originals'
- - random exclusion (1..--exclude-max, clamped)
- - intra-file pauses (except first file) and inter-file pauses
- - uniqueness of chosen inter-file pause values across the run
- - avoids adjacent duplicates when inserting extras where possible
- - robust sampling/clamping and per-group logs
- - ZIP output at the end
-
-Filename scheme now:
-  V<letters>_<TotalMinutes>m= <part1>[Xm]- <part2>[Ym]- ... .json
-  - Version is encoded as letters starting at 'a' (1 -> 'a', 27 -> 'aa', etc).
-  - No numeric _vN suffix at the end.
+- Recursively finds group folders under 'originals' (or --input-dir).
+- Randomly excludes 1..--exclude-max files per version (clamped).
+- Inserts intra-file pauses (except first file) and inter-file pauses; tries to make inter-file pauses unique across the run.
+- Avoids adjacent duplicates when it inserts extra copies.
+- Produces merged JSON files and per-group logs in output/ (or --output-dir).
+- Creates numbered zip bundles merged_bundle_1.zip, merged_bundle_2.zip, ... and also writes merged_bundle.zip (latest).
+- Prints absolute output path to help you find outputs in Actions logs.
 """
 from pathlib import Path
 import argparse
@@ -26,6 +20,7 @@ import sys
 import re
 import math
 import os
+import shutil
 
 # Defaults
 DEFAULT_INPUT_DIR = "originals"
@@ -171,16 +166,10 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
 
 # ---------- core merging ----------
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
-    """
-    files: list of file paths (strings)
-    rng: per-version random.Random
-    seed_for_intra: base seed for per-file intra RNG generation
-    version_num: 1-based version index (used to derive letter prefix)
-    """
     if not files:
         return None, [], [], {}, [], 0
 
-    # --- RANDOM EXCLUSION ---
+    # RANDOM EXCLUSION
     if len(files) <= 1:
         excluded = []
         included = list(files)
@@ -197,7 +186,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         included = [files[0]]
         excluded = [f for f in files if f != files[0]]
 
-    # duplicates & extras (safe)
+    # duplicates & extras
     population = included or files
     dup_count = min(2, len(population))
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
@@ -229,7 +218,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE: apply for all except first file
+        # INTRA-FILE
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -246,7 +235,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         if intra_log_local:
             pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
 
-        # INTER-FILE: before this file (except before first)
+        # INTER-FILE
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
@@ -269,7 +258,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             time_cursor += total_inter_ms
             pause_log["inter_file_pauses"].append({"before_file": Path(f).name, "pause_ms_list": inter_list, "is_before_index": idx})
 
-        # apply shifts and append
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
@@ -286,13 +274,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
 
-    # parts: sanitized stem + [Nm]
     parts_list = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m]" for f in final_files]
-
-    # join with dash immediately after bracket (no leading space) and a space after dash
     parts_joined = "- ".join(parts_list)
-
-    # version prefix letters
     letters = index_to_letters(version_num)
     merged_fname = f"V{letters}_{total_minutes}m= {parts_joined}.json"
 
@@ -309,9 +292,28 @@ def parse_args():
     p.add_argument("--between-max-pauses", type=int, required=True, help="Max number of pauses to insert between files (usually 1)")
     p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (min 1)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
-    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs (default: ./output)")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
     return p.parse_args()
+
+def _next_zip_path(output_dir: Path):
+    """Return next numbered merged_bundle_N.zip path and also return path for latest merged_bundle.zip"""
+    pattern = "merged_bundle_*.zip"
+    existing = list(output_dir.glob(pattern))
+    max_n = 0
+    for p in existing:
+        m = re.search(r"merged_bundle_(\d+)\.zip$", p.name)
+        if m:
+            try:
+                n = int(m.group(1))
+                if n > max_n:
+                    max_n = n
+            except:
+                pass
+    next_n = max_n + 1
+    numbered = output_dir / f"merged_bundle_{next_n}.zip"
+    latest = output_dir / "merged_bundle.zip"
+    return numbered, latest
 
 def main():
     args = parse_args()
@@ -337,6 +339,8 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("Output folder (absolute):", str(output_dir.resolve()))
 
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
@@ -367,7 +371,9 @@ def main():
             print(f"Skipping group '{grp}' (already processed).")
             continue
 
+        group_label = part_from_filename(grp.name) or "group"
         log = {"group": grp.name, "group_path": str(grp), "versions": []}
+
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, pauses, excl, total = generate_version(
@@ -375,7 +381,7 @@ def main():
             )
             if not fname:
                 continue
-            out_file_path = Path(args.output_dir) / fname
+            out_file_path = output_dir / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             zip_items.append((grp.name, out_file_path))
@@ -388,18 +394,25 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
+        log_file_path = output_dir / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
-    zip_path = Path(args.output_dir) / "merged_bundle.zip"
-    with ZipFile(zip_path, "w") as zf:
+    # create numbered zip and also a latest copy
+    numbered_zip, latest_zip = _next_zip_path(output_dir)
+    with ZipFile(numbered_zip, "w") as zf:
         for group_name, file_path in zip_items:
             if file_path.exists():
                 zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
+    # copy to latest
+    try:
+        shutil.copy(numbered_zip, latest_zip)
+    except Exception as e:
+        print(f"WARNING: could not copy {numbered_zip} to {latest_zip}: {e}", file=sys.stderr)
 
-    print("DONE. Outputs in:", output_dir)
+    print("DONE. Outputs in:", str(output_dir.resolve()))
+    print("Created:", numbered_zip.name, "and updated:", latest_zip.name)
 
 if __name__ == "__main__":
     main()
