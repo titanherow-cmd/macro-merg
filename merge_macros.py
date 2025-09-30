@@ -1,20 +1,15 @@
-#!/usr/bin//env python3
+#!/usr/bin/env python3
 """
 merge_macros.py
 
-Features preserved:
- - recursive group discovery under 'originals'
- - random exclusion (1..--exclude-max, clamped)
- - intra-file pauses (except first file) and inter-file pauses
- - uniqueness of chosen inter-file pause values across the run
- - avoids adjacent duplicates when inserting extras where possible
- - robust sampling/clamping and per-group logs
- - ZIP output at the end
-
-Filename scheme now:
-  V<letters>_<TotalMinutes>m= <part1>[Xm]- <part2>[Ym]- ... .json
-  - Version is encoded as letters starting at 'a' (1 -> 'a', 27 -> 'aa', etc).
-  - No numeric _vN suffix at the end.
+- Recursively finds groups under --input-dir (default "originals").
+- Randomly excludes 0..--exclude-max files per version (clamped).
+- Inserts intra-file pauses (except first file) and inter-file pauses (unique where possible).
+- Avoids adjacent duplicates when inserting extra copies.
+- Produces merged JSON files in --output-dir (default "output").
+- Writes a single zip "merged_bundle.zip" that contains merged JSON files
+  arranged so the zip starts at the folders under originals (e.g. DESKTOP/...).
+  The workflow will rename merged_bundle.zip to a numbered filename.
 """
 from pathlib import Path
 import argparse
@@ -26,16 +21,15 @@ import sys
 import re
 import math
 import os
+import shutil
 
-# Defaults
 DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
 DEFAULT_EXCLUDE_MAX = 3
 
 # ---------- utilities ----------
-def index_to_letters(idx):
-    """Convert 1-based index to letters: 1->'a', 2->'b', ..., 26->'z', 27->'aa'."""
+def index_to_letters(idx: int) -> str:
     if idx < 1:
         return "a"
     s = ""
@@ -46,7 +40,7 @@ def index_to_letters(idx):
         n //= 26
     return s
 
-def parse_time_str_to_seconds(s: str):
+def parse_time_str_to_seconds(s: str) -> int:
     if s is None:
         raise ValueError("time string is None")
     s0 = str(s).strip().lower()
@@ -101,7 +95,7 @@ def normalize_json(data):
         return [data]
     return []
 
-def part_from_filename(fname: str):
+def part_from_filename(fname: str) -> str:
     stem = Path(fname).stem
     return ''.join(ch for ch in stem if ch.isalnum())
 
@@ -118,7 +112,7 @@ def find_groups_recursive(input_dir: Path):
 def find_json_files(group_path: Path):
     return sorted(glob.glob(str(group_path / "*.json")))
 
-def apply_shifts(events, shift_ms):
+def apply_shifts(events, shift_ms: int):
     shifted = []
     for e in events:
         try:
@@ -151,7 +145,6 @@ def get_previously_processed_files(zip_path: Path):
             pass
     return processed
 
-# --- helper to avoid adjacent duplicates ---
 def _find_non_adjacent_insertion_pos(final_files, candidate):
     n = len(final_files)
     for pos in range(0, n+1):
@@ -171,23 +164,17 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
 
 # ---------- core merging ----------
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
-    """
-    files: list of file paths (strings)
-    rng: per-version random.Random
-    seed_for_intra: base seed for per-file intra RNG generation
-    version_num: 1-based version index (used to derive letter prefix)
-    """
     if not files:
         return None, [], [], {}, [], 0
 
-    # --- RANDOM EXCLUSION ---
+    # RANDOM EXCLUSION: allow 0..max_excl
     if len(files) <= 1:
         excluded = []
         included = list(files)
     else:
         max_excl = min(args.exclude_max, len(files)-1)
-        if max_excl >= 1:
-            excl_count = rng.randint(1, max_excl)
+        if max_excl >= 0:
+            excl_count = rng.randint(0, max_excl)
             excluded = rng.sample(files, excl_count) if excl_count > 0 else []
         else:
             excluded = []
@@ -197,7 +184,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         included = [files[0]]
         excluded = [f for f in files if f != files[0]]
 
-    # duplicates & extras (safe)
     population = included or files
     dup_count = min(2, len(population))
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
@@ -229,7 +215,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         evs = normalize_json(evs_raw)
         intra_log_local = []
 
-        # INTRA-FILE: apply for all except first file
+        # INTRA-FILE: skip for first file (idx==0)
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -269,7 +255,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             time_cursor += total_inter_ms
             pause_log["inter_file_pauses"].append({"before_file": Path(f).name, "pause_ms_list": inter_list, "is_before_index": idx})
 
-        # apply shifts and append
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
@@ -286,13 +271,9 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
 
-    # parts: sanitized stem + [Nm]
     parts_list = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m]" for f in final_files]
-
-    # join with dash immediately after bracket (no leading space) and a space after dash
     parts_joined = "- ".join(parts_list)
 
-    # version prefix letters
     letters = index_to_letters(version_num)
     merged_fname = f"V{letters}_{total_minutes}m= {parts_joined}.json"
 
@@ -307,17 +288,23 @@ def parse_args():
     p.add_argument("--within-max-pauses", type=int, required=True, help="Max number of pauses to add inside each file")
     p.add_argument("--between-max-time", required=True, help="Between-files max pause time (e.g. 10s, 1m)")
     p.add_argument("--between-max-pauses", type=int, required=True, help="Max number of pauses to insert between files (usually 1)")
-    p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (min 1)")
+    p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (0..N-1)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
-    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=argparse.SUPPRESS)
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs (default: ./output)")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
     return p.parse_args()
+
+def _next_zip_path(output_dir: Path):
+    # we purposely only create merged_bundle.zip here; the workflow is responsible for persistent numbering
+    numbered = output_dir / "merged_bundle.zip"
+    latest = output_dir / "merged_bundle.zip"
+    return numbered, latest
 
 def main():
     args = parse_args()
 
-    if args.exclude_max is None or args.exclude_max < 1:
-        print("ERROR: --exclude-max must be an integer >= 1", file=sys.stderr)
+    if args.exclude_max is None or args.exclude_max < 0:
+        print("ERROR: --exclude-max must be an integer >= 0", file=sys.stderr)
         sys.exit(2)
 
     try:
@@ -338,6 +325,8 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print("Output folder (absolute):", str(output_dir.resolve()))
+
     if not input_dir.exists():
         print(f"NOTICE: input folder '{input_dir}' does not exist. Creating it now.", file=sys.stderr)
         try:
@@ -357,7 +346,8 @@ def main():
     base_seed = args.seed
     processed = get_previously_processed_files(output_dir/"merged_bundle.zip")
     global_pause_set = set()
-    zip_items = []
+    merged_outputs = []  # list of tuples (group_path, output_json_path)
+    zip_items_json = []
 
     for gi, grp in enumerate(groups):
         files = find_json_files(grp)
@@ -375,10 +365,13 @@ def main():
             )
             if not fname:
                 continue
-            out_file_path = Path(args.output_dir) / fname
+            out_file_path = output_dir / fname
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
-            zip_items.append((grp.name, out_file_path))
+
+            # record merged json outputs for zipping
+            merged_outputs.append((grp, out_file_path))
+
             log["versions"].append({
                 "version": v,
                 "filename": fname,
@@ -388,18 +381,26 @@ def main():
                 "total_minutes": total
             })
 
-        log_file_path = Path(args.output_dir) / f"{grp.name}_log.txt"
+        log_file_path = output_dir / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
-        zip_items.append((grp.name, log_file_path))
 
-    zip_path = Path(args.output_dir) / "merged_bundle.zip"
-    with ZipFile(zip_path, "w") as zf:
-        for group_name, file_path in zip_items:
-            if file_path.exists():
-                zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
+    # Create single merged_bundle.zip containing only merged JSONs and placed under paths starting from subfolders under originals.
+    bundle_path = output_dir / "merged_bundle.zip"
+    with ZipFile(bundle_path, "w") as zf:
+        for group_path, file_path in merged_outputs:
+            if not file_path.exists():
+                continue
+            try:
+                rel_group = group_path.relative_to(input_dir)  # e.g. DESKTOP/...
+            except Exception:
+                rel_group = Path(group_path.name)
+            arc = rel_group / file_path.name
+            # write using posix style paths
+            zf.write(file_path, arcname=str(arc.as_posix()))
 
-    print("DONE. Outputs in:", output_dir)
+    print("DONE. Outputs in:", str(output_dir.resolve()))
+    print("Created:", bundle_path.name)
 
 if __name__ == "__main__":
     main()
