@@ -85,14 +85,11 @@ jobs:
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
-          BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
-          # NOTE: we intentionally do NOT use `set -e` here so we can capture logs and still
-          # continue the workflow; the captured RC is saved to $GITHUB_ENV for downstream steps.
           set -uo pipefail
-
           mkdir -p output
           echo "Running merge_macros.py ..."
+          # run and capture stdout/stderr, do not fail the step so we can upload logs & placeholder zip
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
@@ -101,18 +98,10 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
             --force > output/script_stdout.log 2> output/script_stderr.log || true
-
-          # record exit code
-          RC=0
-          if [ -s output/script_stderr.log ]; then
-            # If there is content in stderr, try to recover rc by parsing it (fallback)
-            RC=1
-          fi
-          echo "SCRIPT_RC=${RC}" >> $GITHUB_ENV
-          echo "SCRIPT_RC=${RC}"
-          echo "=== tail of stdout ==="
+          # show small tail in logs for quick inspection
+          echo "=== tail: script_stdout.log ==="
           tail -n 200 output/script_stdout.log || true
-          echo "=== tail of stderr ==="
+          echo "=== tail: script_stderr.log ==="
           tail -n 200 output/script_stderr.log || true
 
       - name: Rename merged_bundle.zip to numbered zip (use counter)
@@ -130,14 +119,7 @@ jobs:
             echo "Renamed merged_bundle.zip -> $numbered"
           else
             echo "No output/merged_bundle.zip found to rename. Creating placeholder merged_bundle_${SEQ}.zip"
-            # create minimal placeholder zip so artifact upload finds something
-            python - <<'PY'
-import zipfile, pathlib, sys
-p = pathlib.Path("output/merged_bundle_%s.zip" % ("${BUNDLE_SEQ}" if "${BUNDLE_SEQ}" else "0"))
-with zipfile.ZipFile(p, "w") as zf:
-    zf.writestr("placeholder.txt", "No merged_bundle.zip was produced by the script.")
-print(p)
-PY
+            python -c 'import zipfile, pathlib, os; seq=os.environ.get("BUNDLE_SEQ","0"); p=pathlib.Path(f"output/merged_bundle_{seq}.zip"); p.parent.mkdir(parents=True, exist_ok=True); with zipfile.ZipFile(p,"w") as zf: zf.writestr("placeholder.txt","No merged_bundle.zip was produced by the script."); print(p)'
           fi
 
       - name: Show output dir (absolute)
