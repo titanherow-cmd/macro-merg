@@ -7,6 +7,13 @@ on:
         description: 'How many versions per group'
         required: false
         default: '6'
+      force:
+        description: 'Re-run even if outputs exist'
+        required: false
+        default: 'Yes'
+        options:
+          - Yes
+          - No
       within_max_time:
         description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
         required: true
@@ -24,7 +31,7 @@ on:
         required: true
         default: '1'
       exclude_max:
-        description: 'Max files to randomly exclude per version (1..N-1)'
+        description: 'Maximum number of files to randomly exclude per version (1..N-1)'
         required: false
         default: '3'
 
@@ -32,34 +39,32 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Show originals folder (debug)
         run: |
           echo "=== originals tree ==="
           if [ -d originals ]; then
-            find originals -maxdepth 8 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
+            find originals -maxdepth 6 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
           else
             echo "No originals/ folder found in repo root."
           fi
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py (force hardcoded)
+      - name: Run merge_macros.py (direct args)
         env:
+          FORCE_CHOICE: ${{ github.event.inputs.force }}
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
         run: |
-          set -euo pipefail
-
-          # --force is hardcoded here (script will always be invoked with --force)
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
@@ -67,17 +72,12 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
-            --force
+            $( [ "${FORCE_CHOICE}" = "Yes" ] && echo "--force" || echo "" )
 
-      - name: Show output dir (absolute)
+      - name: Show output dir
         run: |
-          if [ -d output ]; then
-            echo "Output (absolute):"
-            python -c "import os; print(os.path.abspath('output'))"
-            ls -la output || true
-          else
-            echo "No output/ created."
-          fi
+          echo "=== output ==="
+          ls -la output || true
 
       - name: Ensure placeholder log if none
         run: |
@@ -91,16 +91,9 @@ jobs:
             echo "Found logs"
           fi
 
-      - name: Upload zipped bundles
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: merged-bundles
-          path: output/merged_bundle_*.zip
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: group-logs
-          path: output/*_log.txt
+          name: merged-bundle
+          path: output/merged_bundle.zip
