@@ -7,13 +7,6 @@ on:
         description: 'How many versions per group'
         required: false
         default: '6'
-      force:
-        description: 'Re-run even if outputs exist'
-        required: false
-        default: 'Yes'
-        options:
-          - Yes
-          - No
       within_max_time:
         description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
         required: true
@@ -56,9 +49,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py
+      - name: Run merge_macros.py (force hardcoded)
         env:
-          FORCE_CHOICE: ${{ github.event.inputs.force }}
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
@@ -67,11 +59,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ARGS=""
-          if [ "${FORCE_CHOICE:-}" = "Yes" ]; then
-            ARGS="--force"
-          fi
-
+          # --force is hardcoded here (script will always be invoked with --force)
           python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
@@ -79,7 +67,7 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
-            $ARGS
+            --force
 
       - name: Show output dir (absolute)
         run: |
