@@ -31,7 +31,7 @@ on:
         required: true
         default: '1'
       exclude_max:
-        description: 'Maximum number of files to randomly exclude per version (1..N-1)'
+        description: 'Max files to randomly exclude per version (1..N-1)'
         required: false
         default: '3'
 
@@ -56,7 +56,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py (direct args)
+      - name: Run merge_macros.py
         env:
           FORCE_CHOICE: ${{ github.event.inputs.force }}
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
@@ -74,10 +74,18 @@ jobs:
             --exclude-max "${EXCLUDE_MAX}" \
             $( [ "${FORCE_CHOICE}" = "Yes" ] && echo "--force" || echo "" )
 
-      - name: Show output dir
+      - name: Show output dir (absolute)
         run: |
-          echo "=== output ==="
-          ls -la output || true
+          if [ -d output ]; then
+            echo "Output (absolute):"
+            python - <<'PY'
+import os
+print(os.path.abspath("output"))
+PY
+            ls -la output || true
+          else
+            echo "No output/ created."
+          fi
 
       - name: Ensure placeholder log if none
         run: |
@@ -91,9 +99,16 @@ jobs:
             echo "Found logs"
           fi
 
-      - name: Upload artifacts
+      - name: Upload zipped bundles
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: merged-bundle
-          path: output/merged_bundle.zip
+          name: merged-bundles
+          path: output/merged_bundle_*.zip
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: group-logs
+          path: output/*_log.txt
