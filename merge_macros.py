@@ -2,12 +2,12 @@
 """
 merge_macros.py
 
-Produces merged JSONs and a single output/merged_bundle.zip containing merged JSONs.
- - No per-group log files are created.
- - If env var BUNDLE_SEQ is set, the zip will include a top-level folder named merged_bundle_<SEQ>/,
-   so the counter appears inside the zip folder structure as well as in the workflow filename.
- - If no merged outputs are produced, a small placeholder zip is written so workflow artifacts always exist.
-Naming scheme: <UPPER_LETTERS>_<TotalMinutes>m= <part1>[Xm]- <part2>[Ym].json
+Patched: randomized post-file buffer (configurable with --post-buffer-min / --post-buffer-max).
+Other behaviour preserved:
+ - recursive group discovery under 'originals'
+ - no per-group log files produced
+ - zip contains merged JSONs; if BUNDLE_SEQ env var present the zip places files under merged_bundle_<SEQ>/...
+ - naming: <UPPER_LETTERS>_<TotalMinutes>m= part1[ Xm]- part2[ Ym].json
 """
 from pathlib import Path
 import argparse
@@ -24,6 +24,8 @@ DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
 DEFAULT_EXCLUDE_MAX = 3
+DEFAULT_POST_BUFFER_MIN = "10s"
+DEFAULT_POST_BUFFER_MAX = "30s"
 
 def index_to_letters(idx: int) -> str:
     """1->'A', 2->'B', ..., 26->'Z', 27->'AA'."""
@@ -43,6 +45,7 @@ def parse_time_str_to_seconds(s: str) -> int:
     s0 = str(s).strip().lower()
     if not s0:
         raise ValueError("empty time string")
+    # formats: "M.SS" (like 1.30), "M:SS", "Xm Ys", "Xm", "Ys", "90", "90s"
     mdot = re.match(r'^(\d+)\.(\d{1,2})$', s0)
     if mdot:
         mins = int(mdot.group(1)); secs = int(mdot.group(2))
@@ -143,6 +146,7 @@ def _find_non_adjacent_insertion_pos(final_files, candidate):
 def generate_version(files, rng, seed_for_intra, version_num, args, global_pause_set):
     if not files:
         return None, [], [], {}, [], 0
+
     # RANDOM EXCLUSION: allow 0..max_excl
     if len(files) <= 1:
         excluded = []
@@ -155,13 +159,16 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
         else:
             excluded = []
         included = [f for f in files if f not in excluded]
+
     if not included and files:
         included = [files[0]]
         excluded = [f for f in files if f != files[0]]
+
     population = included or files
     dup_count = min(2, len(population))
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
     final_files = included + dup_files
+
     if included:
         k_choice = rng.choice([1,2])
         k = min(k_choice, len(included))
@@ -170,17 +177,27 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
             for ef in extra_files:
                 pos = _find_non_adjacent_insertion_pos(final_files, ef)
                 final_files.insert(min(pos, len(final_files)), ef)
+
     rng.shuffle(final_files)
+
     merged = []
     time_cursor = 0
     play_times = {}
+
     within_max_ms = max(1000, args.within_max_secs * 1000)
     between_max_ms = max(1000, args.between_max_secs * 1000)
     within_max_p = max(1, args.within_max_pauses)
     between_max_p = max(1, args.between_max_pauses)
+
+    # post-buffer range (ms)
+    post_min_ms = max(0, int(args.post_buffer_min_secs * 1000))
+    post_max_ms = max(post_min_ms, int(args.post_buffer_max_secs * 1000))
+
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
+
+        # INTRA-FILE (skip first file)
         if idx != 0 and evs and len(evs) > 1:
             n_gaps = len(evs) - 1
             intra_rng = random.Random((hash(f) & 0xffffffff) ^ (seed_for_intra + version_num))
@@ -193,6 +210,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                     pause_ms = intra_rng.randint(1000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+
+        # INTER-FILE: add pause before this file (except before first)
         if idx != 0:
             k = rng.randint(1, between_max_p)
             k = min(k, 50)
@@ -211,22 +230,29 @@ def generate_version(files, rng, seed_for_intra, version_num, args, global_pause
                     inter_ms = rng.randint(1000, between_max_ms)
                 total_inter_ms += inter_ms
             time_cursor += total_inter_ms
+
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
         if shifted:
             max_t = max(int(e.get("Time", 0)) for e in shifted)
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
-            buffer_ms = rng.randint(10_000, 30_000)
+
+            # POST-FILE BUFFER: randomized between configured min/max (ms)
+            buffer_ms = rng.randint(post_min_ms, post_max_ms) if post_max_ms >= post_min_ms else post_min_ms
             time_cursor = max_t + buffer_ms
         else:
             play_times[f] = 0
+
     total_ms = sum(play_times.values())
     total_minutes = math.ceil(total_ms / 60000) if total_ms > 0 else 0
+
     parts_list = [part_from_filename(f) + f"[{math.ceil((play_times.get(f,0))/60000)}m]" for f in final_files]
     parts_joined = "- ".join(parts_list)
+
     letters = index_to_letters(version_num)
     merged_fname = f"{letters}_{total_minutes}m= {parts_joined}.json"
+
     return merged_fname, merged, final_files, {}, [], total_minutes
 
 def parse_args():
@@ -238,6 +264,8 @@ def parse_args():
     p.add_argument("--between-max-time", required=True, help="Between-files max pause time (e.g. 10s, 1m)")
     p.add_argument("--between-max-pauses", type=int, required=True, help="Max number of pauses to insert between files (usually 1)")
     p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (0..N-1)")
+    p.add_argument("--post-buffer-min", default=DEFAULT_POST_BUFFER_MIN, help="Post-file buffer minimum (e.g. 10s, 1m30s)")
+    p.add_argument("--post-buffer-max", default=DEFAULT_POST_BUFFER_MAX, help="Post-file buffer maximum (e.g. 30s, 1m)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs (default: ./output)")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
@@ -245,33 +273,55 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # parse times
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
         args.between_max_secs = parse_time_str_to_seconds(args.between_max_time)
-        parsed_ok = True
+        args.post_buffer_min_secs = parse_time_str_to_seconds(args.post_buffer_min)
+        args.post_buffer_max_secs = parse_time_str_to_seconds(args.post_buffer_max)
     except Exception as e:
         print("ERROR parsing time inputs:", e, file=sys.stderr)
-        parsed_ok = False
+        sys.exit(2)
+
+    if args.post_buffer_min_secs < 0 or args.post_buffer_max_secs < 0:
+        print("ERROR: post-buffer times must be >= 0", file=sys.stderr)
+        sys.exit(2)
+    if args.post_buffer_max_secs < args.post_buffer_min_secs:
+        print("ERROR: post-buffer-max must be >= post-buffer-min", file=sys.stderr)
+        sys.exit(2)
+
     if args.exclude_max is None or args.exclude_max < 0:
         print("ERROR: --exclude-max must be an integer >= 0", file=sys.stderr)
         sys.exit(2)
+    if args.within_max_secs < 1 or args.between_max_secs < 1:
+        print("ERROR: max times must be >= 1 second", file=sys.stderr)
+        sys.exit(2)
+    if args.within_max_pauses < 1 or args.between_max_pauses < 1:
+        print("ERROR: max pauses must be >= 1", file=sys.stderr)
+        sys.exit(2)
+
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
     if not input_dir.exists():
         placeholder = output_dir / "merged_bundle.zip"
         with ZipFile(placeholder, "w") as zf:
             zf.writestr("placeholder.txt", "No originals folder found.")
         print("Wrote placeholder zip:", placeholder)
         sys.exit(0)
+
     groups = find_groups_recursive(input_dir)
     base_seed = args.seed
     global_pause_set = set()
     merged_outputs = []
+
     for gi, grp in enumerate(groups):
         files = find_json_files(grp)
         if not files:
             continue
+
         for v in range(1, args.versions + 1):
             version_rng = random.Random(base_seed + gi*1000 + v)
             fname, merged, finals, _, excl, total = generate_version(
@@ -283,9 +333,12 @@ def main():
             with open(out_file_path, "w", encoding="utf-8") as fh:
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             merged_outputs.append((grp, out_file_path))
+
+    # Create merged_bundle.zip that contains only merged JSONs.
     bundle_path = output_dir / "merged_bundle.zip"
     bundle_seq = os.environ.get("BUNDLE_SEQ", "").strip()
     top_folder = f"merged_bundle_{bundle_seq}" if bundle_seq else None
+
     if merged_outputs:
         with ZipFile(bundle_path, "w") as zf:
             for group_path, file_path in merged_outputs:
@@ -303,9 +356,8 @@ def main():
     else:
         with ZipFile(bundle_path, "w") as zf:
             txt = "No merged files were produced.\n"
-            if not parsed_ok:
-                txt += "Note: time parsing failed; check inputs.\n"
             zf.writestr("placeholder.txt", txt)
+
     print("DONE. Outputs in:", str(output_dir.resolve()))
     print("Created:", bundle_path.name)
 
