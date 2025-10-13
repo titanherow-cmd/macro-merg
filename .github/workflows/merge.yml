@@ -1,4 +1,4 @@
-name: Merge Macros (compact UI) - originals
+name: Merge Macros (compact UI)
 
 permissions:
   contents: write
@@ -19,60 +19,44 @@ on:
         required: true
         default: '5'
       between_max_time:
-        description: "Between-files max pause time (e.g. '4m53s')"
+        description: "After-file (between-files) max pause time (e.g. '4m53s')"
         required: true
         default: '4m53s'
       between_max_pauses:
-        description: 'Max pauses between files (ignored; kept for compatibility)'
+        description: 'Max pauses between files (ignored; for compatibility)'
         required: true
         default: '1'
       exclude_max:
-        description: 'Max files to randomly exclude per version (0..N-1)'
+        description: 'Max files to randomly exclude per version (0–N-1)'
         required: false
         default: '3'
-      post_buffer_min:
-        description: 'Post-file buffer MIN (kept for UI compatibility)'
-        required: false
-        default: '30s'
-      post_buffer_max:
-        description: 'Post-file buffer MAX (kept for UI compatibility)'
-        required: false
-        default: '1m'
 
 jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository (with write access)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - name: Prepare/increment bundle counter
+      - name: Increment bundle counter
         id: bump_counter
         run: |
           set -euo pipefail
-          COUNTER_FILE=".github/merge_bundle_counter.txt"
-          mkdir -p "$(dirname "$COUNTER_FILE")"
-          if [ -f "$COUNTER_FILE" ]; then
-            n=$(cat "$COUNTER_FILE" | tr -d '[:space:]' || echo 0)
-            if ! echo "$n" | grep -Eq '^[0-9]+$'; then
-              n=0
-            fi
-          else
-            n=0
-          fi
-          n=$((n + 1))
-          echo "$n" > "$COUNTER_FILE"
+          FILE=".github/merge_bundle_counter.txt"
+          mkdir -p "$(dirname "$FILE")"
+          n=$(cat "$FILE" 2>/dev/null || echo 0)
+          n=$((n+1))
+          echo "$n" > "$FILE"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$COUNTER_FILE"
-          git commit -m "ci: bump merged bundle counter to ${n} [skip ci]" || true
-          git push || echo "WARNING: git push failed - counter will not be persisted."
-          echo "BUNDLE_SEQ=${n}" >> $GITHUB_ENV
-          echo "BUNDLE_SEQ=${n}"
+          git add "$FILE"
+          git commit -m "bump bundle counter $n" || true
+          git push || true
+          echo "BUNDLE_SEQ=$n" >> $GITHUB_ENV
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -84,8 +68,6 @@ jobs:
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
           BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
-          POST_BUFFER_MIN: ${{ github.event.inputs.post_buffer_min }}
-          POST_BUFFER_MAX: ${{ github.event.inputs.post_buffer_max }}
           BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
           set -euo pipefail
@@ -96,52 +78,17 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
-            --post-buffer-min "${POST_BUFFER_MIN}" \
-            --post-buffer-max "${POST_BUFFER_MAX}" \
-            --force || true
+            --force
 
-      - name: Rename merged_bundle.zip to numbered zip (use counter)
+      - name: Rename zip
         run: |
           set -euo pipefail
-          SEQ="${BUNDLE_SEQ:-}"
-          if [ -z "$SEQ" ]; then
-            echo "BUNDLE_SEQ not set; skipping rename."
-            exit 0
-          fi
           mkdir -p output
           if [ -f output/merged_bundle.zip ]; then
-            numbered="output/merged_bundle_${SEQ}.zip"
-            mv output/merged_bundle.zip "$numbered"
-            echo "Renamed merged_bundle.zip -> $numbered"
-          else
-            echo "No output/merged_bundle.zip found to rename. Creating placeholder merged_bundle_${SEQ}.zip"
-            python -c 'import zipfile, pathlib, os; seq=os.environ.get("BUNDLE_SEQ","0"); p=pathlib.Path(f"output/merged_bundle_{seq}.zip"); p.parent.mkdir(parents=True, exist_ok=True); with zipfile.ZipFile(p,"w") as zf: zf.writestr("placeholder.txt","No merged_bundle.zip was produced by the script."); print(p)'
-          fi
-
-      - name: Show output dir (absolute)
-        run: |
-          if [ -d output ]; then
-            echo "Output (absolute):"
-            python -c "import os; print(os.path.abspath('output'))"
-            ls -la output || true
-          else
-            echo "No output/ created."
-          fi
-
-      - name: Ensure placeholder artifact if none
-        run: |
-          shopt -s nullglob
-          zips=(output/merged_bundle_*.zip)
-          if [ "${#zips[@]}" -eq 0 ]; then
-            mkdir -p output
-            echo '{}' > output/placeholder.json
-            echo "Created placeholder"
-          else
-            echo "Found zipped bundles"
+            mv output/merged_bundle.zip "output/merged_bundle_${BUNDLE_SEQ}.zip"
           fi
 
       - name: Upload zipped bundles
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundles
