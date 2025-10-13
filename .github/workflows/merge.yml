@@ -11,25 +11,29 @@ on:
         required: false
         default: '6'
       within_max_time:
-        description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
-        required: true
+        description: "Within-file max pause time (e.g. '2m47s')"
+        required: false
         default: '2m47s'
       within_max_pauses:
         description: 'Max pauses inside each file'
-        required: true
+        required: false
         default: '5'
       between_max_time:
-        description: "Between-files max pause time (e.g. '4m53s')"
-        required: true
+        description: "Between-files max pause time (e.g. '4m53s') - will be clamped to >=57s if smaller"
+        required: false
         default: '4m53s'
-      between_max_pauses:
-        description: 'Max pauses between files'
-        required: true
-        default: '1'
       exclude_max:
         description: 'Max files to randomly exclude per version (0..N-1)'
         required: false
         default: '3'
+      post_buffer_min:
+        description: 'Post-file buffer MIN (e.g. 30s)'
+        required: false
+        default: '30s'
+      post_buffer_max:
+        description: 'Post-file buffer MAX (e.g. 1m)'
+        required: false
+        default: '1m'
 
 jobs:
   merge:
@@ -64,27 +68,20 @@ jobs:
           echo "BUNDLE_SEQ=${n}" >> $GITHUB_ENV
           echo "BUNDLE_SEQ=${n}"
 
-      - name: Show originals folder (debug)
-        run: |
-          echo "=== originals tree ==="
-          if [ -d originals ]; then
-            find originals -maxdepth 8 -type d -print -exec sh -c 'ls -1 "{}"/*.json 2>/dev/null || true' \;
-          else
-            echo "No originals/ folder found in repo root."
-          fi
-
       - name: Setup Python 3.11
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py (force hardcoded; no logs)
+      - name: Run merge_macros.py
         env:
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
-          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
           EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
+          POST_BUFFER_MIN: ${{ github.event.inputs.post_buffer_min }}
+          POST_BUFFER_MAX: ${{ github.event.inputs.post_buffer_max }}
+          BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
           set -euo pipefail
           python merge_macros.py \
@@ -92,8 +89,9 @@ jobs:
             --within-max-time "${WITHIN_MAX_TIME}" \
             --within-max-pauses "${WITHIN_MAX_PAUSES}" \
             --between-max-time "${BETWEEN_MAX_TIME}" \
-            --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-max "${EXCLUDE_MAX}" \
+            --post-buffer-min "${POST_BUFFER_MIN}" \
+            --post-buffer-max "${POST_BUFFER_MAX}" \
             --force || true
 
       - name: Rename merged_bundle.zip to numbered zip (use counter)
