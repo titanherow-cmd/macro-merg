@@ -2,9 +2,13 @@
 """
 merge_macros.py
 
-Unified "after-file" pause rule (hard random min 30..57s, UI-configurable max),
-intra-file pauses (4s..within-max), appended MOBILE-only file (no pauses),
-preserve originals subtree in zip, deterministic with --seed.
+Finalized script implementing:
+ - Unified after-file pause rule (per-file random min 30..57s, UI-configurable max).
+ - Intra-file pauses (4s..within-max), configurable count.
+ - Appended MOBILE-only file: prefers group folder then repo root; appended as-is (no pauses).
+ - Preserves originals/ subtree inside ZIP.
+ - Deterministic via --seed.
+ - UI-compatible with compact GitHub Actions inputs (no post-buffer UI fields).
 """
 from pathlib import Path
 import argparse
@@ -17,22 +21,18 @@ import re
 import math
 import os
 
-# Defaults and constants
+# Defaults
 DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
 DEFAULT_EXCLUDE_MAX = 3
 DEFAULT_WITHIN_MAX = "2m47s"    # intra pause default max
 DEFAULT_BETWEEN_MAX = "4m53s"   # after-file unified pause default max
-DEFAULT_POST_MIN = "30s"        # (kept for UI compatibility, not used separately)
-DEFAULT_POST_MAX = "1m"         # (kept for UI compatibility, not used separately)
+ATTACHED_FILENAME = "close reopen mobile screensharelink.json"  # filename to append for MOBILE groups
 
-ATTACHED_FILENAME = "close reopen mobile screensharelink.json"  # append for MOBILE groups (repo root)
-
-# --- helpers ---
-_time_re_dot = re.compile(r'^(\d+)\.(\d{1,2})$')
-_time_re_colon = re.compile(r'^(\d+):(\d{1,2})$')
-_time_re_ms = re.compile(r'^(?:(\d+)m)?\s*(?:(\d+)s)?$')
+_time_re_dot = re.compile(r'^(\\d+)\\.(\\d{1,2})$')
+_time_re_colon = re.compile(r'^(\\d+):(\\d{1,2})$')
+_time_re_ms = re.compile(r'^(?:(\\d+)m)?\\s*(?:(\\d+)s)?$')
 
 def parse_time_str_to_seconds(s: str) -> int:
     if s is None:
@@ -57,12 +57,12 @@ def parse_time_str_to_seconds(s: str) -> int:
         mm = int(m.group(1)) if m.group(1) else 0
         ss = int(m.group(2)) if m.group(2) else 0
         return mm * 60 + ss
-    if re.match(r'^\d+(\.\d+)?s?$', s0):
+    if re.match(r'^\\d+(\\.\\d+)?s?$', s0):
         s2 = s0[:-1] if s0.endswith('s') else s0
         val = float(s2)
         return int(round(val))
-    if re.match(r'^\d+$', s0):
-        return int(s0)  # plain integer = seconds
+    if re.match(r'^\\d+$', s0):
+        return int(s0)
     raise ValueError(f"Could not parse time value '{s}'")
 
 def index_to_letters(idx: int) -> str:
@@ -106,7 +106,8 @@ def find_groups_recursive(input_dir: Path):
         jsons = [f for f in files if f.lower().endswith(".json")]
         if jsons:
             groups.append(Path(root))
-    return sorted(groups)
+    groups = sorted(groups)
+    return groups
 
 def find_json_files(group_path: Path):
     return sorted(glob.glob(str(group_path / "*.json")))
@@ -132,13 +133,12 @@ def apply_shifts(events, shift_ms: int):
         shifted.append(new_event)
     return shifted
 
-# --- main generation logic ---
 def generate_version(files, rng, seed_for_intra, version_num, args, group_path: Path):
     excluded = []
     if not files:
         return None, [], [], {}, [], 0
 
-    # RANDOM EXCLUSION between 0..exclude_max (clamped to len(files)-1)
+    # Random exclusion between 0..exclude_max (clamped)
     if len(files) <= 1:
         included = list(files)
         excluded = []
@@ -157,7 +157,6 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
     dup_files = rng.sample(population, dup_count) if dup_count > 0 else []
     final_files = included + dup_files
 
-    # insert some extra files non-adjacent where possible
     if included:
         k_choice = rng.choice([1,2])
         k = min(k_choice, len(included))
@@ -166,7 +165,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
             for ef in extra_files:
                 n = len(final_files)
                 pos = None
-                for attempt in range(n+3):
+                for attempt in range(n+2):
                     p = rng.randrange(0, n+1)
                     left_ok = (p-1 < 0) or (final_files[p-1] != ef)
                     right_ok = (p >= n) or (final_files[p] != ef)
@@ -183,22 +182,18 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
     time_cursor = 0
     play_times = {}
 
-    # bookkeeping maps
-    intra_sum_ms_map = {}
-    post_pause_ms_map = {}
+    intra_sum = {}
+    post_pause = {}
 
-    # parse configured maxima
-    within_max_ms = max(4000, args.within_max_secs * 1000)  # intra min 4s
-    between_max_secs_config = max(1, args.between_max_secs)  # UI max (seconds), at least 1s (we'll clamp up per-file)
-    between_max_ms_config = between_max_secs_config * 1000
+    within_max_ms = max(4000, args.within_max_secs * 1000)  # enforce at least 4s
+    between_max_ms_config = max(1, args.between_max_secs) * 1000  # UI max in ms
 
-    # For every final file, apply intra pauses during file, then append events, then apply unified AFTER-FILE pause
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
 
-        intra_sum_ms_map[f] = 0
-        post_pause_ms_map[f] = 0
+        intra_sum[f] = 0
+        post_pause[f] = 0
 
         # INTRA-FILE pauses for ALL files (including first)
         if evs and len(evs) > 1:
@@ -208,11 +203,10 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
             if chosen_count > 0:
                 chosen_gaps = intra_rng.sample(range(n_gaps), chosen_count)
                 for gap_idx in sorted(chosen_gaps):
-                    pause_ms = intra_rng.randint(4000, within_max_ms)  # 4s .. within_max
-                    # shift later events in-file
+                    pause_ms = intra_rng.randint(4000, within_max_ms)
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-                    intra_sum_ms_map[f] += pause_ms
+                    intra_sum[f] += pause_ms
 
         # append file events shifted by current time_cursor
         shifted = apply_shifts(evs, time_cursor)
@@ -226,59 +220,50 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
             play_times[f] = 0
             max_t = time_cursor
 
-        # AFTER-FILE unified pause: apply to every file except the special appended MOBILE-attached file,
-        # but at this stage we don't know about appended attached file; appended file will be added later and will not receive a pause.
-        # Choose per-file lower bound randomly between 30..57 seconds
+        # AFTER-FILE unified pause: apply after every file (will not be added to appended MOBILE file later)
         min_rand_secs = rng.randint(30, 57)
         min_rand_ms = min_rand_secs * 1000
-        # effective upper bound = UI between_max (config) but if config < per-file min -> clamp up silently
-        if between_max_ms_config < min_rand_ms:
-            effective_between_max_ms = min_rand_ms
-        else:
-            effective_between_max_ms = between_max_ms_config
-        # choose pause after file (uniform)
+        effective_between_max_ms = between_max_ms_config if between_max_ms_config >= min_rand_ms else min_rand_ms
         pause_ms = rng.randint(min_rand_ms, effective_between_max_ms)
-        post_pause_ms_map[f] = pause_ms
-        # advance time_cursor to after-file end + pause
+        post_pause[f] = pause_ms
         time_cursor = max_t + pause_ms
 
-    # After all merged files are processed, append attached file for MOBILE groups only
-    appended_filename = None
+    # Append attached file for MOBILE groups only (prefer group folder then repo root)
+    appended = None
     try:
         parts_lower = [p.lower() for p in group_path.parts]
     except Exception:
         parts_lower = []
     if "mobile" in parts_lower:
-        cand = Path(ATTACHED_FILENAME)
+        cand_local = group_path / ATTACHED_FILENAME
+        cand = cand_local if cand_local.exists() else Path(ATTACHED_FILENAME)
         if cand.exists():
             evs_raw = load_json(cand) or []
             evs = normalize_json(evs_raw)
-            # append immediately at current time_cursor (no after pause before, no intra, no after pause after it)
+            # append immediately at current time_cursor, no intra, no after pause
             shifted = apply_shifts(evs, time_cursor)
             merged.extend(shifted)
             if shifted:
                 max_t = max(int(e.get("Time", 0)) for e in shifted)
                 min_t = min(int(e.get("Time", 0)) for e in shifted)
                 play_times[str(cand)] = max_t - min_t
-                intra_sum_ms_map[str(cand)] = 0
-                post_pause_ms_map[str(cand)] = 0
-                # move cursor to end of appended file (no post pause)
+                intra_sum[str(cand)] = 0
+                post_pause[str(cand)] = 0
                 time_cursor = max_t
                 final_files.append(str(cand))
-                appended_filename = str(cand)
+                appended = str(cand)
 
-    # compute per-file effective times (duration + intra + post-pause) - for appended file post-pause is 0
+    # compute per-file effective times: duration + intra + post_pause (appended file has post_pause 0)
     per_file_effective_ms = {}
     for f in final_files:
         dur = play_times.get(f, 0)
-        intra = intra_sum_ms_map.get(f, 0)
-        postp = post_pause_ms_map.get(f, 0)
-        per_file_effective_ms[f] = dur + intra + postp
+        intra = intra_sum.get(f, 0)
+        post = post_pause.get(f, 0)
+        per_file_effective_ms[f] = dur + intra + post
 
     total_effective_ms = sum(per_file_effective_ms.values())
     total_minutes = math.ceil(total_effective_ms / 60000) if total_effective_ms > 0 else 0
 
-    # build filename parts: show +<minutes> per file (rounded up)
     parts = []
     for f in final_files:
         minutes = math.ceil(per_file_effective_ms.get(f, 0) / 60000)
@@ -290,53 +275,36 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
 
     return merged_fname, merged, final_files, {}, excluded, total_minutes
 
-# --- CLI / main ---
 def parse_args():
-    p = argparse.ArgumentParser(description="Merge macros - recursive groups under 'originals'.")
+    p = argparse.ArgumentParser(description="Merge macros - recursive group discovery under 'originals'.")
     p.add_argument("--versions", type=int, default=6, help="How many versions per group")
     p.add_argument("--force", action="store_true", help="Force reprocessing even if outputs exist")
     p.add_argument("--within-max-time", default=DEFAULT_WITHIN_MAX, help="Within-file max pause time (e.g. 2m47s)")
     p.add_argument("--within-max-pauses", type=int, default=5, help="Max number of intra-file pauses")
-    p.add_argument("--between-max-time", default=DEFAULT_BETWEEN_MAX, help="After-file unified max pause time (e.g. 4m53s); min per-file is random 30..57s")
-    p.add_argument("--between-max-pauses", type=int, default=1, help="(ignored; kept for UI compatibility)")
-    p.add_argument("--post-buffer-min", default=DEFAULT_POST_MIN, help="(kept for UI compatibility)")
-    p.add_argument("--post-buffer-max", default=DEFAULT_POST_MAX, help="(kept for UI compatibility)")
-    p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Max number of files to randomly exclude per version (0..N-1)")
-    p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups")
-    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs")
+    p.add_argument("--between-max-time", default=DEFAULT_BETWEEN_MAX, help="After-file unified max pause time (e.g. 4m53s); per-file min is random 30..57s")
+    p.add_argument("--between-max-pauses", type=int, default=1, help="(ignored) for UI compatibility")
+    p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (0..N-1)")
+    p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write outputs (default: ./output)")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help=argparse.SUPPRESS)
     return p.parse_args()
 
 def main():
     args = parse_args()
-
-    # parse times
     try:
         args.within_max_secs = parse_time_str_to_seconds(args.within_max_time)
         args.between_max_secs = parse_time_str_to_seconds(args.between_max_time)
-        # post-buffer kept for UI, but unified pause uses between_max_secs; we still parse for validation though
-        args.post_buffer_min_secs = parse_time_str_to_seconds(args.post_buffer_min)
-        args.post_buffer_max_secs = parse_time_str_to_seconds(args.post_buffer_max)
     except Exception as e:
         print("ERROR parsing time inputs:", e, file=sys.stderr)
         sys.exit(2)
 
-    # sanity and clamp: within min 4s
     if args.within_max_secs < 4:
         print("WARNING: --within-max-time too small; raising to 4s.")
         args.within_max_secs = 4
 
-    # Note: per-file lower bound will be random 30..57s; if UI between max is less than that we'll silently clamp per-file effective max to the per-file min.
     if args.between_max_secs < 1:
         print("WARNING: --between-max-time too small; raising to 1s.")
         args.between_max_secs = 1
-
-    if args.exclude_max is None or args.exclude_max < 0:
-        print("ERROR: --exclude-max must be integer >= 0", file=sys.stderr)
-        sys.exit(2)
-    if args.within_max_pauses < 1:
-        print("ERROR: --within-max-pauses must be >= 1", file=sys.stderr)
-        sys.exit(2)
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
@@ -369,7 +337,6 @@ def main():
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             merged_outputs.append((grp, out_file_path))
 
-    # Create merged_bundle.zip preserving originals subtree
     bundle_path = output_dir / "merged_bundle.zip"
     bundle_seq = os.environ.get("BUNDLE_SEQ", "").strip()
     top_folder = f"merged_bundle_{bundle_seq}" if bundle_seq else None
