@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""merge_macros_full_patched.py
+"""merge_macros_elastic.py
 
-Full feature-complete merging script with robust time parsing (handles surrounding quotes), deterministic RNG,
-unified after-file pause rule (per-file random min 30..57s, UI-configurable max), intra-file pauses,
-MOBILE-only appended file handling (prefers group folder then repo root), ZIP numbering, and no group logs.
+Restored from merge_macros_full_patched.py.
+Implements "elastic" pause logic: if the user-defined max pause is less
+than the hardcoded minimum (4s intra, 30s after), the pause range
+will be [0, user_max] instead of clamping.
+
+Also updates argparse defaults to match new UI.
 """
 from pathlib import Path
 import argparse
@@ -16,14 +19,21 @@ import re
 import math
 import os
 
-# Defaults
+# Defaults (updated to match new UI)
 DEFAULT_INPUT_DIR = "originals"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_SEED = 12345
-DEFAULT_EXCLUDE_MAX = 3
-DEFAULT_WITHIN_MAX = "2m47s"    # intra pause default max
-DEFAULT_BETWEEN_MAX = "4m53s"   # after-file unified pause default max
+DEFAULT_VERSIONS = 16
+DEFAULT_EXCLUDE_MAX = 5
+DEFAULT_WITHIN_MAX = "1m32s"    # intra pause default max
+DEFAULT_WITHIN_MAX_PAUSES = 3
+DEFAULT_BETWEEN_MAX = "2m37s"   # after-file unified pause default max
 ATTACHED_FILENAME = "close reopen mobile screensharelink.json"  # filename to append for MOBILE groups
+
+# Hardcoded minimum pause values
+HARD_MIN_INTRA_MS = 4000
+HARD_MIN_AFTER_LOWER_MS = 30000
+HARD_MIN_AFTER_UPPER_MS = 57000
 
 _time_re_dot = re.compile(r'^(\d+)\.(\d{1,2})$')
 _time_re_colon = re.compile(r'^(\d+):(\d{1,2})$')
@@ -181,8 +191,17 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
     play_times = {}
     intra_sum = {}
     post_pause = {}
-    within_max_ms = max(4000, args.within_max_secs * 1000)  # enforce at least 4s
-    between_max_ms_config = max(1, args.between_max_secs) * 1000  # UI max in ms
+
+    # --- ELASTIC PAUSE LOGIC ---
+    # Get user's configured max times in milliseconds
+    within_max_ms_config = args.within_max_secs * 1000
+    between_max_ms_config = max(1, args.between_max_secs) * 1000
+
+    # Determine effective min/max for INTRA-file pauses
+    effective_min_intra_ms = HARD_MIN_INTRA_MS if within_max_ms_config >= HARD_MIN_INTRA_MS else 0
+    effective_max_intra_ms = max(effective_min_intra_ms, within_max_ms_config)
+    # --- END ELASTIC PAUSE LOGIC ---
+
     for idx, f in enumerate(final_files):
         evs_raw = load_json(Path(f)) or []
         evs = normalize_json(evs_raw)
@@ -195,7 +214,8 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
             if chosen_count > 0:
                 chosen_gaps = intra_rng.sample(range(n_gaps), chosen_count)
                 for gap_idx in sorted(chosen_gaps):
-                    pause_ms = intra_rng.randint(4000, within_max_ms)
+                    # Use elastic min/max
+                    pause_ms = intra_rng.randint(effective_min_intra_ms, effective_max_intra_ms)
                     for j in range(gap_idx+1, len(evs)):
                         evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
                     intra_sum[f] += pause_ms
@@ -209,10 +229,20 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
         else:
             play_times[f] = 0
             max_t = time_cursor
-        min_rand_secs = rng.randint(30, 57)
-        min_rand_ms = min_rand_secs * 1000
-        effective_between_max_ms = between_max_ms_config if between_max_ms_config >= min_rand_ms else min_rand_ms
+
+        # --- ELASTIC AFTER-FILE PAUSE LOGIC ---
+        if between_max_ms_config < HARD_MIN_AFTER_LOWER_MS:
+            # User max is small, use [0, user_max]
+            min_rand_ms = 0
+            effective_between_max_ms = between_max_ms_config
+        else:
+            # User max is large, use [hard_min, user_max]
+            min_rand_ms = rng.randint(HARD_MIN_AFTER_LOWER_MS, HARD_MIN_AFTER_UPPER_MS)
+            effective_between_max_ms = between_max_ms_config if between_max_ms_config >= min_rand_ms else min_rand_ms
+
         pause_ms = rng.randint(min_rand_ms, effective_between_max_ms)
+        # --- END ELASTIC AFTER-FILE PAUSE LOGIC ---
+
         post_pause[f] = pause_ms
         time_cursor = max_t + pause_ms
     appended = None
@@ -233,7 +263,7 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
                 min_t = min(int(e.get("Time", 0)) for e in shifted)
                 play_times[str(cand)] = max_t - min_t
                 intra_sum[str(cand)] = 0
-                post_pause[str(cand)] = 0
+                post_pause[str(cand)] = 0  # No post-pause for appended file
                 time_cursor = max_t
                 final_files.append(str(cand))
                 appended = str(cand)
@@ -256,11 +286,11 @@ def generate_version(files, rng, seed_for_intra, version_num, args, group_path: 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Merge macros - recursive group discovery under 'originals'.")
-    p.add_argument("--versions", type=int, default=6, help="How many versions per group")
+    p.add_argument("--versions", type=int, default=DEFAULT_VERSIONS, help="How many versions per group")
     p.add_argument("--force", action="store_true", help="Force reprocessing even if outputs exist")
-    p.add_argument("--within-max-time", default=DEFAULT_WITHIN_MAX, help="Within-file max pause time (e.g. 2m47s)")
-    p.add_argument("--within-max-pauses", type=int, default=5, help="Max number of intra-file pauses")
-    p.add_argument("--between-max-time", default=DEFAULT_BETWEEN_MAX, help="After-file unified max pause time (e.g. 4m53s); per-file min is random 30..57s")
+    p.add_argument("--within-max-time", default=DEFAULT_WITHIN_MAX, help="Within-file max pause time (e.g. 1m32s)")
+    p.add_argument("--within-max-pauses", type=int, default=DEFAULT_WITHIN_MAX_PAUSES, help="Max number of intra-file pauses")
+    p.add_argument("--between-max-time", default=DEFAULT_BETWEEN_MAX, help="After-file unified max pause time (e.g. 2m37s); per-file min is random 30..57s if max >= 30s")
     p.add_argument("--between-max-pauses", type=int, default=1, help="(ignored) for UI compatibility")
     p.add_argument("--exclude-max", type=int, default=DEFAULT_EXCLUDE_MAX, help="Maximum number of files to randomly exclude per version (0..N-1)")
     p.add_argument("--input-dir", default=DEFAULT_INPUT_DIR, help="Top-level folder containing original groups (default: originals)")
@@ -276,12 +306,12 @@ def main():
     except Exception as e:
         print("ERROR parsing time inputs:", e, file=sys.stderr)
         sys.exit(2)
-    if args.within_max_secs < 4:
-        print("WARNING: --within-max-time too small; raising to 4s.")
-        args.within_max_secs = 4
-    if args.between_max_secs < 1:
-        print("WARNING: --between-max-time too small; raising to 1s.")
-        args.between_max_secs = 1
+    # No longer need to clamp minimums here, elastic logic handles it
+    if args.within_max_secs < 0:
+        args.within_max_secs = 0
+    if args.between_max_secs < 0:
+        args.between_max_secs = 0
+        
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -321,10 +351,16 @@ def main():
                     rel_group = group_path.relative_to(input_dir)
                 except Exception:
                     rel_group = Path(group_path.name)
-                if top_folder:
-                    arc = Path(top_folder) / rel_group / file_path.name
-                else:
-                    arc = rel_group / file_path.name
+                
+                # Use originals/ as the base inside the zip
+                arc = Path("originals") / rel_group / file_path.name
+                
+                # This was an old rule, but let's stick to originals/ prefix
+                # if top_folder:
+                #     arc = Path(top_folder) / rel_group / file_path.name
+                # else:
+                #     arc = rel_group / file_path.name
+                
                 zf.write(file_path, arcname=str(arc.as_posix()))
     else:
         with ZipFile(bundle_path, "w") as zf:
