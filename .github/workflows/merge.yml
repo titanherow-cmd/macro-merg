@@ -1,78 +1,55 @@
-# GitHub Actions workflow for the merger project
-# Workflow dispatch inputs with default values as specified:contentReference[oaicite:0]{index=0}
-name: Merger Workflow
+name: Merge Macros
 
 on:
   workflow_dispatch:
     inputs:
-      versions_per_group:
+      versions:
         description: 'How many versions per group'
-        required: true
-        default: 16
-        type: number
-      within_file_max_pause_time:
-        description: 'Within-file max pause time'
-        required: true
-        default: '1m32'
-        type: string
-      max_pauses_inside_each_file:
+        default: '16'
+      intra_file_max:
+        description: 'Within-file max pause time (e.g. "1.30" or "1m30s")'
+        default: '1m32s'
+      max_intra_pauses:
         description: 'Max pauses inside each file'
-        required: true
-        default: 3
-        type: number
-      after_file_max_pause_time:
-        description: 'After-file (between-files) max pause time'
-        required: true
-        default: '2m37'
-        type: string
-      max_files_to_randomly_exclude_per_version:
-        description: 'Max files to randomly exclude per version'
-        required: true
-        default: 5
-        type: number
-      max_pauses_between_files:
-        description: 'Max pauses between files'
-        required: true
-        default: 1
-        type: number
+        default: '3'
+      after_file_max:
+        description: 'After-file (between-files) max pause time (e.g. "4m53s")'
+        default: '2m37s'
+      exclude_count:
+        description: 'Max files to randomly exclude per version (0–N-1)'
+        default: '5'
+      max_after_pauses:
+        description: 'Max pauses between files (ignored; for compatibility)'
+        default: '1'
 
 jobs:
-  merger_job:
+  merge:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup Python (if needed)
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
-      - name: Adjust input values
+      - name: Run Merge Script
         run: |
-          # Default minimums (assume default hardcoded min is 1 for count fields)
-          MIN_VERSIONS=1
-          if [ ${{ inputs.versions_per_group }} -lt $MIN_VERSIONS ]; then
-            MIN_VERSIONS=0
-          fi
-          MIN_PAUSES_INSIDE=1
-          if [ ${{ inputs.max_pauses_inside_each_file }} -lt $MIN_PAUSES_INSIDE ]; then
-            MIN_PAUSES_INSIDE=0
-          fi
-          MIN_PAUSES_BETWEEN=1
-          if [ ${{ inputs.max_pauses_between_files }} -lt $MIN_PAUSES_BETWEEN ]; then
-            MIN_PAUSES_BETWEEN=0
-          fi
-          # Export adjusted minimums as environment variables if needed by script
-          echo "MIN_VERSIONS=$MIN_VERSIONS" >> $GITHUB_ENV
-          echo "MIN_PAUSES_INSIDE=$MIN_PAUSES_INSIDE" >> $GITHUB_ENV
-          echo "MIN_PAUSES_BETWEEN=$MIN_PAUSES_BETWEEN" >> $GITHUB_ENV
+          python3 merge_macros.py \
+            --input-dir "originals" \
+            --output-dir "output" \
+            --versions "${{ github.event.inputs.versions }}" \
+            --intra-file-max "${{ github.event.inputs.intra_file_max }}" \
+            --exclude-count "${{ github.event.inputs.exclude_count }}" \
+            --inter-file-max "${{ github.event.inputs.after_file_max }}" \
+            --inter-file-count "${{ github.event.inputs.max_after_pauses }}"
 
-      - name: Run merger script
-        run: |
-          python3 merger.py --versions "${{ inputs.versions_per_group }}" \
-                            --within_pause "${{ inputs.within_file_max_pause_time }}" \
-                            --max_inside "${{ inputs.max_pauses_inside_each_file }}" \
-                            --after_pause "${{ inputs.after_file_max_pause_time }}" \
-                            --exclude_files "${{ inputs.max_files_to_randomly_exclude_per_version }}" \
-                            --max_between "${{ inputs.max_pauses_between_files }}"
+      - name: Zip merged outputs
+        run: zip -r merged_bundle.zip output/
+
+      - name: Upload merged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged_bundle
+          path: merged_bundle.zip
