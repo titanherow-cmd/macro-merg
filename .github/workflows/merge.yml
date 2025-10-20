@@ -1,4 +1,4 @@
-name: Merge macros (preserve UI inputs)
+name: Merge macros (UI simplified — no mins, intra always enabled)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         required: false
         default: 'output'
       versions:
-        description: 'Number of versions per group'
+        description: 'Number of versions to create per group'
         required: false
         default: '5'
       seed:
@@ -27,20 +27,12 @@ on:
         description: 'How many files to randomly exclude per version (0-3)'
         required: false
         default: '1'
-      intra_file_enabled:
-        description: 'Enable intra-file random pauses? (true/false)'
-        required: false
-        default: 'false'
       intra_file_max:
-        description: 'Max intra-file pauses per file'
+        description: 'Max number of pauses inside each file (integer)'
         required: false
         default: '4'
-      intra_file_min_mins:
-        description: 'Min intra-file pause minutes (default 1)'
-        required: false
-        default: '1'
       intra_file_max_mins:
-        description: 'Max intra-file pause minutes (default 3)'
+        description: 'Max pause length inside file (minutes). No min input in UI — script uses hardcoded min and will adapt if needed.'
         required: false
         default: '3'
 
@@ -48,7 +40,7 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -56,7 +48,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros with UI inputs passed through
+      - name: Run merge_macros (UI inputs passed through)
         run: |
           set -euo pipefail
           INPUT_DIR="${{ github.event.inputs.input_dir }}"
@@ -65,16 +57,14 @@ jobs:
           SEED="${{ github.event.inputs.seed }}"
           FORCE="${{ github.event.inputs.force }}"
           EXC="${{ github.event.inputs.exclude_count }}"
-          INTRA_EN="${{ github.event.inputs.intra_file_enabled }}"
           INTRA_MAX="${{ github.event.inputs.intra_file_max }}"
-          INTRA_MIN="${{ github.event.inputs.intra_file_min_mins }}"
           INTRA_MAXM="${{ github.event.inputs.intra_file_max_mins }}"
 
-          ARGS="--input-dir \"${INPUT_DIR}\" --output-dir \"${OUTPUT_DIR}\" --versions ${VERSIONS} --exclude-count ${EXC} --intra-file-max ${INTRA_MAX} --intra-file-min-mins ${INTRA_MIN} --intra-file-max-mins ${INTRA_MAXM}"
+          # Build arguments -- note: intra-file pauses are always enabled
+          ARGS="--input-dir \"${INPUT_DIR}\" --output-dir \"${OUTPUT_DIR}\" --versions ${VERSIONS} --exclude-count ${EXC} --intra-file-max ${INTRA_MAX} --intra-file-max-mins ${INTRA_MAXM} --intra-file-enabled"
 
           if [ -n "${SEED}" ]; then ARGS="${ARGS} --seed ${SEED}"; fi
           if [ "${FORCE}" = 'true' ]; then ARGS="${ARGS} --force"; fi
-          if [ "${INTRA_EN}" = 'true' ]; then ARGS="${ARGS} --intra-file-enabled"; fi
 
           echo "Running: python merge_macros.py ${ARGS}"
           eval python merge_macros.py ${ARGS}
