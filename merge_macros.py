@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-merge_macros.py  (auto-defaults + elastic validation)
+merge_macros.py — patched
 
-This version keeps the same command-line arguments expected by existing workflows/UI but:
- - provides defaults for --input-dir and --output-dir so it can be run without args
- - validates intra-file min/max and makes them elastic: if the provided max is less than the configured min,
-   the script will shrink the min to match the max (so the code remains functional)
- - fixes total-time computation so filename totals include inter-file pauses
- - keeps all UI inputs unchanged (no new CLI flags added)
+Key fixes:
+ - total playtime in filename is computed from the merged event list (includes pauses)
+ - inter-file pauses are applied AFTER each file's events (i.e., pause between files)
+ - intra-file min/max are elastic: if max < min then min is shrunk to max (no error)
+ - sampling and duplication logic made robust for small file counts
+ - CLI signature preserved so your Actions UI remains the same
 """
 
 from pathlib import Path
@@ -30,7 +30,7 @@ def parse_args():
     p.add_argument("--force", action="store_true", help="Force processing groups even if previously processed")
     p.add_argument("--exclude-count", type=int, default=1, help="How many files to randomly exclude per version")
     p.add_argument("--intra-file-enabled", action="store_true", help="Enable intra-file random pauses")
-    p.add_argument("--intra-file-max", type=int, default=4, help="Max intra-file pauses per file (default:4)")
+    p.add_argument("--intra-file-max", type=int, default=4, help="Max intra-file pauses per file (default: 4)")
     p.add_argument("--intra-file-min-mins", type=int, default=1, help="Min intra-file pause length (minutes)")
     p.add_argument("--intra-file-max-mins", type=int, default=3, help="Max intra-file pause length (minutes)")
     return p.parse_args()
@@ -52,10 +52,15 @@ def normalize_json(data):
         for k in ("items", "entries", "records", "actions", "eventsList", "events_array"):
             if k in data and isinstance(data[k], list):
                 return data[k]
-        return [data]
+        # single-event dict
+        if "Time" in data:
+            return [data]
+        return []
     return []
 
 def find_groups(input_dir: Path):
+    if not input_dir.exists() or not input_dir.is_dir():
+        return []
     return [p for p in sorted(input_dir.iterdir()) if p.is_dir()]
 
 def find_json_files(group_path: Path):
@@ -71,14 +76,8 @@ def apply_shifts(events, shift_ms):
                 t = int(float(e.get("Time", 0)))
             except Exception:
                 t = 0
-        new = {
-            "Type": e.get("Type"),
-            "Time": t + int(shift_ms),
-            "X": e.get("X"),
-            "Y": e.get("Y"),
-            "Delta": e.get("Delta"),
-            "KeyCode": e.get("KeyCode"),
-        }
+        new = dict(e)  # copy all keys through
+        new["Time"] = t + int(shift_ms)
         shifted.append(new)
     return shifted
 
@@ -105,6 +104,7 @@ def insert_intra_pauses_fixed(events, rng, max_pauses, min_minutes, max_minutes,
     n = len(evs)
     if n < 2:
         return evs
+    # choose k pauses between 0 and min(max_pauses, n-1)
     k = rng.randint(0, min(max_pauses, n - 1))
     if k == 0:
         return evs
@@ -120,25 +120,27 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
                      intra_enabled, intra_max, intra_min_mins, intra_max_mins):
     rng = random.Random(seed)
     if not files:
-        return None, [], [], {}, [], 0
+        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
 
     m = len(files)
     exclude_count = max(0, min(exclude_count, m - 1))
-    excluded = rng.sample(files, k=exclude_count) if exclude_count else []
+    excluded = rng.sample(files, k=exclude_count) if exclude_count and m > 0 else []
     included = [f for f in files if f not in excluded]
 
-    # Safe duplication and extra insertion logic
+    # duplication - safe
     dup_files = []
     if included:
         dup_count = min(2, len(included))
         if len(included) == 1:
-            dup_files = [included[0]]
+            dup_files = [included[0]] if dup_count >= 1 else []
         else:
-            dup_files = rng.sample(included, k=dup_count)
+            dup_files = rng.sample(included, k=dup_count) if dup_count > 0 else []
 
     final_files = included + dup_files
 
+    # extra insertions (safe)
     if included:
+        extra_files = []
         try:
             choice_k = rng.choice([1, 2])
             if len(included) >= choice_k:
@@ -146,7 +148,7 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
             else:
                 extra_files = included.copy()
         except Exception:
-            extra_files = []
+            extra_files = included.copy()
         for ef in extra_files:
             pos = rng.randrange(len(final_files) + 1)
             if pos > 0 and final_files[pos - 1] == ef:
@@ -161,6 +163,7 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
     play_times = {}
 
     for idx, f in enumerate(final_files):
+        # read and normalize
         evs = normalize_json(load_json(Path(f)) or [])
         intra_log_local = []
         if intra_enabled and evs:
@@ -170,31 +173,53 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
         if intra_log_local:
             pause_log["intra_file_pauses"].append({"file": Path(f).name, "pauses": intra_log_local})
 
-        # inter-file pause before appending this file (60% chance)
-        if rng.random() < 0.6:
-            while True:
-                inter_ms = rng.randint(120000, 180000) if idx == 0 else rng.randint(120000, 780000)
-                if inter_ms not in global_pause_set:
-                    global_pause_set.add(inter_ms)
-                    break
-            time_cursor += inter_ms
-            pause_log["inter_file_pauses"].append({"after_file": Path(f).name,
-                                                     "pause_ms": inter_ms,
-                                                     "is_before_index": idx})
-
+        # shift events to current cursor and append
         shifted = apply_shifts(evs, time_cursor)
         merged.extend(shifted)
+
+        # compute file duration and move cursor to end-of-file + small gap
         if shifted:
             max_t = max(int(e.get("Time", 0)) for e in shifted)
             min_t = min(int(e.get("Time", 0)) for e in shifted)
             play_times[f] = max_t - min_t
-            time_cursor = max_t + 30
+            time_cursor = max_t + 30  # tiny gap to avoid identical timestamps
         else:
             play_times[f] = 0
 
-    parts = [part_from_filename(f) + f"[{round((play_times[f] or 0) / 60000)}m] " for f in final_files]
+        # After file: add inter-file pause (if not last file)
+        if idx < len(final_files) - 1:
+            # 60% chance by original behavior
+            if rng.random() < 0.6:
+                # choose ranges: for "first file" the pause after it can be smaller, otherwise wider
+                # (we keep prior ranges: first file 2-3 min, others 2-13 min)
+                inter_ms = None
+                attempts = 0
+                while True:
+                    if idx == 0:
+                        candidate = rng.randint(120000, 180000)
+                    else:
+                        candidate = rng.randint(120000, 780000)
+                    # ensure uniqueness to reduce accidental duplicate gaps
+                    if candidate not in global_pause_set:
+                        inter_ms = candidate
+                        global_pause_set.add(candidate)
+                        break
+                    attempts += 1
+                    if attempts > 20:
+                        inter_ms = candidate
+                        break
+                time_cursor += inter_ms
+                pause_log["inter_file_pauses"].append({"after_file": Path(f).name,
+                                                       "pause_ms": inter_ms,
+                                                       "after_index": idx})
 
-    # Compute total minutes from merged events (includes pauses)
+    # build parts label
+    parts = []
+    for f in final_files:
+        minutes = round((play_times.get(f, 0) or 0) / 60000)
+        parts.append(f"{part_from_filename(f)}[{minutes}m] ")
+
+    # compute total minutes from merged events (includes pauses)
     if merged:
         min_t = min(int(e.get("Time", 0)) for e in merged)
         max_t = max(int(e.get("Time", 0)) for e in merged)
@@ -208,7 +233,7 @@ def generate_version(files, seed, global_pause_set, version_num, exclude_count,
 def main():
     a = parse_args()
 
-    # Elastic validation: ensure intra-file min <= max; if max < min, shrink min to max and warn
+    # Elastic validation for intra-file min/max:
     if a.intra_file_max_mins < a.intra_file_min_mins:
         print(f"NOTICE: intra-file max ({a.intra_file_max_mins}m) < intra-file min ({a.intra_file_min_mins}m). "
               f"Shrinking min to {a.intra_file_max_mins} to remain elastic.", file=sys.stderr)
@@ -216,7 +241,7 @@ def main():
 
     in_dir, out_dir = Path(a.input_dir), Path(a.output_dir)
 
-    # Ensure output folder exists
+    # ensure output exists
     out_dir.mkdir(parents=True, exist_ok=True)
 
     base_seed = a.seed if a.seed is not None else random.randrange(2**31)
@@ -224,10 +249,15 @@ def main():
     global_pauses = set()
     zip_items = []
 
-    for gi, grp in enumerate(find_groups(in_dir)):
+    groups = find_groups(in_dir)
+    if not groups:
+        print(f"No group subfolders found in input dir: {in_dir}", file=sys.stderr)
+
+    for gi, grp in enumerate(groups):
         files = find_json_files(grp)
         if not files:
             continue
+        # skip if previously processed and not forcing
         if not a.force and all(Path(f).name in processed for f in files):
             continue
 
@@ -244,21 +274,24 @@ def main():
                 json.dump(merged, fh, indent=2, ensure_ascii=False)
             zip_items.append((grp.name, out_file_path))
             log["versions"].append({"version": v, "filename": fname,
-                                     "excluded": [Path(x).name for x in excl],
-                                     "final_order": [Path(x).name for x in finals],
-                                     "pause_details": pauses,
-                                     "total_minutes": total})
+                                    "excluded": [Path(x).name for x in excl],
+                                    "final_order": [Path(x).name for x in finals],
+                                    "pause_details": pauses,
+                                    "total_minutes": total})
 
+        # write per-group log file (kept for debugging/traceability)
         log_file_path = out_dir / f"{grp.name}_log.txt"
         with open(log_file_path, "w", encoding="utf-8") as fh:
             json.dump(log, fh, indent=2, ensure_ascii=False)
         zip_items.append((grp.name, log_file_path))
 
-    # Create ZIP
+    # create zip
     zip_path = out_dir / "merged_bundle.zip"
     with ZipFile(zip_path, "w") as zf:
         for group_name, file_path in zip_items:
-            zf.write(file_path, arcname=f"{group_name}/{file_path.name}")
+            # store under group folder in zip
+            arcname = f"{group_name}/{file_path.name}"
+            zf.write(file_path, arcname=arcname)
 
     print("DONE.")
 
