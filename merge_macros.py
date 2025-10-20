@@ -2,18 +2,17 @@
 """
 merge_macros.py
 
-Backward-compatible CLI: accepts both legacy flags (--intra-file-max, --inter-file-max, ...)
-and the newer names (--within-max-time, --between-max-time, ...).
+Backward-compatible CLI: accepts both legacy flags and newer names.
+Added alias: --inter-file-count -> between max pauses (kept for compatibility).
 
 Usage examples:
   python3 merge_macros.py --input-dir originals --output-dir output --versions 16 \
     --within-max-time "1m32s" --within-max-pauses 3 --between-max-time "2m37s" \
     --between-max-pauses 1 --exclude-count 5
 
-  or with legacy names:
-  python3 merge_macros.py --input-dir originals --output-dir output --versions 16 \
-    --intra-file-max "1m32s" --intra-file-max-pauses 3 --inter-file-max "2m37s" \
-    --inter-file-max-pauses 1 --exclude-count 5
+  or (legacy flags):
+  python3 merge_macros.py --intra-file-max "1m32s" --intra-file-max-pauses 3 \
+    --inter-file-max "2m37s" --inter-file-count 1 --exclude-count 5
 """
 
 from pathlib import Path
@@ -36,21 +35,17 @@ def parse_time_to_seconds(s: str) -> int:
     s = str(s).strip()
     if not s:
         raise ValueError("Empty time string")
-    # mm:ss
     m = re.match(r'^(\d+):(\d{1,2})$', s)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
-    # m.ss (treat as minutes.seconds, e.g. 1.30 => 1m30s)
     m = re.match(r'^(\d+)\.(\d{1,2})$', s)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
-    # with letters like 1m30s, 90s, 2m
     m = re.match(r'^(?:(\d+)m)?(?:(\d+)s)?$', s)
     if m and (m.group(1) or m.group(2)):
         minutes = int(m.group(1)) if m.group(1) else 0
         seconds = int(m.group(2)) if m.group(2) else 0
         return minutes * 60 + seconds
-    # pure integer (seconds)
     if re.match(r'^\d+$', s):
         return int(s)
     raise ValueError(f"Cannot parse time value: {s!r}")
@@ -259,6 +254,9 @@ def build_arg_parser():
     p.add_argument("--intra-file-max-pauses", type=int, dest="within_max_pauses", help=argparse.SUPPRESS)
     p.add_argument("--inter-file-max", type=str, dest="between_max_time", help=argparse.SUPPRESS)
     p.add_argument("--inter-file-max-pauses", type=int, dest="between_max_pauses", help=argparse.SUPPRESS)
+
+    # Added alias requested: --inter-file-count -> between_max_pauses
+    p.add_argument("--inter-file-count", type=int, dest="between_max_pauses", help=argparse.SUPPRESS)
 
     return p
 
