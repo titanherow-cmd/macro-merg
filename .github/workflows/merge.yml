@@ -1,14 +1,17 @@
-name: Merge macros (fixed inputs)
+name: Merge Macros (compact UI)
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
     inputs:
       versions:
         description: 'How many versions per group'
-        required: true
+        required: false
         default: '16'
       within_max_time:
-        description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
+        description: "Within-file max pause time (e.g. '1m32s')"
         required: true
         default: '1m32s'
       within_max_pauses:
@@ -16,12 +19,12 @@ on:
         required: true
         default: '3'
       between_max_time:
-        description: "After-file (between-files) max pause time (e.g. '4m53s')"
+        description: "After-file (between-files) max pause time (e.g. '2m37s')"
         required: true
         default: '2m37s'
-      exclude_count:
+      exclude_max:
         description: 'Max files to randomly exclude per version (0–N-1)'
-        required: true
+        required: false
         default: '5'
       between_max_pauses:
         description: 'Max pauses between files (ignored; for compatibility)'
@@ -34,56 +37,52 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Increment bundle counter
+        id: bump_counter
+        run: |
+          set -euo pipefail
+          FILE=".github/merge_bundle_counter.txt"
+          mkdir -p "$(dirname "$FILE")"
+          n=$(cat "$FILE" 2>/dev/null || echo 0)
+          n=$((n+1))
+          echo "$n" > "$FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          git commit -m "bump bundle counter $n" || true
+          git push || true
+          echo "BUNDLE_SEQ=$n" >> $GITHUB_ENV
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py with UI inputs
+      - name: Run merge_macros_elastic.py
+        env:
+          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
+          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
+          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
+          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
+          EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
+          BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
           set -euo pipefail
+          python merge_macros_elastic.py             --versions "${{ github.event.inputs.versions }}"             --within-max-time "${{ WITHIN_MAX_TIME }}"             --within-max-pauses "${{ WITHIN_MAX_PAUSES }}"             --between-max-time "${{ BETWEEN_MAX_TIME }}"             --between-max-pauses "${{ BETWEEN_MAX_PAUSES }}"             --exclude-max "${{ EXCLUDE_MAX }}"             --force
 
-          # Read workflow inputs (these are strings)
-          VERSIONS="${{ github.event.inputs.versions }}"
-          WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
-          WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
-          BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
-          EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
-          BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
-
-          # Print chosen values for logs
-          echo "Inputs:"
-          echo "  versions=${VERSIONS}"
-          echo "  within_max_time='${WITHIN_MAX_TIME}'"
-          echo "  within_max_pauses=${WITHIN_MAX_PAUSES}"
-          echo "  between_max_time='${BETWEEN_MAX_TIME}'"
-          echo "  exclude_count=${EXCLUDE_COUNT}"
-          echo "  between_max_pauses=${BETWEEN_MAX_PAUSES}"
-
-          # Call script (script accepts legacy and new flags; both are OK)
-          python3 merge_macros.py \
-            --input-dir "originals" \
-            --output-dir "output" \
-            --versions "${VERSIONS}" \
-            --within-max-time "${WITHIN_MAX_TIME}" \
-            --within-max-pauses "${WITHIN_MAX_PAUSES}" \
-            --between-max-time "${BETWEEN_MAX_TIME}" \
-            --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
-            --exclude-count "${EXCLUDE_COUNT}"
-
-      - name: Zip merged outputs
+      - name: Rename zip
         run: |
           set -euo pipefail
-          if [ -d output ]; then
-            zip -r merged_bundle.zip output || true
-          else
-            echo "No output directory found; creating empty zip"
-            zip -r merged_bundle.zip --filesync || true
+          mkdir -p output
+          if [ -f output/merged_bundle.zip ]; then
+            mv output/merged_bundle.zip "output/merged_bundle_${BUNDLE_SEQ}.zip"
           fi
 
-      - name: Upload merged ZIP artifact
+      - name: Upload zipped bundles
         uses: actions/upload-artifact@v4
         with:
-          name: merged-bundle
-          path: merged_bundle.zip
+          name: merged-bundles
+          path: output/merged_bundle_*.zip
