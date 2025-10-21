@@ -63,6 +63,7 @@ jobs:
 
       - name: Run merge_macros_elastic.py
         env:
+          # Define env vars for the step
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
           WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
           BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
@@ -71,7 +72,15 @@ jobs:
           BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
         run: |
           set -euo pipefail
-          python merge_macros_elastic.py             --versions "${{ github.event.inputs.versions }}"             --within-max-time "${{ WITHIN_MAX_TIME }}"             --within-max-pauses "${{ WITHIN_MAX_PAUSES }}"             --between-max-time "${{ BETWEEN_MAX_TIME }}"             --between-max-pauses "${{ BETWEEN_MAX_PAUSES }}"             --exclude-max "${{ EXCLUDE_MAX }}"             --force
+          # Use shell syntax ($VAR) to access env vars defined above
+          python merge_macros_elastic.py \
+            --versions "${{ github.event.inputs.versions }}" \
+            --within-max-time "$WITHIN_MAX_TIME" \
+            --within-max-pauses "$WITHIN_MAX_PAUSES" \
+            --between-max-time "$BETWEEN_MAX_TIME" \
+            --between-max-pauses "$BETWEEN_MAX_PAUSES" \
+            --exclude-max "$EXCLUDE_MAX" \
+            --force
 
       - name: Rename zip
         run: |
