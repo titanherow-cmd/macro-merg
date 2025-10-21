@@ -1,4 +1,4 @@
-name: Merge macros (stable UI)
+name: Merge macros (per-folder, numbered outputs)
 
 on:
   workflow_dispatch:
@@ -50,9 +50,10 @@ jobs:
           echo "Recursing originals (short):"
           find originals -maxdepth 3 -type f -name "*.json" -print || true
 
-      - name: Run merger
+      - name: Run merge_macros.py with UI inputs
         run: |
           set -euo pipefail
+
           VERSIONS="${{ github.event.inputs.versions }}"
           WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
           WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
@@ -60,13 +61,13 @@ jobs:
           EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
           BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
 
-          echo "Inputs chosen:"
-          echo "  versions=${VERSIONS}"
-          echo "  within_max_time='${WITHIN_MAX_TIME}'"
-          echo "  within_max_pauses=${WITHIN_MAX_PAUSES}"
-          echo "  between_max_time='${BETWEEN_MAX_TIME}'"
-          echo "  exclude_count=${EXCLUDE_COUNT}"
-          echo "  between_max_pauses=${BETWEEN_MAX_PAUSES}"
+          echo "Running merge with:"
+          echo " versions=${VERSIONS}"
+          echo " within_max_time='${WITHIN_MAX_TIME}'"
+          echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
+          echo " between_max_time='${BETWEEN_MAX_TIME}'"
+          echo " exclude_count=${EXCLUDE_COUNT}"
+          echo " between_max_pauses=${BETWEEN_MAX_PAUSES}"
 
           python3 merge_macros.py \
             --input-dir "originals" \
@@ -78,18 +79,20 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs
+      - name: Zip merged outputs (upload)
         if: always()
         run: |
           set -euo pipefail
           if [ -d output ]; then
+            ls -la output || true
             zip -r merged_bundle.zip output || true
+            echo "Created merged_bundle.zip"
             ls -la merged_bundle.zip || true
           else
-            echo "No output folder; nothing to zip"
+            echo "No output directory found; nothing to zip"
           fi
 
-      - name: Upload merged bundle
+      - name: Upload merged ZIP artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
