@@ -1,17 +1,14 @@
-name: Merge Macros (compact UI)
-
-permissions:
-  contents: write
+name: Merge macros (stable UI)
 
 on:
   workflow_dispatch:
     inputs:
       versions:
         description: 'How many versions per group'
-        required: false
+        required: true
         default: '16'
       within_max_time:
-        description: "Within-file max pause time (e.g. '1m32s')"
+        description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
         required: true
         default: '1m32s'
       within_max_pauses:
@@ -19,15 +16,15 @@ on:
         required: true
         default: '3'
       between_max_time:
-        description: "After-file (between-files) max pause time (e.g. '2m37s')"
+        description: "After-file (between-files) max pause time (e.g. '4m53s')"
         required: true
         default: '2m37s'
-      exclude_max:
+      exclude_count:
         description: 'Max files to randomly exclude per version (0–N-1)'
-        required: false
+        required: true
         default: '5'
       between_max_pauses:
-        description: 'Max pauses between files (ignored; for compatibility)'
+        description: 'Max pauses between files (kept for compatibility; placed last)'
         required: true
         default: '1'
 
@@ -37,59 +34,64 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Increment bundle counter
-        id: bump_counter
-        run: |
-          set -euo pipefail
-          FILE=".github/merge_bundle_counter.txt"
-          mkdir -p "$(dirname "$FILE")"
-          n=$(cat "$FILE" 2>/dev/null || echo 0)
-          n=$((n+1))
-          echo "$n" > "$FILE"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FILE"
-          git commit -m "bump bundle counter $n" || true
-          git push || true
-          echo "BUNDLE_SEQ=$n" >> $GITHUB_ENV
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros.py
-        env:
-          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
-          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
-          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
-          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
-          EXCLUDE_MAX: ${{ github.event.inputs.exclude_max }}
-          BUNDLE_SEQ: ${{ env.BUNDLE_SEQ }}
+      - name: Show repo contents (debug)
         run: |
-          set -euo pipefail
-          python merge_macros.py \
-            --versions "${{ github.event.inputs.versions }}" \
-            --within-max-time "$WITHIN_MAX_TIME" \
-            --within-max-pauses "$WITHIN_MAX_PAUSES" \
-            --between-max-time "$BETWEEN_MAX_TIME" \
-            --between-max-pauses "$BETWEEN_MAX_PAUSES" \
-            --exclude-max "$EXCLUDE_MAX" \
-            --force
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -la
+          echo "Originals tree:"
+          ls -la originals || true
+          echo "Recursive originals:"
+          ls -la originals/** || true
 
-      - name: Rename zip
+      - name: Run merge_macros.py with UI inputs
         run: |
           set -euo pipefail
-          mkdir -p output
-          if [ -f output/merged_bundle.zip ]; then
-            mv output/merged_bundle.zip "output/merged_bundle_${BUNDLE_SEQ}.zip"
+          VERSIONS="${{ github.event.inputs.versions }}"
+          WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
+          WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
+          BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
+          EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
+          BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
+
+          echo "Running merge_macros.py with:"
+          echo " versions=${VERSIONS}"
+          echo " within_max_time='${WITHIN_MAX_TIME}'"
+          echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
+          echo " between_max_time='${BETWEEN_MAX_TIME}'"
+          echo " exclude_count=${EXCLUDE_COUNT}"
+          echo " between_max_pauses=${BETWEEN_MAX_PAUSES}"
+
+          python3 merge_macros.py \
+            --input-dir "originals" \
+            --output-dir "output" \
+            --versions "${VERSIONS}" \
+            --within-max-time "${WITHIN_MAX_TIME}" \
+            --within-max-pauses "${WITHIN_MAX_PAUSES}" \
+            --between-max-time "${BETWEEN_MAX_TIME}" \
+            --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
+            --exclude-count "${EXCLUDE_COUNT}"
+
+      - name: Zip merged outputs
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -d output ]; then
+            zip -r merged_bundle.zip output || true
+            ls -la output || true
+            echo "Created merged_bundle.zip"
+          else
+            echo "No output directory found; nothing to zip"
           fi
 
-      - name: Upload zipped bundles
+      - name: Upload merged ZIP artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: merged-bundles
-          path: output/merged_bundle_*.zip
+          name: merged-bundle
+          path: merged_bundle.zip
