@@ -1,4 +1,4 @@
-name: Merge macros (fixed counter + elastic pauses)
+name: Merge macros (fixed scanning & zip top folder)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     permissions:
-      contents: read  # we are not pushing back to the repo
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -64,13 +64,11 @@ jobs:
           echo "PWD: $PWD"
           echo "Listing originals (top-level):"
           ls -la originals || true
-          echo "Recursive sample:"
-          find originals -maxdepth 4 -type f -name "*.json" -print || true
+          echo "Recursive sample (json files):"
+          find originals -type f -name '*.json' -print || true
 
       - name: Run merge_macros.py with UI inputs
         env:
-          # BUNDLE_SEQ is already exported to GITHUB_ENV by previous step and inherited here
-          # No need to set it via expression; read it in the script via $BUNDLE_SEQ
           PYTHONUNBUFFERED: '1'
         run: |
           set -euo pipefail
@@ -100,18 +98,16 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs and upload
+      - name: Zip merged outputs and set ZIP_NAME
         if: always()
         run: |
           set -euo pipefail
-          # read BUNDLE_SEQ to know output folder name
           BUNDLE="${BUNDLE_SEQ:-}"
           if [ -z "$BUNDLE" ]; then
-            # fallback: try to read counter file
             BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
             BUNDLE=${BUNDLE:-1}
           fi
-          OUTPUT_BASE="merged files_v${BUNDLE}"
+          OUTPUT_BASE="merged_bundle_${BUNDLE}"
           echo "Zipping output/${OUTPUT_BASE} -> ${OUTPUT_BASE}.zip"
           if [ -d "output/${OUTPUT_BASE}" ]; then
             zip -r "${OUTPUT_BASE}.zip" "output/${OUTPUT_BASE}" || true
