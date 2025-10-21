@@ -61,7 +61,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run merge_macros_elastic.py
+      - name: Run merge_macros.py
         env:
           # Define env vars for the step
           WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
@@ -73,7 +73,9 @@ jobs:
         run: |
           set -euo pipefail
           # Use shell syntax ($VAR) to access env vars defined above
-          python merge_macros_elastic.py \
+          #
+          # *** THIS LINE IS THE FIX ***
+          python merge_macros.py \
             --versions "${{ github.event.inputs.versions }}" \
             --within-max-time "$WITHIN_MAX_TIME" \
             --within-max-pauses "$WITHIN_MAX_PAUSES" \
