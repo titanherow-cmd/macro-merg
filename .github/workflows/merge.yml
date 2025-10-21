@@ -1,4 +1,4 @@
-name: Merge macros (per-folder, numbered outputs)
+name: Merge macros (fixed counter + elastic pauses)
 
 on:
   workflow_dispatch:
@@ -31,6 +31,8 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # we are not pushing back to the repo
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,20 +42,38 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Bump run counter (exposed as BUNDLE_SEQ)
+        id: bump
+        run: |
+          set -euo pipefail
+          COUNTER_FILE=".github/merge_bundle_counter.txt"
+          if [ -f "$COUNTER_FILE" ]; then
+            PREV=$(cat "$COUNTER_FILE" | tr -d ' \t\n\r' || echo "")
+            PREV=${PREV:-0}
+          else
+            PREV=0
+          fi
+          NEXT=$((PREV + 1))
+          mkdir -p "$(dirname "$COUNTER_FILE")"
+          echo "$NEXT" > "$COUNTER_FILE"
+          echo "BUNDLE_SEQ=$NEXT" >> "$GITHUB_ENV"
+          echo "BUMPED counter: $PREV -> $NEXT"
+
       - name: Show originals (debug)
         run: |
           echo "PWD: $PWD"
-          echo "Listing repo root:"
-          ls -la
           echo "Listing originals (top-level):"
           ls -la originals || true
-          echo "Recursing originals (short):"
-          find originals -maxdepth 3 -type f -name "*.json" -print || true
+          echo "Recursive sample:"
+          find originals -maxdepth 4 -type f -name "*.json" -print || true
 
       - name: Run merge_macros.py with UI inputs
+        env:
+          # BUNDLE_SEQ is already exported to GITHUB_ENV by previous step and inherited here
+          # No need to set it via expression; read it in the script via $BUNDLE_SEQ
+          PYTHONUNBUFFERED: '1'
         run: |
           set -euo pipefail
-
           VERSIONS="${{ github.event.inputs.versions }}"
           WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
           WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
@@ -61,13 +81,14 @@ jobs:
           EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
           BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
 
-          echo "Running merge with:"
+          echo "Inputs:"
           echo " versions=${VERSIONS}"
           echo " within_max_time='${WITHIN_MAX_TIME}'"
           echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
           echo " between_max_time='${BETWEEN_MAX_TIME}'"
           echo " exclude_count=${EXCLUDE_COUNT}"
           echo " between_max_pauses=${BETWEEN_MAX_PAUSES}"
+          echo "BUNDLE_SEQ='${BUNDLE_SEQ:-(none)}'"
 
           python3 merge_macros.py \
             --input-dir "originals" \
@@ -79,22 +100,31 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs (upload)
+      - name: Zip merged outputs and upload
         if: always()
         run: |
           set -euo pipefail
-          if [ -d output ]; then
-            ls -la output || true
-            zip -r merged_bundle.zip output || true
-            echo "Created merged_bundle.zip"
-            ls -la merged_bundle.zip || true
-          else
-            echo "No output directory found; nothing to zip"
+          # read BUNDLE_SEQ to know output folder name
+          BUNDLE="${BUNDLE_SEQ:-}"
+          if [ -z "$BUNDLE" ]; then
+            # fallback: try to read counter file
+            BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
+            BUNDLE=${BUNDLE:-1}
           fi
+          OUTPUT_BASE="merged files_v${BUNDLE}"
+          echo "Zipping output/${OUTPUT_BASE} -> ${OUTPUT_BASE}.zip"
+          if [ -d "output/${OUTPUT_BASE}" ]; then
+            zip -r "${OUTPUT_BASE}.zip" "output/${OUTPUT_BASE}" || true
+            ls -la "${OUTPUT_BASE}.zip" || true
+          else
+            echo "No output folder 'output/${OUTPUT_BASE}' found; creating empty zip placeholder"
+            zip -r "${OUTPUT_BASE}.zip" || true
+          fi
+          echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
 
       - name: Upload merged ZIP artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
-          path: merged_bundle.zip
+          path: ${{ env.ZIP_NAME }}
