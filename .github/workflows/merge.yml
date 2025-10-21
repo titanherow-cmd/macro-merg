@@ -1,4 +1,4 @@
-name: Merge macros (per-folder, numbered outputs)
+name: Merge macros (stable UI)
 
 on:
   workflow_dispatch:
@@ -40,17 +40,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Show originals tree (debug)
+      - name: Show originals (debug)
         run: |
-          echo "Listing originals (for debug):"
+          echo "PWD: $PWD"
+          echo "Listing repo root:"
+          ls -la
+          echo "Listing originals (top-level):"
           ls -la originals || true
-          echo "Listing originals recursively (for debug):"
-          ls -la originals/** || true
+          echo "Recursing originals (short):"
+          find originals -maxdepth 3 -type f -name "*.json" -print || true
 
-      - name: Run merge_macros.py with UI inputs
+      - name: Run merger
         run: |
           set -euo pipefail
-
           VERSIONS="${{ github.event.inputs.versions }}"
           WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
           WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
@@ -58,13 +60,13 @@ jobs:
           EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
           BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
 
-          echo "Running merge with:"
-          echo " versions=${VERSIONS}"
-          echo " within_max_time='${WITHIN_MAX_TIME}'"
-          echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
-          echo " between_max_time='${BETWEEN_MAX_TIME}'"
-          echo " exclude_count=${EXCLUDE_COUNT}"
-          echo " between_max_pauses=${BETWEEN_MAX_PAUSES}"
+          echo "Inputs chosen:"
+          echo "  versions=${VERSIONS}"
+          echo "  within_max_time='${WITHIN_MAX_TIME}'"
+          echo "  within_max_pauses=${WITHIN_MAX_PAUSES}"
+          echo "  between_max_time='${BETWEEN_MAX_TIME}'"
+          echo "  exclude_count=${EXCLUDE_COUNT}"
+          echo "  between_max_pauses=${BETWEEN_MAX_PAUSES}"
 
           python3 merge_macros.py \
             --input-dir "originals" \
@@ -76,20 +78,18 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs (upload)
+      - name: Zip merged outputs
         if: always()
         run: |
           set -euo pipefail
           if [ -d output ]; then
-            ls -la output || true
             zip -r merged_bundle.zip output || true
-            echo "Created merged_bundle.zip"
             ls -la merged_bundle.zip || true
           else
-            echo "No output directory found; nothing to zip"
+            echo "No output folder; nothing to zip"
           fi
 
-      - name: Upload merged ZIP artifact
+      - name: Upload merged bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
