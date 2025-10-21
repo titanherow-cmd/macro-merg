@@ -6,8 +6,9 @@ merge_macros.py
   directly contains .json files as a separate group to merge.
 - Mirrors folder tree under output/<merged_bundle_{N}>.
 - For groups under 'mobile' (case-insensitive), inserts the special file
-  'close reopen mobile screensharelink.json' once near the middle (after a file boundary)
-  and once at the end. Special file gets no intra pauses and no trailing inter pause.
+  'close reopen mobile screensharelink.json' (or filename variants containing 'screensharelink')
+  once near the middle (after a file boundary) and once at the end. Special file gets no intra pauses
+  and no trailing inter pause.
 - Per-file displayed time = event duration (including intra-file pauses) + inter-file pause after it.
 - Total displayed time calculated from merged events (merged already includes pauses).
 - Elastic min rule for pause ranges: if UI max < hardcoded min, min becomes 0..UI_max.
@@ -31,6 +32,7 @@ DEFAULT_INTRA_MIN_SEC = 4     # 4 seconds
 DEFAULT_INTER_MIN_SEC = 30    # 30 seconds
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
+SPECIAL_KEYWORD = "screensharelink"  # used for tolerant matching
 
 # ---------- helpers ----------
 def parse_time_to_seconds(s: str) -> int:
@@ -216,25 +218,53 @@ def number_to_letters(n: int) -> str:
 
 # ---------- find special file ----------
 def locate_special_file_for_group(folder: Path, input_root: Path):
-    """Try to locate the SPECIAL_FILENAME relevant for this group.
-    Priority:
-      1) if the special file exists directly inside the group folder -> use it
-      2) else search under input_root for the first matching file (case-sensitive filename match)
-    Returns a Path or None.
     """
+    Robust locate of the special file for a group.
+
+    Priority:
+      1) exact filename present directly under the group folder
+      2) exact filename present under input_root (originals/)
+      3) file under repository root (cwd) whose name contains SPECIAL_KEYWORD (case-insensitive)
+      4) first match anywhere in repo whose name contains SPECIAL_KEYWORD (case-insensitive)
+      5) None if not found
+
+    This covers variants like 'vclose reopen mobile screensharelink.json' at repo root.
+    """
+    # 1) exact in the group folder
     try:
         cand = folder / SPECIAL_FILENAME
         if cand.exists():
             return cand.resolve()
     except Exception:
         pass
-    # fallback: search input_root
+
+    # 2) exact under input_root
     try:
-        matches = list(input_root.rglob(SPECIAL_FILENAME))
-        if matches:
-            return matches[0].resolve()
+        cand2 = input_root / SPECIAL_FILENAME
+        if cand2.exists():
+            return cand2.resolve()
     except Exception:
         pass
+
+    # 3) search repo root (cwd) for files that include SPECIAL_KEYWORD in name (case-insensitive)
+    repo_root = Path.cwd()
+    keyword = SPECIAL_KEYWORD.lower()
+    try:
+        # look for matches directly in repo_root (non-recursive) first
+        for p in repo_root.iterdir():
+            if p.is_file() and keyword in p.name.lower():
+                return p.resolve()
+    except Exception:
+        pass
+
+    # 4) fallback: search entire repo recursively for the keyword in filename
+    try:
+        for p in repo_root.rglob("*"):
+            if p.is_file() and keyword in p.name.lower():
+                return p.resolve()
+    except Exception:
+        pass
+
     return None
 
 # ---------- generate for a single folder ----------
@@ -290,14 +320,14 @@ def generate_version_for_folder(files, rng, version_num,
             # insert near middle AFTER a file boundary:
             if final_files:
                 mid_idx = len(final_files) // 2
-                # insert after mid_idx element (so position mid_idx+1)
                 insert_pos = min(mid_idx + 1, len(final_files))
                 final_files.insert(insert_pos, str(special_path))
             else:
-                # nothing to put it after, just put at start
                 final_files.insert(0, str(special_path))
             # also append at end
             final_files.append(str(special_path))
+        else:
+            print(f"INFO: mobile group {folder_path} - special '{SPECIAL_FILENAME}' not found in repo; skipping insertion.")
 
     merged = []
     pause_info = {"inter_file_pauses": [], "intra_file_pauses": []}
