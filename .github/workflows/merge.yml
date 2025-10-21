@@ -1,4 +1,4 @@
-name: Merge macros (stable UI)
+name: Merge macros (per-folder, numbered outputs)
 
 on:
   workflow_dispatch:
@@ -40,18 +40,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Show repo contents (debug)
+      - name: Show originals tree (debug)
         run: |
-          echo "Workspace: $GITHUB_WORKSPACE"
-          ls -la
-          echo "Originals tree:"
+          echo "Listing originals (for debug):"
           ls -la originals || true
-          echo "Recursive originals:"
+          echo "Listing originals recursively (for debug):"
           ls -la originals/** || true
 
       - name: Run merge_macros.py with UI inputs
         run: |
           set -euo pipefail
+
           VERSIONS="${{ github.event.inputs.versions }}"
           WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
           WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
@@ -59,7 +58,7 @@ jobs:
           EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
           BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
 
-          echo "Running merge_macros.py with:"
+          echo "Running merge with:"
           echo " versions=${VERSIONS}"
           echo " within_max_time='${WITHIN_MAX_TIME}'"
           echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
@@ -77,14 +76,15 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs
+      - name: Zip merged outputs (upload)
         if: always()
         run: |
           set -euo pipefail
           if [ -d output ]; then
-            zip -r merged_bundle.zip output || true
             ls -la output || true
+            zip -r merged_bundle.zip output || true
             echo "Created merged_bundle.zip"
+            ls -la merged_bundle.zip || true
           else
             echo "No output directory found; nothing to zip"
           fi
