@@ -14,6 +14,7 @@ merge_macros.py
 - Elastic min rule for pause ranges: if UI max < hardcoded min, min becomes 0..UI_max.
 - Preserves all event fields when shifting times.
 - Filenames start with alphabetic version labels (A_, B_, ... AA_, ...).
+- Part tokens use up to first 4 alphanumeric chars: prefer letters then digits (lowercased).
 """
 
 from pathlib import Path
@@ -154,8 +155,34 @@ def zero_base_events(events):
     return shifted, duration_ms
 
 def part_from_filename(fname: str):
+    """
+    New token rule: up to 4 alphanumeric chars, prefer letters first then digits.
+    - Extract letters (a-z) from stem in order; take first up to 4.
+    - If less than 4 letters, append digits from stem (in order) until up to 4 chars.
+    - Lowercase result.
+    - If no letters/digits, fallback to first up to 4 alnum chars of stem.
+    """
     stem = Path(fname).stem
-    return ''.join(ch for ch in stem if ch.isalnum())
+    # collect letters and digits in order
+    letters = [ch for ch in stem if ch.isalpha()]
+    digits = [ch for ch in stem if ch.isdigit()]
+    token_chars = []
+    # take up to 4 letters first
+    for ch in letters:
+        if len(token_chars) >= 4:
+            break
+        token_chars.append(ch.lower())
+    # if fewer than 4, append digits
+    if len(token_chars) < 4:
+        for d in digits:
+            if len(token_chars) >= 4:
+                break
+            token_chars.append(d)
+    # if still empty, fall back to first up to 4 alnum chars (non-letter/digit unlikely)
+    if not token_chars:
+        alnum = [ch for ch in stem if ch.isalnum()]
+        token_chars = [ch.lower() for ch in alnum[:4]]
+    return ''.join(token_chars)
 
 def insert_intra_pauses(events, rng, max_pauses, min_s, max_s):
     """Return events with inserted intra pauses and a list of the pauses (ms)."""
@@ -227,8 +254,6 @@ def locate_special_file_for_group(folder: Path, input_root: Path):
       3) file under repository root (cwd) whose name contains SPECIAL_KEYWORD (case-insensitive)
       4) first match anywhere in repo whose name contains SPECIAL_KEYWORD (case-insensitive)
       5) None if not found
-
-    This covers variants like 'vclose reopen mobile screensharelink.json' at repo root.
     """
     # 1) exact in the group folder
     try:
@@ -250,7 +275,6 @@ def locate_special_file_for_group(folder: Path, input_root: Path):
     repo_root = Path.cwd()
     keyword = SPECIAL_KEYWORD.lower()
     try:
-        # look for matches directly in repo_root (non-recursive) first
         for p in repo_root.iterdir():
             if p.is_file() and keyword in p.name.lower():
                 return p.resolve()
