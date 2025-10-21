@@ -1,4 +1,4 @@
-name: Merge macros (fixed scanning & zip top folder)
+name: Merge macros (scan all folders, zip top-level)
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Bump run counter (exposed as BUNDLE_SEQ)
+      - name: Bump run counter (expose BUNDLE_SEQ)
         id: bump
         run: |
           set -euo pipefail
@@ -98,7 +98,7 @@ jobs:
             --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs and set ZIP_NAME
+      - name: Zip merged outputs (ensure top-level folder name matches merged bundle)
         if: always()
         run: |
           set -euo pipefail
@@ -108,15 +108,17 @@ jobs:
             BUNDLE=${BUNDLE:-1}
           fi
           OUTPUT_BASE="merged_bundle_${BUNDLE}"
-          echo "Zipping output/${OUTPUT_BASE} -> ${OUTPUT_BASE}.zip"
+          echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
+          # cd into 'output' so the zip contains OUTPUT_BASE as top-level (no leading 'output/')
           if [ -d "output/${OUTPUT_BASE}" ]; then
-            zip -r "${OUTPUT_BASE}.zip" "output/${OUTPUT_BASE}" || true
+            (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
             ls -la "${OUTPUT_BASE}.zip" || true
+            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
           else
-            echo "No output folder 'output/${OUTPUT_BASE}' found; creating empty zip placeholder"
+            echo "No 'output/${OUTPUT_BASE}' found; creating empty zip fallback"
             zip -r "${OUTPUT_BASE}.zip" || true
+            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
           fi
-          echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
 
       - name: Upload merged ZIP artifact
         if: always()
