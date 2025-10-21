@@ -9,6 +9,7 @@ merge_macros.py
 - Total displayed time calculated from merged events (merged already includes pauses).
 - Elastic min rule for pause ranges: if UI max < hardcoded min, min becomes 0..UI_max.
 - Preserves all event fields when shifting times.
+- Filenames now start with alphabetic version labels: A_, B_, ... Z_, AA_, AB_, ...
 """
 
 from pathlib import Path
@@ -200,15 +201,23 @@ def safe_sample(population, k, rng):
         return list(population)
     return rng.sample(population, k=k)
 
+def number_to_letters(n: int) -> str:
+    """Convert 1->A, 2->B, ... 26->Z, 27->AA, ... Excel-style uppercase."""
+    if n <= 0:
+        return ""
+    letters = ""
+    while n > 0:
+        n -= 1
+        letters = chr(ord('A') + (n % 26)) + letters
+        n //= 26
+    return letters
+
 # ---------- generate for a single folder ----------
 def generate_version_for_folder(files, rng, version_num,
                                 exclude_count,
                                 within_min_s, within_max_s, within_max_pauses,
                                 between_min_s, between_max_s):
-    """
-    Merge provided list of files (all from same folder).
-    Returns (filename, merged_events, final_file_list, pause_info, excluded_list, total_minutes)
-    """
+    """Merge provided list of files (all from same folder)."""
     if not files:
         return None, [], [], {"inter_file_pauses":[], "intra_file_pauses":[]}, [], 0
 
@@ -294,7 +303,7 @@ def generate_version_for_folder(files, rng, version_num,
         total_ms = 0
     total_minutes = compute_minutes_from_ms(total_ms)
 
-    # parts: each file's displayed minutes = ceil((event_ms + inter_ms)/60000)
+    # build parts: each file's displayed minutes = ceil((event_ms + inter_ms)/60000)
     parts = []
     for f in final_files:
         event_ms = per_file_event_ms.get(str(f), 0)
@@ -303,7 +312,9 @@ def generate_version_for_folder(files, rng, version_num,
         minutes = compute_minutes_from_ms(combined_ms)
         parts.append(f"{part_from_filename(Path(f).name)}[{minutes}m]")
 
-    base_name = f"merged_bundle_{total_minutes}m= " + " - ".join(parts)
+    # NEW: use alphabetic version label prefix (Excel-style) for the version number
+    letters = number_to_letters(version_num or 1)
+    base_name = f"{letters}_{total_minutes}m= " + " - ".join(parts)
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
     merged_fname = f"{safe_name}.json"
     return merged_fname, merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
@@ -414,8 +425,6 @@ def main():
     with ZipFile(zip_path, "w") as zf:
         for fpath in all_written_paths:
             try:
-                # want arcname relative to output_parent, but without the "output/" prefix.
-                # If fpath is output/<output_base>/..., relative_to(output_parent) gives "<output_base>/..."
                 arcname = str(fpath.relative_to(output_parent))
             except Exception:
                 arcname = f"{output_base_name}/{fpath.name}"
