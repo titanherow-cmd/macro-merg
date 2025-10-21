@@ -5,11 +5,14 @@ merge_macros.py
 - Scans all subfolders under --input-dir for .json files and treats each directory that
   directly contains .json files as a separate group to merge.
 - Mirrors folder tree under output/<merged_bundle_{N}>.
+- For groups under 'mobile' (case-insensitive), inserts the special file
+  'close reopen mobile screensharelink.json' once near the middle (after a file boundary)
+  and once at the end. Special file gets no intra pauses and no trailing inter pause.
 - Per-file displayed time = event duration (including intra-file pauses) + inter-file pause after it.
 - Total displayed time calculated from merged events (merged already includes pauses).
 - Elastic min rule for pause ranges: if UI max < hardcoded min, min becomes 0..UI_max.
 - Preserves all event fields when shifting times.
-- Filenames now start with alphabetic version labels: A_, B_, ... Z_, AA_, AB_, ...
+- Filenames start with alphabetic version labels (A_, B_, ... AA_, ...).
 """
 
 from pathlib import Path
@@ -27,6 +30,7 @@ import math
 DEFAULT_INTRA_MIN_SEC = 4     # 4 seconds
 DEFAULT_INTER_MIN_SEC = 30    # 30 seconds
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
+SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 
 # ---------- helpers ----------
 def parse_time_to_seconds(s: str) -> int:
@@ -78,7 +82,6 @@ def find_all_dirs_with_json(input_root: Path):
     # walk directories and check direct children for .json files
     for p in sorted(input_root.rglob("*")):
         if p.is_dir():
-            # check direct json files in p
             try:
                 has = any(child.is_file() and child.suffix.lower() == ".json" for child in p.iterdir())
             except Exception:
@@ -91,7 +94,6 @@ def find_all_dirs_with_json(input_root: Path):
             found.add(input_root)
     except Exception:
         pass
-    # return sorted list for deterministic behavior
     return sorted(found)
 
 def find_json_files_in_dir(dirpath: Path):
@@ -212,11 +214,36 @@ def number_to_letters(n: int) -> str:
         n //= 26
     return letters
 
+# ---------- find special file ----------
+def locate_special_file_for_group(folder: Path, input_root: Path):
+    """Try to locate the SPECIAL_FILENAME relevant for this group.
+    Priority:
+      1) if the special file exists directly inside the group folder -> use it
+      2) else search under input_root for the first matching file (case-sensitive filename match)
+    Returns a Path or None.
+    """
+    try:
+        cand = folder / SPECIAL_FILENAME
+        if cand.exists():
+            return cand.resolve()
+    except Exception:
+        pass
+    # fallback: search input_root
+    try:
+        matches = list(input_root.rglob(SPECIAL_FILENAME))
+        if matches:
+            return matches[0].resolve()
+    except Exception:
+        pass
+    return None
+
 # ---------- generate for a single folder ----------
 def generate_version_for_folder(files, rng, version_num,
                                 exclude_count,
                                 within_min_s, within_max_s, within_max_pauses,
-                                between_min_s, between_max_s):
+                                between_min_s, between_max_s,
+                                folder_path: Path,
+                                input_root: Path):
     """Merge provided list of files (all from same folder)."""
     if not files:
         return None, [], [], {"inter_file_pauses":[], "intra_file_pauses":[]}, [], 0
@@ -251,6 +278,27 @@ def generate_version_for_folder(files, rng, version_num,
 
     rng.shuffle(final_files)
 
+    # If group is under mobile (case-insensitive), locate special file and insert twice:
+    special_path = None
+    is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
+    if is_mobile_group:
+        special_cand = locate_special_file_for_group(folder_path, input_root)
+        if special_cand:
+            special_path = special_cand
+            # remove any occurrences from final_files to avoid duplicates from the folder content
+            final_files = [f for f in final_files if Path(f).resolve() != special_path]
+            # insert near middle AFTER a file boundary:
+            if final_files:
+                mid_idx = len(final_files) // 2
+                # insert after mid_idx element (so position mid_idx+1)
+                insert_pos = min(mid_idx + 1, len(final_files))
+                final_files.insert(insert_pos, str(special_path))
+            else:
+                # nothing to put it after, just put at start
+                final_files.insert(0, str(special_path))
+            # also append at end
+            final_files.append(str(special_path))
+
     merged = []
     pause_info = {"inter_file_pauses": [], "intra_file_pauses": []}
     time_cursor = 0
@@ -258,15 +306,22 @@ def generate_version_for_folder(files, rng, version_num,
     per_file_inter_ms = {}
 
     for idx, fpath in enumerate(final_files):
-        evs = load_json_events(Path(fpath))
+        fpath_obj = Path(fpath)
+        is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
+
+        evs = load_json_events(fpath_obj)
         zb_evs, _ = zero_base_events(evs)
 
-        # intra-file pauses
-        intra_evs, intra_details = insert_intra_pauses(zb_evs, rng, within_max_pauses, within_min_s, within_max_s)
-        if intra_details:
-            pause_info["intra_file_pauses"].append({"file": Path(fpath).name, "pauses": intra_details})
+        # For special file: do NOT insert intra pauses (play as-is)
+        if is_special:
+            intra_evs = zb_evs
+            intra_details = []
+        else:
+            intra_evs, intra_details = insert_intra_pauses(zb_evs, rng, within_max_pauses, within_min_s, within_max_s)
+            if intra_details:
+                pause_info["intra_file_pauses"].append({"file": fpath_obj.name, "pauses": intra_details})
 
-        # shift by cursor
+        # shift by cursor and append
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
 
@@ -275,25 +330,29 @@ def generate_version_for_folder(files, rng, version_num,
             file_max = max(int(e.get("Time",0)) for e in shifted)
             file_min = min(int(e.get("Time",0)) for e in shifted)
             event_ms = file_max - file_min
-            per_file_event_ms[str(fpath)] = event_ms
+            per_file_event_ms[str(fpath_obj)] = event_ms
             time_cursor = file_max + 30
         else:
-            per_file_event_ms[str(fpath)] = 0
+            per_file_event_ms[str(fpath_obj)] = 0
 
-        # inter-file pause after file (only if not last)
+        # inter-file pause after file (only if not last) -- but never after special file
         if idx < len(final_files) - 1:
-            # elastic min logic
-            low = between_min_s if between_max_s >= between_min_s else 0
-            high = between_max_s
-            if low > high:
-                low = 0
-            pause_s = rng.randint(low, high)
-            pause_ms = pause_s * 1000
-            time_cursor += pause_ms
-            per_file_inter_ms[str(fpath)] = pause_ms
-            pause_info["inter_file_pauses"].append({"after_file": Path(fpath).name, "pause_ms": pause_ms, "after_index": idx})
+            if is_special:
+                # do not add a pause after special file
+                per_file_inter_ms[str(fpath_obj)] = 0
+            else:
+                # elastic min logic (if config max < hardcoded min -> min=0)
+                low = between_min_s if between_max_s >= between_min_s else 0
+                high = between_max_s
+                if low > high:
+                    low = 0
+                pause_s = rng.randint(low, high)
+                pause_ms = pause_s * 1000
+                time_cursor += pause_ms
+                per_file_inter_ms[str(fpath_obj)] = pause_ms
+                pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms, "after_index": idx})
         else:
-            per_file_inter_ms[str(fpath)] = 0
+            per_file_inter_ms[str(fpath_obj)] = 0
 
     # total ms from merged events
     if merged:
@@ -312,7 +371,7 @@ def generate_version_for_folder(files, rng, version_num,
         minutes = compute_minutes_from_ms(combined_ms)
         parts.append(f"{part_from_filename(Path(f).name)}[{minutes}m]")
 
-    # NEW: use alphabetic version label prefix (Excel-style) for the version number
+    # version label
     letters = number_to_letters(version_num or 1)
     base_name = f"{letters}_{total_minutes}m= " + " - ".join(parts)
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
@@ -408,7 +467,8 @@ def main():
                 files, rng, v,
                 args.exclude_count,
                 within_min_s, within_max_s, getattr(args, "within_max_pauses"),
-                between_min_s, between_max_s
+                between_min_s, between_max_s,
+                folder, input_root
             )
             if not merged_fname:
                 continue
