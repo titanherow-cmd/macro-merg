@@ -2,17 +2,11 @@
 """
 merge_macros.py
 
-Stable, backwards-compatible merger script.
-
-Features:
- - Groups are immediate subfolders of --input-dir
- - Recursively finds .json inside each group folder
- - Accepts new & legacy CLI flags (e.g. --within-max-time and --intra-file-max)
- - Elastic rule: if UI max < hardcoded min -> min becomes 0..UI_max
- - Intra-file pauses always enabled
- - Inter-file pauses applied AFTER each file (between files)
- - Computes total merged time including pauses and uses it in filename
- - Outputs merged JSON files (top-level array) and creates merged_bundle.zip
+- Merges JSON macro files per-folder (only files in same folder).
+- Preserves folder tree inside the output folder and zip.
+- Output folder named "merged files_v{N}" where N is read/updated from .github/merge_bundle_counter.txt
+- Elastic min rule: if UI max < hardcoded min -> min becomes 0..UI_max.
+- Total time in merged filename includes all pauses.
 """
 
 from pathlib import Path
@@ -25,51 +19,72 @@ from copy import deepcopy
 from zipfile import ZipFile
 
 # Hardcoded minimums (seconds)
-DEFAULT_INTRA_MIN_SEC = 4      # 4 seconds
-DEFAULT_INTER_MIN_SEC = 30     # 30 seconds
+DEFAULT_INTRA_MIN_SEC = 4     # 4 seconds
+DEFAULT_INTER_MIN_SEC = 30    # 30 seconds
 
-# ---------------- utilities ----------------
+# Counter file (to track merged folder number)
+COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
+
+def read_and_increment_counter():
+    try:
+        if COUNTER_PATH.exists():
+            txt = COUNTER_PATH.read_text(encoding="utf-8").strip()
+            n = int(txt) if txt else 0
+        else:
+            n = 0
+    except Exception:
+        n = 0
+    n += 1
+    try:
+        COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        COUNTER_PATH.write_text(str(n), encoding="utf-8")
+    except Exception as e:
+        print(f"WARNING: can't write counter file: {e}", file=sys.stderr)
+    return n
+
 def parse_time_to_seconds(s: str) -> int:
+    """Parse '1m30s', '1:30', '1.30', '90s', '90' into seconds."""
     if s is None:
         raise ValueError("Empty time string")
     s = str(s).strip()
     if not s:
         raise ValueError("Empty time string")
-    # hh:mm:ss or mm:ss
-    m = re.match(r'^(\d+):(\d{1,2})(?::(\d{1,2}))?$', s)
+    # mm:ss
+    m = re.match(r'^(\d+):(\d{1,2})$', s)
     if m:
-        parts = [int(g) for g in m.groups() if g is not None]
-        if len(parts) == 3:
-            return parts[0]*3600 + parts[1]*60 + parts[2]
-        return parts[0]*60 + parts[1]
-    # m.ss (minutes.seconds)
+        return int(m.group(1)) * 60 + int(m.group(2))
+    # m.ss -> minutes.seconds
     m = re.match(r'^(\d+)\.(\d{1,2})$', s)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
-    # with letters like 1m30s, 90s, 2m
+    # letters like 1m30s, 90s, 2m
     m = re.match(r'^(?:(\d+)m)?(?:(\d+)s)?$', s)
     if m and (m.group(1) or m.group(2)):
         minutes = int(m.group(1)) if m.group(1) else 0
         seconds = int(m.group(2)) if m.group(2) else 0
         return minutes * 60 + seconds
-    # pure integer seconds
+    # plain seconds
     if re.match(r'^\d+$', s):
         return int(s)
     raise ValueError(f"Cannot parse time value: {s!r}")
 
-def find_groups(input_dir: Path):
-    if not input_dir.exists() or not input_dir.is_dir():
+def find_direct_parent_dirs_with_json(input_root: Path):
+    """Return sorted list of directories which directly contain json files (parent directories of .json files)."""
+    if not input_root.exists() or not input_root.is_dir():
         return []
-    return [p for p in sorted(input_dir.iterdir()) if p.is_dir()]
+    parents = {p.parent.resolve() for p in input_root.rglob("*.json") if p.is_file()}
+    return sorted(parents)
 
-def find_json_files(group_path: Path):
-    return sorted([p for p in group_path.rglob("*.json") if p.is_file()])
+def find_json_files_in_dir(dirpath: Path):
+    """Return sorted list of json files directly in dirpath (non-recursive)."""
+    return sorted([p for p in dirpath.glob("*.json") if p.is_file()])
 
 def load_json_events(path: Path):
+    """Load JSON and normalize to list of events."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"WARNING: cannot parse {path}: {e}", file=sys.stderr)
+        print(f"WARNING: failed to read/parse {path}: {e}", file=sys.stderr)
         return []
     if isinstance(data, dict):
         for k in ("events","items","entries","records","actions","eventsList","events_array"):
@@ -83,6 +98,7 @@ def load_json_events(path: Path):
     return []
 
 def zero_base_events(events):
+    """Shift events so earliest Time is 0. Return shifted events and duration (ms)."""
     if not events:
         return [], 0
     times = []
@@ -116,6 +132,7 @@ def part_from_filename(fname: str):
     return ''.join(ch for ch in stem if ch.isalnum())
 
 def insert_intra_pauses(events, rng, max_pauses, min_s, max_s):
+    """Insert up to max_pauses random pauses inside events. Returns modified events and pause list."""
     if not events or max_pauses <= 0:
         return deepcopy(events), []
     evs = deepcopy(events)
@@ -126,14 +143,14 @@ def insert_intra_pauses(events, rng, max_pauses, min_s, max_s):
     if k == 0:
         return evs, []
     chosen = rng.sample(range(n-1), k)
-    pauses = []
+    paused = []
     for gap_idx in sorted(chosen):
         pause_s = rng.randint(min_s, max_s)
         pause_ms = pause_s * 1000
         for j in range(gap_idx+1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        pauses.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
-    return evs, pauses
+        paused.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
+    return evs, paused
 
 def apply_shifts(events, shift_ms):
     shifted = []
@@ -164,11 +181,11 @@ def safe_sample(population, k, rng):
         return list(population)
     return rng.sample(population, k=k)
 
-# ---------------- core generation ----------------
-def generate_version_for_group(files, rng, version_num,
-                               exclude_count,
-                               within_min_s, within_max_s, within_max_pauses,
-                               between_min_s, between_max_s):
+def generate_version_for_folder(files, rng, version_num,
+                                exclude_count,
+                                within_min_s, within_max_s, within_max_pauses,
+                                between_min_s, between_max_s):
+    """Merge only the files provided (which all belong to a single folder)."""
     if not files:
         return None, [], [], {"inter_file_pauses":[], "intra_file_pauses":[]}, [], 0
 
@@ -179,14 +196,12 @@ def generate_version_for_group(files, rng, version_num,
     if not included:
         included = files.copy()
 
+    # optional duplication and extras for variation
     dup_files = []
     if included:
         dup_count = min(2, len(included))
         if dup_count > 0:
-            if len(included) == 1:
-                dup_files = [included[0]]
-            else:
-                dup_files = safe_sample(included, dup_count, rng)
+            dup_files = safe_sample(included, dup_count, rng) if len(included) > 1 else [included[0]]
     final_files = included + dup_files
 
     if included:
@@ -243,7 +258,6 @@ def generate_version_for_group(files, rng, version_num,
     merged_fname = f"{safe_name}.json"
     return merged_fname, merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
-# ---------------- CLI & main ----------------
 def build_arg_parser():
     p = argparse.ArgumentParser()
     p.add_argument("--input-dir", required=False, default="originals")
@@ -258,7 +272,7 @@ def build_arg_parser():
     p.add_argument("--between-max-time", type=str, default="2m37s")
     p.add_argument("--between-max-pauses", type=int, default=1)
 
-    # legacy aliases (map to same internal names)
+    # legacy aliases (kept for compatibility)
     p.add_argument("--intra-file-max", type=str, dest="within_max_time", help=argparse.SUPPRESS)
     p.add_argument("--intra-file-max-pauses", type=int, dest="within_max_pauses", help=argparse.SUPPRESS)
     p.add_argument("--inter-file-max", type=str, dest="between_max_time", help=argparse.SUPPRESS)
@@ -274,14 +288,24 @@ def main():
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
 
     input_root = Path(args.input_dir)
-    output_root = Path(args.output_dir)
-    output_root.mkdir(parents=True, exist_ok=True)
-
-    groups = find_groups(input_root)
-    if not groups:
-        print(f"No group subfolders found under: {input_root}")
+    if not input_root.exists():
+        print(f"Input directory not found: {input_root}", file=sys.stderr)
         return
 
+    # Read & increment run counter -> used for output folder name and zip
+    counter = read_and_increment_counter()
+    output_base_name = f"merged files_v{counter}"
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / output_base_name
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # Determine the directories that directly contain .json files (per-folder merging)
+    folder_dirs = find_direct_parent_dirs_with_json(input_root)
+    if not folder_dirs:
+        print(f"No json files found under {input_root}", file=sys.stderr)
+        return
+
+    # Parse max times and apply elastic rules
     try:
         within_max_s = parse_time_to_seconds(getattr(args, "within_max_time"))
     except Exception as e:
@@ -296,14 +320,23 @@ def main():
 
     all_zip_entries = []
 
-    for gi, grp in enumerate(groups):
-        files = find_json_files(grp)
+    for folder in folder_dirs:
+        # files only in this folder (non-recursive)
+        files = find_json_files_in_dir(folder)
         if not files:
-            print(f"Skipping group {grp} (no json files found).")
             continue
 
+        # preserve the relative folder path under originals
+        try:
+            rel_folder = folder.relative_to(input_root)
+        except Exception:
+            rel_folder = Path(folder.name)
+
+        out_folder_for_group = output_root / rel_folder
+        out_folder_for_group.mkdir(parents=True, exist_ok=True)
+
         for v in range(1, max(1, args.versions) + 1):
-            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_group(
+            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
                 files, rng, v,
                 args.exclude_count,
                 within_min_s, within_max_s, getattr(args, "within_max_pauses"),
@@ -311,22 +344,23 @@ def main():
             )
             if not merged_fname:
                 continue
-            out_path = output_root / merged_fname
+            out_path = out_folder_for_group / merged_fname
             try:
                 out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"WROTE: {out_path}")
-                all_zip_entries.append((grp.name, out_path))
+                all_zip_entries.append(out_path)
             except Exception as e:
                 print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
 
-    zip_path = output_root / "merged_bundle.zip"
+    # create zip at output_parent / f"{output_base_name}.zip"
+    zip_path = output_parent / f"{output_base_name}.zip"
     with ZipFile(zip_path, "w") as zf:
-        for group_name, file_path in all_zip_entries:
-            arcname = f"{group_name}/{file_path.name}"
+        for fpath in all_zip_entries:
             try:
-                zf.write(file_path, arcname=arcname)
-            except Exception as e:
-                print(f"WARNING: could not add {file_path} to zip: {e}", file=sys.stderr)
+                arcname = str(fpath.relative_to(output_parent))
+            except Exception:
+                arcname = f"{output_base_name}/{fpath.name}"
+            zf.write(fpath, arcname=arcname)
 
     print("DONE. Created zip:", zip_path)
 
