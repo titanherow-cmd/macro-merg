@@ -1,4 +1,4 @@
-name: Merge macros (scan all folders, zip top-level)
+name: Merge macros (persisted counter, scan all folders, zip top-level)
 
 on:
   workflow_dispatch:
@@ -32,10 +32,13 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # allow committing the bumped counter back to the repo
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true  # ensures git uses GITHUB_TOKEN for push
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -56,8 +59,37 @@ jobs:
           NEXT=$((PREV + 1))
           mkdir -p "$(dirname "$COUNTER_FILE")"
           echo "$NEXT" > "$COUNTER_FILE"
+          # Export for subsequent steps
           echo "BUNDLE_SEQ=$NEXT" >> "$GITHUB_ENV"
           echo "BUMPED counter: $PREV -> $NEXT"
+          echo "NEXT=$NEXT" > /tmp/merge_next.txt
+
+      - name: Commit and push bumped counter back to repo
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          COUNTER_FILE=".github/merge_bundle_counter.txt"
+          if [ ! -f "$COUNTER_FILE" ]; then
+            echo "Counter file not present; nothing to commit."
+            exit 0
+          fi
+          # Configure git user and commit
+          git config user.name "github-actions[bot]" || true
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
+          git add "$COUNTER_FILE"
+          # Check if there is actually anything to commit
+          if git diff --staged --quiet; then
+            echo "No changes to counter to commit."
+          else
+            NEXT=$(cat "$COUNTER_FILE" || echo "")
+            git commit -m "CI: bump merged bundle counter to ${NEXT}" || true
+            # push to the current branch
+            # Use HEAD to push back to the same branch that triggered the run
+            git push origin HEAD || (echo "git push failed" && false)
+            echo "Pushed updated counter: ${NEXT}"
+          fi
 
       - name: Show originals (debug)
         run: |
