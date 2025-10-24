@@ -6,7 +6,8 @@ merge_macros.py (Patched)
 - Mirrors folder tree under output/<merged_bundle_{N}>.
 - For groups under 'mobile' (case-insensitive), inserts the special file
   'close reopen mobile screensharelink.json' (or filename variants containing 'screensharelink')
-  once near the middle (after a file boundary) and once at the end. Special file gets no intra pauses.
+  once near the middle (after a file boundary) and once at the end.
+- Special file gets no intra-pauses and no random inter-file pauses (only a 1s buffer).
 - Per-file displayed time = event duration (including intra-file pauses) + inter-file pause after it.
 - Total displayed time calculated from final time cursor.
 - Elastic min rule for pause ranges: if UI max < hardcoded min, min becomes 0..UI_max.
@@ -201,7 +202,8 @@ def apply_shifts(events, shift_ms):
             t = int(ne.get("Time", 0))
         except Exception:
             try:
-                t = int(float(ne.get("Time", m)))
+                # *** FIX 2: Corrected typo 'm' to '0' ***
+                t = int(float(ne.get("Time", 0)))
             except:
                 t = 0
         ne["Time"] = t + int(shift_ms)
@@ -349,39 +351,48 @@ def generate_version_for_folder(files, rng, version_num,
             file_max = max(int(e.get("Time",0)) for e in shifted)
             file_min = min(int(e.get("Time",0)) for e in shifted)
             event_ms = file_max - file_min
-            per_file_event_ms[str(fpath_obj)] = event_.ms
-            # *** FIX 1: Remove bad 30ms hardcoded shift ***
-            # time_cursor = file_max + 30 # (DELETED)
+            # *** FIX 1: Corrected typo 'event_.ms' to 'event_ms' ***
+            per_file_event_ms[str(fpath_obj)] = event_ms
             time_cursor = file_max # Set cursor to the end of the last event
         else:
             per_file_event_ms[str(fpath_obj)] = 0
             
-        # inter-file pause after file
+        # --- *** FIX 2: Reworked Pause Logic *** ---
+        
+        # Check if this is the very last file
         if idx < len(final_files) - 1:
-            # *** FIX 2: Apply a normal pause after ALL files (including special file in middle) ***
-            
-            # elastic min logic (if config max < hardcoded min -> min=0)
-            low = between_min_s if between_max_s >= between_min_s else 0
-            high = between_max_s
-            if low > high:
-                low = 0
-            
-            pause_s = rng.randint(low, high)
-            pause_ms = pause_s * 1000
+            # This is NOT the last file
+            pause_ms = 0
+            # Check if it's the special file (in the middle)
+            if is_special:
+                # Apply a short, 1s hardcoded buffer to prevent collision
+                # This makes it exempt from random pause rules
+                SHORT_MID_BUFFER_MS = 1000
+                pause_ms = SHORT_MID_BUFFER_MS
+                print(f"INFO: Applying short {pause_ms}ms buffer after special file {fpath_obj.name}")
+            else:
+                # Apply a normal random pause
+                low = between_min_s if between_max_s >= between_min_s else 0
+                high = between_max_s
+                if low > high:
+                    low = 0
+                pause_s = rng.randint(low, high)
+                pause_ms = pause_s * 1000
             
             time_cursor += pause_ms # Advance cursor by the pause
             per_file_inter_ms[str(fpath_obj)] = pause_ms
             pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms, "after_index": idx})
+        
         else:
             # This is the VERY last file
-            # *** FIX 3: Add 1-second buffer for the player to finish last click ***
+            # Apply the 1-second final buffer for the player
             POST_APPEND_BUFFER_MS = 1000
             per_file_inter_ms[str(fpath_obj)] = POST_APPEND_BUFFER_MS
             time_cursor += POST_APPEND_BUFFER_MS # Advance cursor by buffer
             
     # total ms from merged events
     if merged:
-        # *** FIX 4: Total time is the final cursor position, not max-min ***
+        # Total time is the final cursor position
         total_ms = time_cursor
     else:
         total_ms = 0
