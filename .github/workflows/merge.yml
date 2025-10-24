@@ -62,57 +62,58 @@ jobs:
       - name: Debug: repo root listing
         run: |
           echo "Working directory: $(pwd)"
-          echo "Top-level files/dirs:"
+          echo "Top-level:"
           ls -la || true
 
       - name: Run merge_macros.py
-        env:
-          INPUT_DIR: ${{ github.event.inputs.input_dir }}
-          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
-          VERSIONS: ${{ github.event.inputs.versions }}
-          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
-          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
-          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
-          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
-          EXCLUDE_COUNT: ${{ github.event.inputs.exclude_count }}
-          SEED_INPUT: ${{ github.event.inputs.seed }}
         run: |
           set -euo pipefail
 
-          # Build optional seed argument
+          # read workflow inputs into shell variables (safe quoting)
+          INPUT_DIR="${{ github.event.inputs.input_dir }}"
+          OUTPUT_DIR="${{ github.event.inputs.output_dir }}"
+          VERSIONS="${{ github.event.inputs.versions }}"
+          WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
+          WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
+          BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
+          BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
+          EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
+          SEED_INPUT='${{ github.event.inputs.seed }}'   # single-quoted to avoid YAML/empty-string issues
+          
+          # build optional seed arg
           SEED_ARG=""
-          if [ -n "${SEED_INPUT}" ]; then
-            SEED_ARG="--seed ${SEED_INPUT}"
+          if [ -n "$SEED_INPUT" ]; then
+            SEED_ARG="--seed $SEED_INPUT"
           fi
 
-          echo "Running merge_macros.py with the following parameters:"
-          echo "  input-dir:   ${INPUT_DIR}"
-          echo "  output-dir:  ${OUTPUT_DIR}"
-          echo "  versions:    ${VERSIONS}"
-          echo "  within-max-time:  ${WITHIN_MAX_TIME}"
-          echo "  within-max-pauses: ${WITHIN_MAX_PAUSES}"
-          echo "  between-max-time:  ${BETWEEN_MAX_TIME}"
-          echo "  between-max-pauses: ${BETWEEN_MAX_PAUSES}"
-          echo "  exclude-count: ${EXCLUDE_COUNT}"
-          echo "  seed: ${SEED_INPUT:-<none>}"
+          echo "Running merge_macros.py with:"
+          echo "  input-dir:        $INPUT_DIR"
+          echo "  output-dir:       $OUTPUT_DIR"
+          echo "  versions:         $VERSIONS"
+          echo "  within-max-time:  $WITHIN_MAX_TIME"
+          echo "  within-max-pauses:$WITHIN_MAX_PAUSES"
+          echo "  between-max-time: $BETWEEN_MAX_TIME"
+          echo "  between-max-pauses:$BETWEEN_MAX_PAUSES"
+          echo "  exclude-count:    $EXCLUDE_COUNT"
+          echo "  seed:             ${SEED_INPUT:-<none>}"
 
           python3 merge_macros.py \
-            --input-dir "${INPUT_DIR}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --versions "${VERSIONS}" \
+            --input-dir "$INPUT_DIR" \
+            --output-dir "$OUTPUT_DIR" \
+            --versions "$VERSIONS" \
             ${SEED_ARG} \
-            --exclude-count "${EXCLUDE_COUNT}" \
-            --within-max-time "${WITHIN_MAX_TIME}" \
-            --within-max-pauses "${WITHIN_MAX_PAUSES}" \
-            --between-max-time "${BETWEEN_MAX_TIME}" \
-            --between-max-pauses "${BETWEEN_MAX_PAUSES}"
+            --exclude-count "$EXCLUDE_COUNT" \
+            --within-max-time "$WITHIN_MAX_TIME" \
+            --within-max-pauses "$WITHIN_MAX_PAUSES" \
+            --between-max-time "$BETWEEN_MAX_TIME" \
+            --between-max-pauses "$BETWEEN_MAX_PAUSES"
 
       - name: Debug: locate generated zip(s)
         if: always()
         run: |
-          echo "Looking for merged_bundle*.zip files in workspace..."
+          echo "Searching for merged_bundle*.zip"
           find . -type f -name "merged_bundle*.zip" -print || true
-          echo "Listing output directory contents (if exists):"
+          echo "Listing output_dir (${ { github.event.inputs.output_dir } }) (if exists):"
           ls -la "${{ github.event.inputs.output_dir }}" || true
 
       - name: Commit counter file back to repo (if changed)
