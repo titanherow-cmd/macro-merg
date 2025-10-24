@@ -46,7 +46,6 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository (with write creds)
         uses: actions/checkout@v4
@@ -59,64 +58,51 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Debug: repo root listing
+      - name: Debug: show repo root & OG tree
         run: |
-          echo "Working directory: $(pwd)"
-          echo "Top-level:"
-          ls -la || true
+          echo "PWD: $(pwd)"
+          echo "Repo root listing:"
+          ls -la
+          echo "Input dir listing (first 5 files/dirs):"
+          ls -la "${{ github.event.inputs.input_dir }}" || true
 
       - name: Run merge_macros.py
+        env:
+          INPUT_DIR: ${{ github.event.inputs.input_dir }}
+          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
+          VERSIONS: ${{ github.event.inputs.versions }}
+          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
+          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
+          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
+          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
+          EXCLUDE_COUNT: ${{ github.event.inputs.exclude_count }}
+          SEED_INPUT: ${{ github.event.inputs.seed }}
         run: |
           set -euo pipefail
-
-          # read workflow inputs into shell variables (safe quoting)
-          INPUT_DIR="${{ github.event.inputs.input_dir }}"
-          OUTPUT_DIR="${{ github.event.inputs.output_dir }}"
-          VERSIONS="${{ github.event.inputs.versions }}"
-          WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
-          WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
-          BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
-          BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
-          EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
-          SEED_INPUT='${{ github.event.inputs.seed }}'   # single-quoted to avoid YAML/empty-string issues
-          
-          # build optional seed arg
           SEED_ARG=""
-          if [ -n "$SEED_INPUT" ]; then
-            SEED_ARG="--seed $SEED_INPUT"
+          if [ -n "${SEED_INPUT}" ]; then
+            SEED_ARG="--seed ${SEED_INPUT}"
           fi
-
-          echo "Running merge_macros.py with:"
-          echo "  input-dir:        $INPUT_DIR"
-          echo "  output-dir:       $OUTPUT_DIR"
-          echo "  versions:         $VERSIONS"
-          echo "  within-max-time:  $WITHIN_MAX_TIME"
-          echo "  within-max-pauses:$WITHIN_MAX_PAUSES"
-          echo "  between-max-time: $BETWEEN_MAX_TIME"
-          echo "  between-max-pauses:$BETWEEN_MAX_PAUSES"
-          echo "  exclude-count:    $EXCLUDE_COUNT"
-          echo "  seed:             ${SEED_INPUT:-<none>}"
-
           python3 merge_macros.py \
-            --input-dir "$INPUT_DIR" \
-            --output-dir "$OUTPUT_DIR" \
-            --versions "$VERSIONS" \
+            --input-dir "${INPUT_DIR}" \
+            --output-dir "${OUTPUT_DIR}" \
+            --versions "${VERSIONS}" \
             ${SEED_ARG} \
-            --exclude-count "$EXCLUDE_COUNT" \
-            --within-max-time "$WITHIN_MAX_TIME" \
-            --within-max-pauses "$WITHIN_MAX_PAUSES" \
-            --between-max-time "$BETWEEN_MAX_TIME" \
-            --between-max-pauses "$BETWEEN_MAX_PAUSES"
+            --exclude-count "${EXCLUDE_COUNT}" \
+            --within-max-time "${WITHIN_MAX_TIME}" \
+            --within-max-pauses "${WITHIN_MAX_PAUSES}" \
+            --between-max-time "${BETWEEN_MAX_TIME}" \
+            --between-max-pauses "${BETWEEN_MAX_PAUSES}"
 
-      - name: Debug: locate generated zip(s)
+      - name: Debug: find zip(s) produced
         if: always()
         run: |
-          echo "Searching for merged_bundle*.zip"
+          echo "Find any merged_bundle*.zip files:"
           find . -type f -name "merged_bundle*.zip" -print || true
-          echo "Listing output_dir (${ { github.event.inputs.output_dir } }) (if exists):"
+          echo "Show output dir contents:"
           ls -la "${{ github.event.inputs.output_dir }}" || true
 
-      - name: Commit counter file back to repo (if changed)
+      - name: Commit counter file (if changed)
         if: always()
         run: |
           git config user.name "github-actions[bot]"
@@ -125,7 +111,7 @@ jobs:
             git add .github/merge_bundle_counter.txt || true
           fi
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No git changes to commit."
           else
             BRANCH="${GITHUB_REF#refs/heads/}"
             git commit -m "Update merge bundle counter [skip ci]" || true
