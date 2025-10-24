@@ -64,7 +64,7 @@ jobs:
           echo "WORKDIR: $(pwd)"
           echo "Top-level list:"
           ls -la || true
-          echo "Input folder listing (if exists):"
+          echo "Attempt to list input dir (if present):"
           ls -la "${{ github.event.inputs.input_dir }}" || true
 
       - name: Run merge_macros.py
@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Build seed arg if supplied
+          # Build optional seed arg
           SEED_ARG=""
           if [ -n "${SEED_INPUT}" ]; then
             SEED_ARG="--seed ${SEED_INPUT}"
@@ -120,7 +120,11 @@ jobs:
           find "$(pwd)" -type f \( -name "merged_bundle*.zip" -o -name "merged_bundle_*.zip" \) -print0 \
             | xargs -0 -I{} sh -c 'echo "FOUND: {}"; ls -lh "{}" || true'
           echo "====== Also show top-level of output_dir if present ======"
-          ls -la "${{ github.event.inputs.output_dir }}" || true
+          if [ -d "${{ github.event.inputs.output_dir }}" ]; then
+            ls -la "${{ github.event.inputs.output_dir }}" || true
+          else
+            echo "Output dir not present: ${{ github.event.inputs.output_dir }}"
+          fi
 
       - name: Commit counter file back to repo (if changed)
         if: always()
