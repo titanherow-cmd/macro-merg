@@ -46,6 +46,7 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository (with write creds)
         uses: actions/checkout@v4
@@ -58,12 +59,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Debug: show repo root & OG tree
+      - name: Debug: show repo root & input dir
         run: |
           echo "PWD: $(pwd)"
           echo "Repo root listing:"
           ls -la
-          echo "Input dir listing (first 5 files/dirs):"
+          echo "Attempt to list input dir: '${{ github.event.inputs.input_dir }}'"
           ls -la "${{ github.event.inputs.input_dir }}" || true
 
       - name: Run merge_macros.py
@@ -79,10 +80,23 @@ jobs:
           SEED_INPUT: ${{ github.event.inputs.seed }}
         run: |
           set -euo pipefail
+          # construct optional seed arg
           SEED_ARG=""
           if [ -n "${SEED_INPUT}" ]; then
             SEED_ARG="--seed ${SEED_INPUT}"
           fi
+
+          echo "Running merge_macros.py with:"
+          echo "  input-dir: ${INPUT_DIR}"
+          echo "  output-dir: ${OUTPUT_DIR}"
+          echo "  versions: ${VERSIONS}"
+          echo "  within-max-time: ${WITHIN_MAX_TIME}"
+          echo "  within-max-pauses: ${WITHIN_MAX_PAUSES}"
+          echo "  between-max-time: ${BETWEEN_MAX_TIME}"
+          echo "  between-max-pauses: ${BETWEEN_MAX_PAUSES}"
+          echo "  exclude-count: ${EXCLUDE_COUNT}"
+          echo "  seed: ${SEED_INPUT:-<none>}"
+
           python3 merge_macros.py \
             --input-dir "${INPUT_DIR}" \
             --output-dir "${OUTPUT_DIR}" \
@@ -94,12 +108,12 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --between-max-pauses "${BETWEEN_MAX_PAUSES}"
 
-      - name: Debug: find zip(s) produced
+      - name: Debug: show produced zip(s)
         if: always()
         run: |
-          echo "Find any merged_bundle*.zip files:"
+          echo "Finding merged_bundle*.zip in workspace:"
           find . -type f -name "merged_bundle*.zip" -print || true
-          echo "Show output dir contents:"
+          echo "Listing output dir contents:"
           ls -la "${{ github.event.inputs.output_dir }}" || true
 
       - name: Commit counter file (if changed)
@@ -107,11 +121,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Add counter file if present
           if [ -f ".github/merge_bundle_counter.txt" ]; then
             git add .github/merge_bundle_counter.txt || true
           fi
           if git diff --cached --quiet; then
-            echo "No git changes to commit."
+            echo "No changes to commit."
           else
             BRANCH="${GITHUB_REF#refs/heads/}"
             git commit -m "Update merge bundle counter [skip ci]" || true
