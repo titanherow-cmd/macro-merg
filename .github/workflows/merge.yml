@@ -47,6 +47,18 @@ jobs:
   merge:
     runs-on: ubuntu-latest
 
+    # put inputs into environment once (safe) so run blocks use only $ENV vars
+    env:
+      INPUT_DIR: ${{ github.event.inputs.input_dir }}
+      OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
+      VERSIONS: ${{ github.event.inputs.versions }}
+      WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
+      WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
+      BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
+      BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
+      EXCLUDE_COUNT: ${{ github.event.inputs.exclude_count }}
+      SEED_INPUT: ${{ github.event.inputs.seed }}
+
     steps:
       - name: Checkout repository (with write creds)
         uses: actions/checkout@v4
@@ -59,56 +71,51 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Show repo root & input folder (debug)
+      - name: Debug: repo root & input folder (safe)
         run: |
           echo "WORKDIR: $(pwd)"
           echo "Top-level list:"
           ls -la || true
-          echo "Attempt to list input dir (if present):"
-          ls -la "${{ github.event.inputs.input_dir }}" || true
+          echo
+          echo "Attempt to list input dir (if present): $INPUT_DIR"
+          if [ -d "$INPUT_DIR" ]; then
+            ls -la "$INPUT_DIR" || true
+          else
+            echo "Input dir not found: $INPUT_DIR"
+          fi
 
       - name: Run merge_macros.py
-        env:
-          INPUT_DIR: ${{ github.event.inputs.input_dir }}
-          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
-          VERSIONS: ${{ github.event.inputs.versions }}
-          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
-          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
-          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
-          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
-          EXCLUDE_COUNT: ${{ github.event.inputs.exclude_count }}
-          SEED_INPUT: ${{ github.event.inputs.seed }}
         run: |
           set -euo pipefail
 
-          # Build optional seed arg
+          # Build optional seed arg (empty means random)
           SEED_ARG=""
           if [ -n "${SEED_INPUT}" ]; then
             SEED_ARG="--seed ${SEED_INPUT}"
           fi
 
-          echo "Running merge_macros.py with:"
-          echo "  input-dir:        ${INPUT_DIR}"
-          echo "  output-dir:       ${OUTPUT_DIR}"
-          echo "  versions:         ${VERSIONS}"
-          echo "  within-max-time:  ${WITHIN_MAX_TIME}"
-          echo "  within-max-pauses:${WITHIN_MAX_PAUSES}"
-          echo "  between-max-time: ${BETWEEN_MAX_TIME}"
-          echo "  between-max-pauses:${BETWEEN_MAX_PAUSES}"
-          echo "  exclude-count:    ${EXCLUDE_COUNT}"
+          echo "Running merge_macros.py with parameters:"
+          echo "  input-dir:        $INPUT_DIR"
+          echo "  output-dir:       $OUTPUT_DIR"
+          echo "  versions:         $VERSIONS"
+          echo "  within-max-time:  $WITHIN_MAX_TIME"
+          echo "  within-max-pauses:$WITHIN_MAX_PAUSES"
+          echo "  between-max-time: $BETWEEN_MAX_TIME"
+          echo "  between-max-pauses:$BETWEEN_MAX_PAUSES"
+          echo "  exclude-count:    $EXCLUDE_COUNT"
           echo "  seed:             ${SEED_INPUT:-<none>}"
           echo "----- START SCRIPT OUTPUT -----"
 
           python3 merge_macros.py \
-            --input-dir "${INPUT_DIR}" \
-            --output-dir "${OUTPUT_DIR}" \
-            --versions "${VERSIONS}" \
+            --input-dir "$INPUT_DIR" \
+            --output-dir "$OUTPUT_DIR" \
+            --versions "$VERSIONS" \
             ${SEED_ARG} \
-            --exclude-count "${EXCLUDE_COUNT}" \
-            --within-max-time "${WITHIN_MAX_TIME}" \
-            --within-max-pauses "${WITHIN_MAX_PAUSES}" \
-            --between-max-time "${BETWEEN_MAX_TIME}" \
-            --between-max-pauses "${BETWEEN_MAX_PAUSES}"
+            --exclude-count "$EXCLUDE_COUNT" \
+            --within-max-time "$WITHIN_MAX_TIME" \
+            --within-max-pauses "$WITHIN_MAX_PAUSES" \
+            --between-max-time "$BETWEEN_MAX_TIME" \
+            --between-max-pauses "$BETWEEN_MAX_PAUSES"
 
           echo "----- END SCRIPT OUTPUT -----"
 
@@ -116,24 +123,29 @@ jobs:
         if: always()
         run: |
           echo "====== Searching for merged_bundle*.zip files ======"
-          # Print absolute path and file size for any matching zip(s)
-          find "$(pwd)" -type f \( -name "merged_bundle*.zip" -o -name "merged_bundle_*.zip" \) -print0 \
-            | xargs -0 -I{} sh -c 'echo "FOUND: {}"; ls -lh "{}" || true'
-          echo "====== Also show top-level of output_dir if present ======"
-          if [ -d "${{ github.event.inputs.output_dir }}" ]; then
-            ls -la "${{ github.event.inputs.output_dir }}" || true
+          # find and list any matching zip files with sizes
+          find "$(pwd)" -type f \( -name "merged_bundle*.zip" -o -name "merged_bundle_*.zip" \) -print -exec ls -lh "{}" \; || true
+
+          echo
+          echo "Listing output dir (if exists): $OUTPUT_DIR"
+          if [ -d "$OUTPUT_DIR" ]; then
+            ls -la "$OUTPUT_DIR" || true
           else
-            echo "Output dir not present: ${{ github.event.inputs.output_dir }}"
+            echo "Output dir not present: $OUTPUT_DIR"
           fi
 
       - name: Commit counter file back to repo (if changed)
         if: always()
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           if [ -f ".github/merge_bundle_counter.txt" ]; then
             git add .github/merge_bundle_counter.txt || true
           fi
+
+          # commit & push only if there are staged changes
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
