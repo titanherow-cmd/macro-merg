@@ -1,14 +1,25 @@
-name: Merge macros (persisted counter, scan all folders, zip top-level)
+name: Merge macros — recursive + counter persist
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
     inputs:
+      input_dir:
+        description: 'Parent directory containing group subfolders (relative to repo root)'
+        required: true
+        default: 'originals'
+      output_dir:
+        description: 'Directory to write merged files (relative to repo root)'
+        required: true
+        default: 'merged_output'
       versions:
-        description: 'How many versions per group'
+        description: 'How many versions to generate per group'
         required: true
         default: '16'
       within_max_time:
-        description: "Within-file max pause time (e.g. '1.30' or '1m30s')"
+        description: "Max pause time inside file (e.g. '1m32s')"
         required: true
         default: '1m32s'
       within_max_pauses:
@@ -16,145 +27,99 @@ on:
         required: true
         default: '3'
       between_max_time:
-        description: "After-file (between-files) max pause time (e.g. '4m53s')"
+        description: "Max pause time between files (e.g. '2m37s')"
         required: true
         default: '2m37s'
-      exclude_count:
-        description: 'Max files to randomly exclude per version (0–N-1)'
-        required: true
-        default: '5'
       between_max_pauses:
-        description: 'Max pauses between files (kept for compatibility; placed last)'
+        description: 'Max pauses between files (compat)'
         required: true
         default: '1'
+      exclude_count:
+        description: 'Max files to randomly exclude per version (0..N-1)'
+        required: true
+        default: '5'
+      seed:
+        description: 'Optional seed (blank for random)'
+        required: false
+        default: ''
 
 jobs:
   merge:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # allow committing the bumped counter back to the repo
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (with write creds)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true  # ensures git uses GITHUB_TOKEN for push
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Bump run counter (expose BUNDLE_SEQ)
-        id: bump
+      - name: Debug: show repo root & OG tree
         run: |
-          set -euo pipefail
-          COUNTER_FILE=".github/merge_bundle_counter.txt"
-          if [ -f "$COUNTER_FILE" ]; then
-            PREV=$(cat "$COUNTER_FILE" | tr -d ' \t\n\r' || echo "")
-            PREV=${PREV:-0}
-          else
-            PREV=0
-          fi
-          NEXT=$((PREV + 1))
-          mkdir -p "$(dirname "$COUNTER_FILE")"
-          echo "$NEXT" > "$COUNTER_FILE"
-          # Export for subsequent steps
-          echo "BUNDLE_SEQ=$NEXT" >> "$GITHUB_ENV"
-          echo "BUMPED counter: $PREV -> $NEXT"
-          echo "NEXT=$NEXT" > /tmp/merge_next.txt
+          echo "PWD: $(pwd)"
+          echo "Repo root listing:"
+          ls -la
+          echo "Input dir listing (first 5 files/dirs):"
+          ls -la "${{ github.event.inputs.input_dir }}" || true
 
-      - name: Commit and push bumped counter back to repo
-        if: always()
+      - name: Run merge_macros.py
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DIR: ${{ github.event.inputs.input_dir }}
+          OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
+          VERSIONS: ${{ github.event.inputs.versions }}
+          WITHIN_MAX_TIME: ${{ github.event.inputs.within_max_time }}
+          WITHIN_MAX_PAUSES: ${{ github.event.inputs.within_max_pauses }}
+          BETWEEN_MAX_TIME: ${{ github.event.inputs.between_max_time }}
+          BETWEEN_MAX_PAUSES: ${{ github.event.inputs.between_max_pauses }}
+          EXCLUDE_COUNT: ${{ github.event.inputs.exclude_count }}
+          SEED_INPUT: ${{ github.event.inputs.seed }}
         run: |
           set -euo pipefail
-          COUNTER_FILE=".github/merge_bundle_counter.txt"
-          if [ ! -f "$COUNTER_FILE" ]; then
-            echo "Counter file not present; nothing to commit."
-            exit 0
+          SEED_ARG=""
+          if [ -n "${SEED_INPUT}" ]; then
+            SEED_ARG="--seed ${SEED_INPUT}"
           fi
-          # Configure git user and commit
-          git config user.name "github-actions[bot]" || true
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
-          git add "$COUNTER_FILE"
-          # Check if there is actually anything to commit
-          if git diff --staged --quiet; then
-            echo "No changes to counter to commit."
-          else
-            NEXT=$(cat "$COUNTER_FILE" || echo "")
-            git commit -m "CI: bump merged bundle counter to ${NEXT}" || true
-            # push to the current branch
-            # Use HEAD to push back to the same branch that triggered the run
-            git push origin HEAD || (echo "git push failed" && false)
-            echo "Pushed updated counter: ${NEXT}"
-          fi
-
-      - name: Show originals (debug)
-        run: |
-          echo "PWD: $PWD"
-          echo "Listing originals (top-level):"
-          ls -la originals || true
-          echo "Recursive sample (json files):"
-          find originals -type f -name '*.json' -print || true
-
-      - name: Run merge_macros.py with UI inputs
-        env:
-          PYTHONUNBUFFERED: '1'
-        run: |
-          set -euo pipefail
-          VERSIONS="${{ github.event.inputs.versions }}"
-          WITHIN_MAX_TIME="${{ github.event.inputs.within_max_time }}"
-          WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
-          BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
-          EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
-          BETWEEN_MAX_PAUSES="${{ github.event.inputs.between_max_pauses }}"
-
-          echo "Inputs:"
-          echo " versions=${VERSIONS}"
-          echo " within_max_time='${WITHIN_MAX_TIME}'"
-          echo " within_max_pauses=${WITHIN_MAX_PAUSES}"
-          echo " between_max_time='${BETWEEN_MAX_TIME}'"
-          echo " exclude_count=${EXCLUDE_COUNT}"
-          echo " between_max_pauses=${BETWEEN_MAX_PAUSES}"
-          echo "BUNDLE_SEQ='${BUNDLE_SEQ:-(none)}'"
-
           python3 merge_macros.py \
-            --input-dir "originals" \
-            --output-dir "output" \
+            --input-dir "${INPUT_DIR}" \
+            --output-dir "${OUTPUT_DIR}" \
             --versions "${VERSIONS}" \
+            ${SEED_ARG} \
+            --exclude-count "${EXCLUDE_COUNT}" \
             --within-max-time "${WITHIN_MAX_TIME}" \
             --within-max-pauses "${WITHIN_MAX_PAUSES}" \
             --between-max-time "${BETWEEN_MAX_TIME}" \
-            --between-max-pauses "${BETWEEN_MAX_PAUSES}" \
-            --exclude-count "${EXCLUDE_COUNT}"
+            --between-max-pauses "${BETWEEN_MAX_PAUSES}"
 
-      - name: Zip merged outputs (ensure top-level folder name matches merged bundle)
+      - name: Debug: find zip(s) produced
         if: always()
         run: |
-          set -euo pipefail
-          BUNDLE="${BUNDLE_SEQ:-}"
-          if [ -z "$BUNDLE" ]; then
-            BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
-            BUNDLE=${BUNDLE:-1}
+          echo "Find any merged_bundle*.zip files:"
+          find . -type f -name "merged_bundle*.zip" -print || true
+          echo "Show output dir contents:"
+          ls -la "${{ github.event.inputs.output_dir }}" || true
+
+      - name: Commit counter file (if changed)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f ".github/merge_bundle_counter.txt" ]; then
+            git add .github/merge_bundle_counter.txt || true
           fi
-          OUTPUT_BASE="merged_bundle_${BUNDLE}"
-          echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
-          # cd into 'output' so the zip contains OUTPUT_BASE as top-level (no leading 'output/')
-          if [ -d "output/${OUTPUT_BASE}" ]; then
-            (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
-            ls -la "${OUTPUT_BASE}.zip" || true
-            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+          if git diff --cached --quiet; then
+            echo "No git changes to commit."
           else
-            echo "No 'output/${OUTPUT_BASE}' found; creating empty zip fallback"
-            zip -r "${OUTPUT_BASE}.zip" || true
-            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            git commit -m "Update merge bundle counter [skip ci]" || true
+            git push origin "HEAD:${BRANCH}" || true
           fi
 
-      - name: Upload merged ZIP artifact
-        if: always()
+      - name: Upload merged bundle artifact (wildcard)
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
-          path: ${{ env.ZIP_NAME }}
+          path: '**/merged_bundle*.zip'
