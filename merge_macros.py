@@ -114,11 +114,16 @@ def load_json_events(path: Path):
     if isinstance(data, list):
         return deepcopy(data)
     return []
+
 def zero_base_events(events):
-    """Return events shifted so earliest Time is 0 and the event duration in ms."""
+    """
+    *** FIX: This function now sorts events by time before shifting ***
+    Return events sorted, shifted so earliest Time is 0, and the event duration in ms.
+    """
     if not events:
         return [], 0
-    times = []
+    
+    events_with_time = []
     for e in events:
         try:
             t = int(e.get("Time", 0))
@@ -127,22 +132,28 @@ def zero_base_events(events):
                 t = int(float(e.get("Time", 0)))
             except:
                 t = 0
-        times.append(t)
-    min_t = min(times)
+        events_with_time.append((e, t))
+
+    # Sort by the parsed time (the second element of the tuple)
+    try:
+        events_with_time.sort(key=lambda x: x[1])
+    except Exception as e:
+        print(f"WARNING: Could not sort events, proceeding without sorting. Error: {e}", file=sys.stderr)
+
+    if not events_with_time:
+        return [], 0
+        
+    min_t = events_with_time[0][1]
     shifted = []
-    for e in events:
-        ne = deepcopy(e)
-        try:
-            t = int(ne.get("Time", 0))
-        except Exception:
-            try:
-                t = int(float(ne.get("Time", 0)))
-            except:
-                t = 0
-        ne["Time"] = t - min_t
+    
+    for (original_event, original_time) in events_with_time:
+        ne = deepcopy(original_event)
+        ne["Time"] = original_time - min_t
         shifted.append(ne)
-    duration_ms = max(int(e.get("Time", 0)) for e in shifted) if shifted else 0
+
+    duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
+
 def part_from_filename(fname: str):
     """
     New token rule: up to 4 alphanumeric chars, prefer letters first then digits.
@@ -202,7 +213,6 @@ def apply_shifts(events, shift_ms):
             t = int(ne.get("Time", 0))
         except Exception:
             try:
-                # *** FIX 2: Corrected typo 'm' to '0' ***
                 t = int(float(ne.get("Time", 0)))
             except:
                 t = 0
@@ -334,30 +344,33 @@ def generate_version_for_folder(files, rng, version_num,
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
         evs = load_json_events(fpath_obj)
-        zb_evs, _ = zero_base_events(evs)
+        
+        # zero_base_events now ALSO sorts the events
+        zb_evs, file_duration_ms = zero_base_events(evs)
+        
         # For special file: do NOT insert intra pauses (play as-is)
         if is_special:
             intra_evs = zb_evs
             intra_details = []
+            per_file_event_ms[str(fpath_obj)] = file_duration_ms
         else:
             intra_evs, intra_details = insert_intra_pauses(zb_evs, rng, within_max_pauses, within_min_s, within_max_s)
             if intra_details:
                 pause_info["intra_file_pauses"].append({"file": fpath_obj.name, "pauses": intra_details})
+            
+            # Calculate total event time *including* intra-pauses
+            total_event_ms = intra_evs[-1]["Time"] if intra_evs else 0
+            per_file_event_ms[str(fpath_obj)] = total_event_ms
+
         # shift by cursor and append
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
-        # compute event duration (including intra)
+
         if shifted:
-            file_max = max(int(e.get("Time",0)) for e in shifted)
-            file_min = min(int(e.get("Time",0)) for e in shifted)
-            event_ms = file_max - file_min
-            # *** FIX 1: Corrected typo 'event_.ms' to 'event_ms' ***
-            per_file_event_ms[str(fpath_obj)] = event_ms
+            file_max = shifted[-1]["Time"] # Get time of last event
             time_cursor = file_max # Set cursor to the end of the last event
-        else:
-            per_file_event_ms[str(fpath_obj)] = 0
-            
-        # --- *** FIX 2: Reworked Pause Logic *** ---
+        
+        # --- Reworked Pause Logic ---
         
         # Check if this is the very last file
         if idx < len(final_files) - 1:
@@ -369,7 +382,6 @@ def generate_version_for_folder(files, rng, version_num,
                 # This makes it exempt from random pause rules
                 SHORT_MID_BUFFER_MS = 1000
                 pause_ms = SHORT_MID_BUFFER_MS
-                print(f"INFO: Applying short {pause_ms}ms buffer after special file {fpath_obj.name}")
             else:
                 # Apply a normal random pause
                 low = between_min_s if between_max_s >= between_min_s else 0
