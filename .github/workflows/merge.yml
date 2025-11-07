@@ -1,4 +1,4 @@
-name: Merge macros — seconds-based UI, no-repeat pauses
+name: Merge macros — seconds-based UI, no-repeat pauses (with cleanup)
 
 permissions:
   contents: write
@@ -31,22 +31,25 @@ on:
         required: true
         default: '18'
       between_max_pauses:
-        description: 'Max pauses between files (compat)'
+        description: 'Max pauses between files (kept for compatibility; placed last)'
         required: true
         default: '1'
       exclude_count:
-        description: 'Max files to randomly exclude per version (0..N-1)'
+        description: 'Max files to randomly exclude per version (0–N-1)'
         required: true
         default: '5'
       seed:
-        description: 'Optional seed (blank for random)'
+        description: 'Optional RNG seed (blank = random)'
         required: false
         default: ''
 
 jobs:
   merge:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
+    # expose inputs as env vars so run: blocks use only $VAR (avoids YAML expression pitfalls)
     env:
       INPUT_DIR: ${{ github.event.inputs.input_dir }}
       OUTPUT_DIR: ${{ github.event.inputs.output_dir }}
@@ -59,7 +62,7 @@ jobs:
       SEED_INPUT: ${{ github.event.inputs.seed }}
 
     steps:
-      - name: Checkout repository (with write creds)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -70,29 +73,37 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Show repo root & input folder (debug)
-        run: |
-          echo "WORKDIR: $(pwd)"
-          echo "Top-level list:"
-          ls -la || true
-          echo
-          echo "Attempt to list input dir (if present): $INPUT_DIR"
-          if [ -d "$INPUT_DIR" ]; then
-            ls -la "$INPUT_DIR" || true
-          else
-            echo "Input dir not found: $INPUT_DIR"
-          fi
-
-      - name: Run merge_macros.py (seconds-based UI)
+      - name: Bump merge counter
         run: |
           set -euo pipefail
+          COUNTER_FILE=".github/merge_bundle_counter.txt"
+          mkdir -p "$(dirname "$COUNTER_FILE")"
+          PREV=0
+          if [ -f "$COUNTER_FILE" ]; then
+            PREV=$(cat "$COUNTER_FILE" | tr -d '[:space:]' || echo 0)
+          fi
+          NEXT=$((PREV + 1))
+          echo "$NEXT" > "$COUNTER_FILE"
+          echo "BUNDLE_SEQ=$NEXT" >> "$GITHUB_ENV"
+          echo "Counter bumped from $PREV to $NEXT"
 
+      - name: Clean previous merged output (safe)
+        run: |
+          set -euo pipefail
+          echo "Cleaning possible previous outputs..."
+          # remove previous outputs only (safe: does not touch originals/ or .github/)
+          rm -rf "$OUTPUT_DIR" merged_output output || true
+          echo "Clean finished."
+
+      - name: Run merge_macros.py
+        run: |
+          set -euo pipefail
           SEED_ARG=""
           if [ -n "${SEED_INPUT}" ]; then
             SEED_ARG="--seed ${SEED_INPUT}"
           fi
 
-          echo "Running merge_macros.py with parameters:"
+          echo "Running merge_macros.py with:"
           echo "  input-dir:        $INPUT_DIR"
           echo "  output-dir:       $OUTPUT_DIR"
           echo "  versions:         $VERSIONS"
@@ -119,34 +130,30 @@ jobs:
 
           echo "----- END SCRIPT OUTPUT -----"
 
-      - name: Debug: show any merged_bundle zip(s)
-        if: always()
-        run: |
-          echo "Searching for merged_bundle*.zip files..."
-          find "$(pwd)" -type f \( -name "merged_bundle*.zip" -o -name "merged_bundle_*.zip" \) -print -exec ls -lh "{}" \; || true
-          echo "Listing output dir (if exists): $OUTPUT_DIR"
-          if [ -d "$OUTPUT_DIR" ]; then
-            ls -la "$OUTPUT_DIR" || true
-          fi
-
-      - name: Commit counter file back to repo (if changed)
+      - name: Commit updated counter
         if: always()
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ -f ".github/merge_bundle_counter.txt" ]; then
-            git add .github/merge_bundle_counter.txt || true
-          fi
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            BRANCH="${GITHUB_REF#refs/heads/}"
-            git commit -m "Update merge bundle counter [skip ci]" || true
-            git push origin "HEAD:${BRANCH}" || true
+            git add .github/merge_bundle_counter.txt
+            if git diff --cached --quiet; then
+              echo "No counter changes to commit."
+            else
+              git commit -m "Update merge bundle counter [skip ci]" || true
+              git push origin HEAD || true
+            fi
           fi
 
-      - name: Upload any merged-bundle zip found (wildcard)
+      - name: Show merged outputs (debug)
+        if: always()
+        run: |
+          echo "Merged bundle zips (if any):"
+          find "$OUTPUT_DIR" -type f -name "merged_bundle*.zip" -exec ls -lh {} \; || true
+
+      - name: Upload merged bundle artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: merged-bundle
