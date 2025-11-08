@@ -116,29 +116,35 @@ def add_mouse_drift(events, rng, drift_chance=0.08):
     Humans don't keep cursor perfectly still - it drifts naturally.
     
     Adds 1-3 small mouse movements near the current position.
+    Only applies to events that have X/Y coordinates.
     """
     drifted = []
     for i, e in enumerate(deepcopy(events)):
         drifted.append(e)
         
         # Add drift after this event (not before first event)
+        # Only if the event has X/Y coordinates (mouse events, not keyboard)
         if i > 0 and rng.random() < drift_chance:
-            # Create 1-3 small mouse movements
-            drift_count = rng.randint(1, 3)
-            base_time = int(e.get('Time', 0))
-            
-            if 'X' in e and 'Y' in e:
-                current_x = int(e['X'])
-                current_y = int(e['Y'])
-                
-                for d in range(drift_count):
-                    drift_event = {
-                        'Time': base_time + (d + 1) * rng.randint(80, 200),
-                        'Type': 'MouseMove',
-                        'X': current_x + rng.randint(-20, 20),
-                        'Y': current_y + rng.randint(-20, 20)
-                    }
-                    drifted.append(drift_event)
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    current_x = int(e['X'])
+                    current_y = int(e['Y'])
+                    
+                    # Create 1-3 small mouse movements
+                    drift_count = rng.randint(1, 3)
+                    base_time = int(e.get('Time', 0))
+                    
+                    for d in range(drift_count):
+                        drift_event = {
+                            'Time': base_time + (d + 1) * rng.randint(80, 200),
+                            'Type': 'MouseMove',
+                            'X': current_x + rng.randint(-20, 20),
+                            'Y': current_y + rng.randint(-20, 20)
+                        }
+                        drifted.append(drift_event)
+                except (ValueError, TypeError):
+                    # If X/Y can't be converted to int, skip drift for this event
+                    pass
     
     return drifted
 
