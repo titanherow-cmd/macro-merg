@@ -671,12 +671,12 @@ def generate_version_for_folder(files, rng, version_num,
         # Apply anti-detection features (preserve special file behavior)
         if not is_special:
             # ANTI-DETECTION CONTROLS - Set to False to disable any feature
-            ENABLE_TIME_FATIGUE = True
-            ENABLE_MOUSE_JITTER = True
-            ENABLE_MISCLICKS = True
-            ENABLE_MICRO_PAUSES = True
+            ENABLE_TIME_FATIGUE = False
+            ENABLE_MOUSE_JITTER = False
+            ENABLE_MISCLICKS = False
+            ENABLE_MICRO_PAUSES = False
             ENABLE_MOUSE_DRIFT = True
-            ENABLE_REACTION_VARIANCE = True
+            ENABLE_REACTION_VARIANCE = False
             
             # 1. Time-of-day fatigue - adjusts ALL timings proportionally
             if ENABLE_TIME_FATIGUE:
