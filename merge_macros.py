@@ -150,8 +150,10 @@ def add_mouse_drift(events, rng, drift_chance=0.08):
     
     Adds 1-3 small mouse movements within ±20 pixels of current position.
     """
+    events_copy = deepcopy(events)
     drifted = []
-    for i, e in enumerate(deepcopy(events)):
+    
+    for i, e in enumerate(events_copy):
         drifted.append(e)
         
         # Only add drift if:
@@ -163,8 +165,8 @@ def add_mouse_drift(events, rng, drift_chance=0.08):
         
         # Check if next event is a click
         is_next_click = False
-        if i + 1 < len(events):
-            next_e = events[i + 1]
+        if i + 1 < len(events_copy):
+            next_e = events_copy[i + 1]
             is_next_click = (next_e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
                            'button' in next_e or 'Button' in next_e)
         
@@ -668,29 +670,42 @@ def generate_version_for_folder(files, rng, version_num,
         
         # Apply anti-detection features (preserve special file behavior)
         if not is_special:
-            # IMPORTANT: Apply features in order that preserves macro sequence
+            # ANTI-DETECTION CONTROLS - Set to False to disable any feature
+            ENABLE_TIME_FATIGUE = True
+            ENABLE_MOUSE_JITTER = True
+            ENABLE_MISCLICKS = True
+            ENABLE_MICRO_PAUSES = True
+            ENABLE_MOUSE_DRIFT = True
+            ENABLE_REACTION_VARIANCE = True
             
-            # 1. Time-of-day fatigue - adjusts ALL timings proportionally (preserves order)
-            zb_evs, extra_mistake_chance = add_time_of_day_fatigue(zb_evs, rng)
+            # 1. Time-of-day fatigue - adjusts ALL timings proportionally
+            if ENABLE_TIME_FATIGUE:
+                zb_evs, extra_mistake_chance = add_time_of_day_fatigue(zb_evs, rng)
+            else:
+                extra_mistake_chance = 0
             
-            # 2. Mouse jitter - only modifies X/Y by ±1 pixel (preserves sequence)
-            zb_evs = add_mouse_jitter(zb_evs, rng)
+            # 2. Mouse jitter - ONLY modifies click coordinates by ±1 pixel
+            if ENABLE_MOUSE_JITTER:
+                zb_evs = add_mouse_jitter(zb_evs, rng)
             
-            # 3. Occasional right-click misclicks - INSERTS new events before clicks
-            base_misclick_chance = 0.035 + extra_mistake_chance
-            zb_evs = add_occasional_misclicks(zb_evs, rng, base_misclick_chance)
+            # 3. Occasional right-click misclicks - INSERTS events before left-clicks
+            if ENABLE_MISCLICKS:
+                base_misclick_chance = 0.035 + extra_mistake_chance
+                zb_evs = add_occasional_misclicks(zb_evs, rng, base_misclick_chance)
             
-            # 4. Micro-pauses - adds small time delays (preserves sequence)
-            zb_evs = add_micro_pauses(zb_evs, rng)
+            # 4. Micro-pauses - adds small time delays
+            if ENABLE_MICRO_PAUSES:
+                zb_evs = add_micro_pauses(zb_evs, rng)
             
-            # 5. Mouse drift - INSERTS new mouse movement events
-            zb_evs = add_mouse_drift(zb_evs, rng)
+            # 5. Mouse drift - INSERTS mouse movements between non-click events
+            if ENABLE_MOUSE_DRIFT:
+                zb_evs = add_mouse_drift(zb_evs, rng)
             
-            # 6. Reaction time variance - adds delays to specific events (preserves sequence)
-            zb_evs = add_reaction_variance(zb_evs, rng)
+            # 6. Reaction time variance - adds delays to some clicks
+            if ENABLE_REACTION_VARIANCE:
+                zb_evs = add_reaction_variance(zb_evs, rng)
             
             # Re-sort by Time after insertions to ensure correct playback order
-            # This is critical: Free Macro requires events in chronological order
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
         
         # For special file: no intra pauses, no anti-detection
