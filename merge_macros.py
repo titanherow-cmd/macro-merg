@@ -36,30 +36,43 @@ BETWEEN_MAX_PAUSES = 1  # Hardcoded: always 1 pause between files
 # --------- Anti-detection helpers ---------
 def add_mouse_jitter(events, rng):
     """
-    Add random ±1 pixel offset to X/Y coordinates for CLICKS ONLY.
-    Clicks one of the 8 surrounding pixels around the target (or stays on target).
+    Add natural mouse movement variance WITHOUT changing click coordinates.
     
-    CRITICAL: Only applies to actual click events, NOT mouse movements.
-    This ensures cursor moves to the right place, then clicks with tiny variance.
+    Instead of clicking ±1 pixel off target, we add a small "approach" movement
+    right before the click that makes the path to the target less robotic.
     
-    Possible offsets: (-1,-1), (-1,0), (-1,1), (0,-1), (0,0), (0,1), (1,-1), (1,0), (1,1)
+    The actual click happens at the EXACT original coordinates.
+    This preserves macro accuracy while adding human-like cursor wobble.
     """
     jittered = []
-    for e in deepcopy(events):
-        # Only apply jitter to CLICK events, not mouse movements
+    for i, e in enumerate(deepcopy(events)):
+        # Only add approach movement before CLICK events
         is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
                    'button' in e or 'Button' in e)
         
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
-                # Choose one of the 8 surrounding pixels (or center)
-                offset_x = rng.choice([-1, 0, 1])
-                offset_y = rng.choice([-1, 0, 1])
-                e['X'] = int(e['X']) + offset_x
-                e['Y'] = int(e['Y']) + offset_y
+                target_x = int(e['X'])
+                target_y = int(e['Y'])
+                
+                # Add a tiny "wobble" movement 30-80ms before the click
+                # Cursor moves near the target (±2 pixels), then clicks exact spot
+                wobble_time = int(e.get('Time', 0)) - rng.randint(30, 80)
+                wobble_move = {
+                    'Time': wobble_time,
+                    'Type': 'MouseMove',
+                    'X': target_x + rng.choice([-2, -1, 0, 1, 2]),
+                    'Y': target_y + rng.choice([-2, -1, 0, 1, 2])
+                }
+                jittered.append(wobble_move)
+                
+                # Then add the ORIGINAL click at exact coordinates
+                jittered.append(e)
             except:
-                pass  # If X/Y aren't numbers, skip jitter
-        jittered.append(e)
+                jittered.append(e)
+        else:
+            jittered.append(e)
+    
     return jittered
 
 def add_occasional_misclicks(events, rng, misclick_chance=0.035):
