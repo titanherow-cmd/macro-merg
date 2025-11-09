@@ -671,42 +671,60 @@ def generate_version_for_folder(files, rng, version_num,
         # Apply anti-detection features (preserve special file behavior)
         if not is_special:
             # ANTI-DETECTION CONTROLS - Set to False to disable any feature
-            ENABLE_TIME_FATIGUE = False
+            ENABLE_TIME_FATIGUE = True
             ENABLE_MOUSE_JITTER = True
-            ENABLE_MISCLICKS = False
-            ENABLE_MICRO_PAUSES = False
-            ENABLE_MOUSE_DRIFT = False
-            ENABLE_REACTION_VARIANCE = False
+            ENABLE_MISCLICKS = True
+            ENABLE_MICRO_PAUSES = True
+            ENABLE_MOUSE_DRIFT = True
+            ENABLE_REACTION_VARIANCE = True
             
-            # 1. Time-of-day fatigue - adjusts ALL timings proportionally
+            # PHASE 1: Time modifications (don't insert events, just modify timing)
             if ENABLE_TIME_FATIGUE:
                 zb_evs, extra_mistake_chance = add_time_of_day_fatigue(zb_evs, rng)
             else:
                 extra_mistake_chance = 0
             
-            # 2. Mouse jitter - ONLY modifies click coordinates by ±1 pixel
+            if ENABLE_MICRO_PAUSES:
+                zb_evs = add_micro_pauses(zb_evs, rng)
+            
+            if ENABLE_REACTION_VARIANCE:
+                zb_evs = add_reaction_variance(zb_evs, rng)
+            
+            # PHASE 2: Coordinate modifications (only ±1 pixel on clicks)
             if ENABLE_MOUSE_JITTER:
                 zb_evs = add_mouse_jitter(zb_evs, rng)
             
-            # 3. Occasional right-click misclicks - INSERTS events before left-clicks
+            # PHASE 3: Event insertions (must preserve click coordinates!)
+            # Store original click coordinates before insertions
+            click_coordinates = {}
+            for i, e in enumerate(zb_evs):
+                is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                           'button' in e or 'Button' in e)
+                if is_click and 'X' in e and 'Y' in e:
+                    # Store time+coordinates so we can restore them
+                    click_id = (e.get('Type', 'Click'), e.get('Time', 0))
+                    click_coordinates[click_id] = (e['X'], e['Y'])
+            
+            # Insert misclicks and drift
             if ENABLE_MISCLICKS:
                 base_misclick_chance = 0.035 + extra_mistake_chance
                 zb_evs = add_occasional_misclicks(zb_evs, rng, base_misclick_chance)
             
-            # 4. Micro-pauses - adds small time delays
-            if ENABLE_MICRO_PAUSES:
-                zb_evs = add_micro_pauses(zb_evs, rng)
-            
-            # 5. Mouse drift - INSERTS mouse movements between non-click events
             if ENABLE_MOUSE_DRIFT:
                 zb_evs = add_mouse_drift(zb_evs, rng)
             
-            # 6. Reaction time variance - adds delays to some clicks
-            if ENABLE_REACTION_VARIANCE:
-                zb_evs = add_reaction_variance(zb_evs, rng)
-            
-            # Re-sort by Time after insertions to ensure correct playback order
+            # PHASE 4: Re-sort and restore click coordinates
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
+            
+            # CRITICAL FIX: Restore original click coordinates after re-sort
+            # This ensures clicks happen at the right place even after insertions
+            for e in zb_evs:
+                is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                           'button' in e or 'Button' in e)
+                if is_click:
+                    click_id = (e.get('Type', 'Click'), e.get('Time', 0))
+                    if click_id in click_coordinates:
+                        e['X'], e['Y'] = click_coordinates[click_id]
         
         # For special file: no intra pauses, no anti-detection
         if is_special:
