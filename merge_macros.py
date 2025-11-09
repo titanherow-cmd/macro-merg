@@ -91,30 +91,33 @@ def add_occasional_misclicks(events, rng, misclick_chance=0.035):
                     
                     # Misclick position: 5-15 pixels away in random direction
                     offset_distance = rng.randint(5, 15)
-                    angle = rng.uniform(0, 6.28318)  # Random angle in radians
                     misclick_x = target_x + int(offset_distance * rng.choice([-1, 1]))
                     misclick_y = target_y + int(offset_distance * rng.choice([-1, 1]))
                     
                     # Create RIGHT-CLICK misclick event
+                    # Copy the structure of the original event but change to right-click
                     misclick_time = int(e.get('Time', 0)) - rng.randint(150, 350)
-                    misclick = {
-                        'Time': misclick_time,
-                        'Type': 'RightClick',
-                        'X': misclick_x,
-                        'Y': misclick_y
-                    }
-                    if 'button' in e:
+                    misclick = deepcopy(e)
+                    misclick['Time'] = misclick_time
+                    misclick['X'] = misclick_x
+                    misclick['Y'] = misclick_y
+                    
+                    # Force it to be a RIGHT-CLICK in all possible formats
+                    misclick['Type'] = 'RightClick'
+                    if 'button' in misclick:
                         misclick['button'] = 'right'
-                    if 'Button' in e:
+                    if 'Button' in misclick:
                         misclick['Button'] = 'Right'
+                    # Remove any left-click indicators
+                    if 'LeftClick' in str(misclick.get('Type', '')):
+                        misclick['Type'] = 'RightClick'
                     
                     # Add cursor movement BACK toward target (correction movement)
-                    # This happens between misclick and real click
                     correction_time = misclick_time + rng.randint(50, 120)
                     correction_move = {
                         'Time': correction_time,
                         'Type': 'MouseMove',
-                        'X': target_x + rng.randint(-2, 2),  # Move near target
+                        'X': target_x + rng.randint(-2, 2),
                         'Y': target_y + rng.randint(-2, 2)
                     }
                     
@@ -673,7 +676,7 @@ def generate_version_for_folder(files, rng, version_num,
             # ANTI-DETECTION CONTROLS - Set to False to disable any feature
             ENABLE_TIME_FATIGUE = True
             ENABLE_MOUSE_JITTER = True
-            ENABLE_MISCLICKS = True
+            ENABLE_MISCLICKS = False  # DISABLED - suspected to cause wrong clicks
             ENABLE_MICRO_PAUSES = True
             ENABLE_MOUSE_DRIFT = True
             ENABLE_REACTION_VARIANCE = True
