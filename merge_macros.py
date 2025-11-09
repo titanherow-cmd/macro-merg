@@ -36,15 +36,21 @@ BETWEEN_MAX_PAUSES = 1  # Hardcoded: always 1 pause between files
 # --------- Anti-detection helpers ---------
 def add_mouse_jitter(events, rng):
     """
-    Add random ±1 pixel offset to X/Y coordinates.
+    Add random ±1 pixel offset to X/Y coordinates for CLICKS ONLY.
     Clicks one of the 8 surrounding pixels around the target (or stays on target).
-    Makes clicks less robotic - humans never click exact same pixel twice.
+    
+    CRITICAL: Only applies to actual click events, NOT mouse movements.
+    This ensures cursor moves to the right place, then clicks with tiny variance.
     
     Possible offsets: (-1,-1), (-1,0), (-1,1), (0,-1), (0,0), (0,1), (1,-1), (1,0), (1,1)
     """
     jittered = []
     for e in deepcopy(events):
-        if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+        # Only apply jitter to CLICK events, not mouse movements
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 # Choose one of the 8 surrounding pixels (or center)
                 offset_x = rng.choice([-1, 0, 1])
@@ -58,46 +64,64 @@ def add_mouse_jitter(events, rng):
 
 def add_occasional_misclicks(events, rng, misclick_chance=0.035):
     """
-    2-5% chance to insert a RIGHT-CLICK misclick before certain actions.
+    2-5% chance to insert a RIGHT-CLICK misclick before certain LEFT-CLICK actions.
     Simulates human error - we sometimes miss and have to correct.
     
-    Misclick is always a RIGHT-CLICK to avoid triggering wrong actions.
-    Offset by 5-15 pixels from target, happens 100-300ms before real click.
+    CRITICAL SAFETY:
+    - Misclick is ALWAYS a RIGHT-CLICK (never left-click to avoid wrong actions)
+    - Misclick happens 5-15 pixels AWAY from target (not at target)
+    - Happens 150-350ms BEFORE the real click
+    - After misclick, cursor moves BACK toward target, then does real click
+    
+    This simulates: miss slightly → realize mistake → move back → correct click
     """
     enhanced = []
     for i, e in enumerate(deepcopy(events)):
-        # Check if this is a left-click event
-        is_left_click = (e.get('button') == 'left' or 
-                        e.get('Button') == 'Left' or 
-                        e.get('Type') == 'Click')
+        # Check if this is a LEFT-CLICK event only
+        is_left_click = (e.get('Type') == 'Click' or 
+                        e.get('Type') == 'LeftClick' or
+                        e.get('button') == 'left' or 
+                        e.get('Button') == 'Left')
         
         if is_left_click and rng.random() < misclick_chance:
-            # Create a right-click misclick slightly off target
-            misclick = deepcopy(e)
-            
-            # Change to right-click
-            if 'button' in misclick:
-                misclick['button'] = 'right'
-            if 'Button' in misclick:
-                misclick['Button'] = 'Right'
-            if 'Type' in misclick:
-                misclick['Type'] = 'RightClick'
-            
-            # Offset position by 5-15 pixels randomly
-            if 'X' in misclick and 'Y' in misclick:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
                 try:
-                    offset_x = rng.randint(5, 15) * rng.choice([-1, 1])
-                    offset_y = rng.randint(5, 15) * rng.choice([-1, 1])
-                    misclick['X'] = int(misclick['X']) + offset_x
-                    misclick['Y'] = int(misclick['Y']) + offset_y
+                    target_x = int(e['X'])
+                    target_y = int(e['Y'])
+                    
+                    # Misclick position: 5-15 pixels away in random direction
+                    offset_distance = rng.randint(5, 15)
+                    angle = rng.uniform(0, 6.28318)  # Random angle in radians
+                    misclick_x = target_x + int(offset_distance * rng.choice([-1, 1]))
+                    misclick_y = target_y + int(offset_distance * rng.choice([-1, 1]))
+                    
+                    # Create RIGHT-CLICK misclick event
+                    misclick_time = int(e.get('Time', 0)) - rng.randint(150, 350)
+                    misclick = {
+                        'Time': misclick_time,
+                        'Type': 'RightClick',
+                        'X': misclick_x,
+                        'Y': misclick_y
+                    }
+                    if 'button' in e:
+                        misclick['button'] = 'right'
+                    if 'Button' in e:
+                        misclick['Button'] = 'Right'
+                    
+                    # Add cursor movement BACK toward target (correction movement)
+                    # This happens between misclick and real click
+                    correction_time = misclick_time + rng.randint(50, 120)
+                    correction_move = {
+                        'Time': correction_time,
+                        'Type': 'MouseMove',
+                        'X': target_x + rng.randint(-2, 2),  # Move near target
+                        'Y': target_y + rng.randint(-2, 2)
+                    }
+                    
+                    enhanced.append(misclick)
+                    enhanced.append(correction_move)
                 except:
                     pass
-            
-            # Misclick happens 100-300ms before real click
-            misclick_delay = rng.randint(100, 300)
-            misclick['Time'] = int(e.get('Time', 0)) - misclick_delay
-            
-            enhanced.append(misclick)
         
         enhanced.append(e)
     
@@ -118,25 +142,40 @@ def add_micro_pauses(events, rng, micropause_chance=0.15):
 
 def add_mouse_drift(events, rng, drift_chance=0.08):
     """
-    8% chance to add "mouse wander" events between actions.
+    8% chance to add "mouse wander" events BETWEEN actions (not during clicks).
     Humans don't keep cursor perfectly still - it drifts naturally.
     
-    Adds 1-3 small mouse movements near the current position.
-    Only applies to events that have X/Y coordinates.
+    CRITICAL: Only adds drift AFTER non-click events (like delays/waits).
+    Never adds drift right before a click - that would move cursor away from target.
+    
+    Adds 1-3 small mouse movements within ±20 pixels of current position.
     """
     drifted = []
     for i, e in enumerate(deepcopy(events)):
         drifted.append(e)
         
-        # Add drift after this event (not before first event)
-        # Only if the event has X/Y coordinates (mouse events, not keyboard)
-        if i > 0 and rng.random() < drift_chance:
+        # Only add drift if:
+        # 1. Not the first event
+        # 2. Current event is NOT a click (don't drift after clicks)
+        # 3. Next event (if exists) is NOT a click (don't drift before clicks)
+        is_current_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                          'button' in e or 'Button' in e)
+        
+        # Check if next event is a click
+        is_next_click = False
+        if i + 1 < len(events):
+            next_e = events[i + 1]
+            is_next_click = (next_e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                           'button' in next_e or 'Button' in next_e)
+        
+        # Only add drift if current and next are both NOT clicks
+        if i > 0 and not is_current_click and not is_next_click and rng.random() < drift_chance:
             if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
                 try:
                     current_x = int(e['X'])
                     current_y = int(e['Y'])
                     
-                    # Create 1-3 small mouse movements
+                    # Create 1-3 small mouse movements (idle wandering)
                     drift_count = rng.randint(1, 3)
                     base_time = int(e.get('Time', 0))
                     
@@ -149,7 +188,6 @@ def add_mouse_drift(events, rng, drift_chance=0.08):
                         }
                         drifted.append(drift_event)
                 except (ValueError, TypeError):
-                    # If X/Y can't be converted to int, skip drift for this event
                     pass
     
     return drifted
