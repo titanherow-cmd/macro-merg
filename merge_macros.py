@@ -674,12 +674,12 @@ def generate_version_for_folder(files, rng, version_num,
         # Apply anti-detection features (preserve special file behavior)
         if not is_special:
             # ANTI-DETECTION CONTROLS - Set to False to disable any feature
-            ENABLE_TIME_FATIGUE = False  # DISABLED for testing
+            ENABLE_TIME_FATIGUE = True  # TESTING THIS ONE
             ENABLE_MOUSE_JITTER = True
-            ENABLE_MISCLICKS = False  # DISABLED - suspected to cause wrong clicks
-            ENABLE_MICRO_PAUSES = False  # DISABLED for testing
+            ENABLE_MISCLICKS = False  # Known issue - stays disabled
+            ENABLE_MICRO_PAUSES = False
             ENABLE_MOUSE_DRIFT = True
-            ENABLE_REACTION_VARIANCE = False  # DISABLED for testing
+            ENABLE_REACTION_VARIANCE = False
             
             # PHASE 1: Time modifications (don't insert events, just modify timing)
             if ENABLE_TIME_FATIGUE:
