@@ -1,18 +1,105 @@
-#!/usr/bin/env python3
+evs = load_json_events(fpath_obj)
+        zb_evs, file_duration_ms = zero_base_events(evs)
+        
+        # Determine environment based on folder path
+        # CRITICAL: Check for "deskt" first (more specific) before "mobile"
+        # Because deskt- osrs is INSIDE the MOBILE folder
+        folder_path_lower = str(folder_path).lower()
+        
+        is_desktop_group = "deskt" in folder_path_lower
+        is_mobile_group = "mobile" in folder_path_lower and not is_desktop_group
+        
+        # Apply anti-detection features (preserve special file behavior)
+        if not is_special:
+            # === MOBILE PROFILE === (Screen share - no mouse tracking)
+            if is_mobile_group:
+                ENABLE_TIME_FATIGUE = True
+                ENABLE_MOUSE_JITTER = True      # ±2 pixels
+                ENABLE_MICRO_PAUSES = True
+                ENABLE_REACTION_VARIANCE = True
+                # Desktop features disabled for mobile
+                ENABLE_MOUSE_CURVES = False
+                ENABLE_CURSOR_OVERSHOOTS = False
+                ENABLE_MOUSE_ACCELERATION = False
+                ENABLE_DESKTOP_MISCLICKS = False
+            
+            # === DESKTOP PROFILE === (Full client - mouse tracking enabled)
+            elif is_desktop_group:
+                ENABLE_TIME_FATIGUE = True
+                ENABLE_MOUSE_JITTER = True      # ±1 pixel
+                ENABLE_MICRO_PAUSES = True
+                ENABLE_REACTION_VARIANCE = True
+                # Desktop-specific features
+                ENABLE_MOUSE_CURVES = True      # Curved mouse paths
+                ENABLE_CURSOR_OVERSHOOTS = True # Overshoot then correct
+                ENABLE_MOUSE_ACCELERATION = True # Speed variance
+                ENABLE_DESKTOP_MISCLICKS = True  # Accidental right-clicks
+            
+            # === DEFAULT PROFILE === (Unknown folder - use safe mobile profile)
+            else:
+                ENABLE_TIME_FATIGUE = True
+                ENABLE_MOUSE_JITTER = True
+                ENABLE_MICRO_PAUSES = True
+                ENABLE_REACTION_VARIANCE = True
+                ENABLE_MOUSE_CURVES = False
+                ENABLE_CURSOR_OVERSHOOTS = False
+                ENABLE_MOUSE_ACCELERATION = False
+                ENABLE_DESKTOP_MISCLICKS = False
+                is_desktop_group = False  # Treat as mobile
+            
+            # PHASE 1: Time modifications (applies to both profiles)
+            if ENABLE_TIME_FATIGUE:
+                zb_evs, extra_mistake_chance = add_time_of_day_fatigue(zb_evs, rng)
+            else:
+                extra_mistake_chance = 0
+            
+            if ENABLE_MICRO_PAUSES:
+                zb_evs = add_micro_pauses(zb_evs, rng)
+            
+            if ENABLE_REACTION_VARIANCE:
+                zb_evs = add_reaction_variance(zb_evs, rng)
+            
+            # PHASE 2: Desktop-specific mouse movements (before jitter)
+            if ENABLE_MOUSE_CURVES:
+                zb_evs = add_mouse_movement_curves(zb_evs, rng)
+            
+            if ENABLE_CURSOR_OVERSHOOTS:
+                zb_evs = add_cursor_overshoots(zb_evs, rng)
+            
+            if ENABLE_MOUSE_ACCELERATION:
+                zb_evs = add_mouse_acceleration_variance(zb_evs, rng)
+            
+            if ENABLE_DESKTOP_MISCLICKS:
+                zb_evs = add_desktop_misclicks(zb_evs, rng)
+            
+            # PHASE 3: Coordinate modifications (both profiles, different precision)
+            if ENABLE_MOUSE_JITTER:
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=is_desktop_group)
+            
+            # PHASE 4: Re-sort by time
+            zb_evs, file_duration_ms = zero_base_events(zb_evs)#!/usr/bin/env python3
 
 """
-merge_macros.py (Anti-Detection Enhanced)
-- Minimum pause times set to 0 seconds (both intra and inter)
-- UI defaults: 18s for inter-file, 33s for intra-file, 26 versions, 2 max pauses, 10 exclude
-- Pause selection uses millisecond precision
-- Non-repeating randomization: exhausts all possibilities before allowing repeats
-- Preserves event integrity for Free Macro playback
+merge_macros.py (Environment-Specific Anti-Detection)
+- MOBILE profile: Optimized for screen share (click variance, timing, no mouse tracking)
+- DESKTOP profile: Optimized for desktop client (mouse movements, cursor paths, full detection)
+- Each folder gets appropriate anti-detection based on its name
 - ANTI-DETECTION FEATURES:
-  * Mouse jitter (±1-3 pixels per click)
-  * Occasional right-click misclicks (2-5% chance before real action)
-  * Micro-pauses (50-250ms hesitations before actions)
-  * Mouse drift (cursor wanders between actions)
-  * Reaction time variance (200-600ms delays after visual triggers)
+  MOBILE:
+    * Click jitter (±2 pixels for finger tap imprecision)
+    * Time-of-day fatigue (slower at night, faster in morning)
+    * Micro-pauses (hesitations between actions)
+    * Reaction variance (human response delays)
+    * Dynamic pause ranges (no fixed patterns)
+    * Random AFK moments (simulates distractions)
+    * Session mood variance (focused/tired sessions)
+  DESKTOP:
+    * Click jitter (±1 pixel for mouse precision)
+    * Mouse movement curves (Bezier paths to targets)
+    * Cursor overshoots (miss slightly, correct)
+    * Mouse acceleration variance (speed changes)
+    * Occasional misclicks (right-click then correct)
+    * All mobile features + desktop-specific
 """
 
 from pathlib import Path
@@ -33,20 +120,209 @@ SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 BETWEEN_MAX_PAUSES = 1  # Hardcoded: always 1 pause between files
 
-# --------- Anti-detection helpers ---------
-def add_mouse_jitter(events, rng):
+# --------- Desktop-specific anti-detection helpers ---------
+
+def add_desktop_mouse_drift(events, rng, drift_chance=0.15):
     """
-    Add natural mouse movement variance WITHOUT changing click coordinates.
+    DESKTOP ONLY: 15% chance to add idle mouse drift during waits.
     
-    Instead of clicking ±1 pixel off target, we add a small "approach" movement
-    right before the click that makes the path to the target less robotic.
+    During pauses, cursor slowly drifts around (humans don't keep mouse still).
+    Only applies between non-click events (during waiting/thinking time).
     
-    The actual click happens at the EXACT original coordinates.
-    This preserves macro accuracy while adding human-like cursor wobble.
+    Higher chance than mobile misclick drift (15% vs 8%) because desktop
+    players tend to fidget with mouse more.
     """
-    jittered = []
+    drifted = []
+    events_copy = deepcopy(events)
+    
+    for i, e in enumerate(events_copy):
+        drifted.append(e)
+        
+        # Only add drift if:
+        # 1. Not the first event
+        # 2. Current event is NOT a click
+        # 3. Next event (if exists) is NOT a click
+        is_current_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                          'button' in e or 'Button' in e)
+        
+        is_next_click = False
+        if i + 1 < len(events_copy):
+            next_e = events_copy[i + 1]
+            is_next_click = (next_e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                           'button' in next_e or 'Button' in next_e)
+        
+        if i > 0 and not is_current_click and not is_next_click and rng.random() < drift_chance:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    current_x = int(e['X'])
+                    current_y = int(e['Y'])
+                    
+                    # Create 2-5 slow drift movements (idle fidgeting)
+                    drift_count = rng.randint(2, 5)
+                    base_time = int(e.get('Time', 0))
+                    
+                    for d in range(drift_count):
+                        drift_event = {
+                            'Time': base_time + (d + 1) * rng.randint(100, 300),  # Slower drift
+                            'Type': 'MouseMove',
+                            'X': current_x + rng.randint(-30, 30),  # Wider drift range
+                            'Y': current_y + rng.randint(-30, 30)
+                        }
+                        drifted.append(drift_event)
+                except (ValueError, TypeError):
+                    pass
+    
+    return drifted
+
+def add_progressive_fatigue(events, rng, session_progress):
+    """
+    Apply progressive fatigue based on how long the session has been running.
+    
+    Args:
+        session_progress: 0.0 to 1.0 (0 = start of session, 1 = end)
+    
+    Effects:
+    - Early session (0-0.3): Fast, accurate (95-100% efficiency)
+    - Mid session (0.3-0.7): Normal speed (90-95% efficiency)
+    - Late session (0.7-1.0): Slower, more mistakes (80-90% efficiency)
+    
+    Adds extra micro-pauses and slight timing delays as fatigue increases.
+    """
+    if session_progress < 0.3:
+        # Fresh - minimal fatigue
+        fatigue_multiplier = rng.uniform(0.95, 1.00)
+        extra_pause_chance = 0.05
+    elif session_progress < 0.7:
+        # Mid session - moderate fatigue
+        fatigue_multiplier = rng.uniform(1.00, 1.10)
+        extra_pause_chance = 0.12
+    else:
+        # Tired - significant fatigue
+        fatigue_multiplier = rng.uniform(1.10, 1.25)
+        extra_pause_chance = 0.20
+    
+    fatigued = []
+    for e in deepcopy(events):
+        # Apply fatigue timing to all events
+        e['Time'] = int(e.get('Time', 0) * fatigue_multiplier)
+        
+        # Add extra random pauses when tired
+        if rng.random() < extra_pause_chance:
+            e['Time'] = int(e.get('Time', 0) + rng.randint(100, 500))
+        
+        fatigued.append(e)
+    
+    return fatigued
+
+def add_action_clustering(events, rng):
+    """
+    Create burst-pause patterns (not steady rhythm).
+    
+    Humans work in attention bursts:
+    - BURST: 3-7 actions quickly (focused)
+    - PAUSE: 2-8 seconds (distracted/thinking)
+    - BURST: 2-5 actions quickly
+    - PAUSE: 4-12 seconds
+    
+    This modifies inter-action timing to create clustered patterns.
+    """
+    if len(events) < 4:
+        return events
+    
+    clustered = deepcopy(events)
+    cluster_mode = 'burst'  # Start in burst mode
+    actions_in_cluster = 0
+    cluster_target = rng.randint(3, 7)
+    
+    time_offset = 0
+    
+    for i, e in enumerate(clustered):
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click:
+            actions_in_cluster += 1
+            
+            # Apply current mode timing
+            if cluster_mode == 'burst':
+                # Fast actions (minimal added delay)
+                time_offset += rng.randint(0, 200)
+            else:  # pause mode
+                # Slow actions (significant delay)
+                time_offset += rng.randint(2000, 8000)
+            
+            # Check if we should switch modes
+            if actions_in_cluster >= cluster_target:
+                # Switch mode
+                if cluster_mode == 'burst':
+                    cluster_mode = 'pause'
+                    cluster_target = rng.randint(1, 3)  # Pause for 1-3 actions
+                else:
+                    cluster_mode = 'burst'
+                    cluster_target = rng.randint(3, 7)  # Burst for 3-7 actions
+                
+                actions_in_cluster = 0
+            
+            e['Time'] = int(e.get('Time', 0)) + time_offset
+    
+    return clustered
+
+def calculate_session_progress(file_index, total_files):
+    """
+    Calculate how far through the session we are (0.0 to 1.0).
+    Used for progressive fatigue.
+    """
+    if total_files <= 1:
+        return 0.5
+    return file_index / (total_files - 1)
+
+def get_structured_break_schedule(file_index, total_files, rng):
+    """
+    Determine if a structured break should happen based on session progress.
+    
+    Returns: (should_break, break_duration_ms, break_type)
+    
+    Break schedule:
+    - Every ~15-25 mins: Short break (1-3 mins) - 25% chance
+    - Every ~30-50 mins: Medium break (5-15 mins) - 15% chance
+    - Every ~60-90 mins: Long break (20-45 mins) - 8% chance
+    
+    These replace the random AFK moments at specific intervals.
+    """
+    progress = calculate_session_progress(file_index, total_files)
+    
+    # Check for long break first (highest priority)
+    if progress > 0.7 and rng.random() < 0.08:
+        duration_ms = rng.randint(20 * 60000, 45 * 60000)  # 20-45 minutes
+        return True, duration_ms, 'long'
+    
+    # Check for medium break
+    if progress > 0.4 and rng.random() < 0.15:
+        duration_ms = rng.randint(5 * 60000, 15 * 60000)  # 5-15 minutes
+        return True, duration_ms, 'medium'
+    
+    # Check for short break
+    if progress > 0.2 and rng.random() < 0.25:
+        duration_ms = rng.randint(60000, 180000)  # 1-3 minutes
+        return True, duration_ms, 'short'
+    
+    return False, 0, None
+
+# --------- Desktop-specific anti-detection helpers ---------
+
+def add_mouse_movement_curves(events, rng):
+    """
+    DESKTOP ONLY: Add curved mouse movements instead of straight lines.
+    
+    Humans don't move cursor in straight lines - we use slight curves.
+    Inserts intermediate MouseMove events to create Bezier-like paths.
+    
+    Only applies between click events where cursor position changes significantly.
+    """
+    curved = []
+    prev_x, prev_y = None, None
+    
     for i, e in enumerate(deepcopy(events)):
-        # Only add approach movement before CLICK events
         is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
                    'button' in e or 'Button' in e)
         
@@ -55,24 +331,292 @@ def add_mouse_jitter(events, rng):
                 target_x = int(e['X'])
                 target_y = int(e['Y'])
                 
-                # Add a tiny "wobble" movement 30-80ms before the click
-                # Cursor moves near the target (±2 pixels), then clicks exact spot
-                wobble_time = int(e.get('Time', 0)) - rng.randint(30, 80)
-                wobble_move = {
-                    'Time': wobble_time,
-                    'Type': 'MouseMove',
-                    'X': target_x + rng.choice([-2, -1, 0, 1, 2]),
-                    'Y': target_y + rng.choice([-2, -1, 0, 1, 2])
-                }
-                jittered.append(wobble_move)
+                # If there's a previous position and distance is significant (>50 pixels)
+                if prev_x is not None and prev_y is not None:
+                    distance = ((target_x - prev_x)**2 + (target_y - prev_y)**2)**0.5
+                    
+                    if distance > 50:
+                        # Add 2-4 intermediate curve points
+                        num_points = rng.randint(2, 4)
+                        base_time = int(e.get('Time', 0))
+                        
+                        for p in range(num_points):
+                            # Progress along path (0 to 1)
+                            t = (p + 1) / (num_points + 1)
+                            
+                            # Bezier curve with slight randomness
+                            curve_offset_x = rng.randint(-15, 15)
+                            curve_offset_y = rng.randint(-15, 15)
+                            
+                            # Interpolate position with curve
+                            inter_x = int(prev_x + (target_x - prev_x) * t + curve_offset_x * (1 - t) * t)
+                            inter_y = int(prev_y + (target_y - prev_y) * t + curve_offset_y * (1 - t) * t)
+                            
+                            # Time spread over movement duration
+                            move_time = base_time - int((num_points - p) * rng.randint(20, 60))
+                            
+                            curve_event = {
+                                'Time': move_time,
+                                'Type': 'MouseMove',
+                                'X': inter_x,
+                                'Y': inter_y
+                            }
+                            curved.append(curve_event)
                 
-                # Then add the ORIGINAL click at exact coordinates
-                jittered.append(e)
+                # Update previous position
+                prev_x, prev_y = target_x, target_y
             except:
-                jittered.append(e)
-        else:
-            jittered.append(e)
+                pass
+        
+        curved.append(e)
     
+    return curved
+
+def add_cursor_overshoots(events, rng, overshoot_chance=0.08):
+    """
+    DESKTOP ONLY: 8% chance cursor overshoots target slightly, then corrects.
+    
+    Humans often move mouse too far, then pull back slightly before clicking.
+    """
+    overshot = []
+    
+    for e in deepcopy(events):
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click and rng.random() < overshoot_chance:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    target_x = int(e['X'])
+                    target_y = int(e['Y'])
+                    
+                    # Overshoot by 3-8 pixels
+                    overshoot_dist = rng.randint(3, 8)
+                    overshoot_x = target_x + overshoot_dist * rng.choice([-1, 1])
+                    overshoot_y = target_y + overshoot_dist * rng.choice([-1, 1])
+                    
+                    # Overshoot happens 40-80ms before click
+                    overshoot_time = int(e.get('Time', 0)) - rng.randint(40, 80)
+                    
+                    overshoot_event = {
+                        'Time': overshoot_time,
+                        'Type': 'MouseMove',
+                        'X': overshoot_x,
+                        'Y': overshoot_y
+                    }
+                    
+                    # Correction move back to target (20-40ms before click)
+                    correction_time = int(e.get('Time', 0)) - rng.randint(20, 40)
+                    correction_event = {
+                        'Time': correction_time,
+                        'Type': 'MouseMove',
+                        'X': target_x,
+                        'Y': target_y
+                    }
+                    
+                    overshot.append(overshoot_event)
+                    overshot.append(correction_event)
+                except:
+                    pass
+        
+        overshot.append(e)
+    
+    return overshot
+
+def add_mouse_acceleration_variance(events, rng):
+    """
+    DESKTOP ONLY: Vary mouse movement speed (acceleration/deceleration).
+    
+    Humans don't move cursor at constant speed:
+    - Start slow (acceleration)
+    - Middle fast (full speed)
+    - End slow (deceleration for precision)
+    
+    Adjusts timing of MouseMove events to simulate this.
+    """
+    # This would require tracking sequences of MouseMove events
+    # For now, we'll apply a simpler variance to individual moves
+    varied = []
+    
+    for e in deepcopy(events):
+        if e.get('Type') == 'MouseMove':
+            # Vary movement timing by ±20%
+            timing_variance = rng.uniform(0.8, 1.2)
+            e['Time'] = int(e.get('Time', 0) * timing_variance)
+        
+        varied.append(e)
+    
+    return varied
+
+def add_desktop_misclicks(events, rng, misclick_chance=0.04):
+    """
+    DESKTOP ONLY: 4% chance for accidental right-click before left-click.
+    
+    Similar to mobile but:
+    - Lower chance (desktop is more precise)
+    - Smaller offset (3-10 pixels instead of 5-15)
+    - Faster correction (100-250ms instead of 150-350ms)
+    """
+    enhanced = []
+    
+    for e in deepcopy(events):
+        is_left_click = (e.get('Type') == 'Click' or 
+                        e.get('Type') == 'LeftClick' or
+                        e.get('button') == 'left' or 
+                        e.get('Button') == 'Left')
+        
+        if is_left_click and rng.random() < misclick_chance:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    target_x = int(e['X'])
+                    target_y = int(e['Y'])
+                    
+                    # Smaller misclick offset for desktop
+                    offset_distance = rng.randint(3, 10)
+                    misclick_x = target_x + int(offset_distance * rng.choice([-1, 1]))
+                    misclick_y = target_y + int(offset_distance * rng.choice([-1, 1]))
+                    
+                    # Right-click misclick
+                    misclick_time = int(e.get('Time', 0)) - rng.randint(100, 250)
+                    misclick = deepcopy(e)
+                    misclick['Time'] = misclick_time
+                    misclick['X'] = misclick_x
+                    misclick['Y'] = misclick_y
+                    misclick['Type'] = 'RightClick'
+                    if 'button' in misclick:
+                        misclick['button'] = 'right'
+                    if 'Button' in misclick:
+                        misclick['Button'] = 'Right'
+                    
+                    # Quick correction movement
+                    correction_time = misclick_time + rng.randint(40, 80)
+                    correction_move = {
+                        'Time': correction_time,
+                        'Type': 'MouseMove',
+                        'X': target_x + rng.randint(-1, 1),
+                        'Y': target_y + rng.randint(-1, 1)
+                    }
+                    
+                    enhanced.append(misclick)
+                    enhanced.append(correction_move)
+                except:
+                    pass
+        
+        enhanced.append(e)
+    
+    return enhanced
+
+# --------- Mobile-specific anti-detection helpers ---------
+
+def add_afk_moments(events, rng, afk_chance=0.12):
+    """
+    12% chance to add random AFK (away from keyboard) moments between actions.
+    Simulates human distractions: checking phone, talking to someone, thinking, etc.
+    
+    AFK duration: 3-25 seconds of complete inactivity.
+    Only happens between file boundaries, never mid-action.
+    
+    This is CRITICAL for mobile detection - humans don't play non-stop.
+    """
+    # AFK moments are added between files, not within events
+    # This function marks where they should go
+    return events  # Implementation happens at file merge level
+
+def get_dynamic_pause_range(rng, max_seconds, variance_factor=0.4):
+    """
+    Generate dynamic pause ranges instead of fixed 0-to-max.
+    
+    Humans don't use full range uniformly - we have preferred timing zones.
+    This creates a "comfort zone" that shifts per session.
+    
+    Args:
+        max_seconds: UI-configured maximum
+        variance_factor: How much the comfort zone shifts (0.4 = ±40%)
+    
+    Returns:
+        (min_ms, max_ms) tuple for this specific pause
+    """
+    # Create a shifting "comfort zone" within the max range
+    comfort_center = rng.uniform(0.3, 0.7) * max_seconds  # Center point
+    comfort_width = max_seconds * variance_factor  # Width of comfort zone
+    
+    min_s = max(0, comfort_center - comfort_width / 2)
+    max_s = min(max_seconds, comfort_center + comfort_width / 2)
+    
+    # Convert to milliseconds
+    return int(min_s * 1000), int(max_s * 1000)
+
+def add_click_speed_variance(events, rng):
+    """
+    Vary PAUSE lengths between actions (not action speed itself).
+    
+    CRITICAL: Does NOT speed up/slow down the macro itself.
+    Only affects PAUSES between files and within files.
+    
+    - Autopilot mode: Shorter pauses between actions (more focused)
+    - Normal mode: Regular pauses
+    - Distracted mode: Longer pauses between actions (less focused)
+    
+    This returns a multiplier for PAUSE durations only.
+    """
+    speed_mode = rng.choice(['autopilot', 'normal', 'normal', 'distracted'])
+    
+    if speed_mode == 'autopilot':
+        return rng.uniform(0.7, 0.9)  # 10-30% shorter pauses
+    elif speed_mode == 'distracted':
+        return rng.uniform(1.2, 1.5)  # 20-50% longer pauses
+    else:
+        return 1.0  # Normal pause length
+
+def add_task_completion_variance(total_actions, rng):
+    """
+    Humans don't complete tasks at perfectly consistent rates.
+    
+    CRITICAL: This ONLY affects PAUSES, not the macro timing itself.
+    
+    Returns a multiplier for PAUSE durations that simulates:
+    - Focused sessions: Shorter pauses between actions (0.8-0.9x)
+    - Average sessions: Normal pauses (1.0-1.1x)
+    - Tired sessions: Longer pauses between actions (1.2-1.4x)
+    
+    The macro itself plays at normal speed - only waiting time changes.
+    """
+    session_mood = rng.choices(
+        ['focused', 'average', 'tired'],
+        weights=[0.2, 0.6, 0.2]  # Most sessions are average
+    )[0]
+    
+    if session_mood == 'focused':
+        return rng.uniform(0.80, 0.90)  # Shorter pauses
+    elif session_mood == 'tired':
+        return rng.uniform(1.20, 1.40)  # Longer pauses
+    else:
+        return rng.uniform(1.00, 1.10)  # Normal pauses
+
+# --------- Original anti-detection helpers ---------
+def add_mouse_jitter(events, rng, is_desktop=False):
+    """
+    Add click position variance based on environment.
+    
+    MOBILE: ±2 pixels (finger taps are less precise)
+    DESKTOP: ±1 pixel (mouse clicks are more precise)
+    """
+    jittered = []
+    jitter_range = [-1, 0, 1] if is_desktop else [-2, -1, 0, 1, 2]
+    
+    for e in deepcopy(events):
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+            try:
+                offset_x = rng.choice(jitter_range)
+                offset_y = rng.choice(jitter_range)
+                e['X'] = int(e['X']) + offset_x
+                e['Y'] = int(e['Y']) + offset_y
+            except:
+                pass
+        jittered.append(e)
     return jittered
 
 def add_occasional_misclicks(events, rng, misclick_chance=0.035):
@@ -686,13 +1230,14 @@ def generate_version_for_folder(files, rng, version_num,
         
         # Apply anti-detection features (preserve special file behavior)
         if not is_special:
-            # ANTI-DETECTION CONTROLS - Set to False to disable any feature
-            ENABLE_TIME_FATIGUE = True  # TESTING THIS ONE
-            ENABLE_MOUSE_JITTER = True
-            ENABLE_MISCLICKS = False  # Known issue - stays disabled
-            ENABLE_MICRO_PAUSES = False
-            ENABLE_MOUSE_DRIFT = True
-            ENABLE_REACTION_VARIANCE = False
+            # ANTI-DETECTION CONTROLS - Optimized for MOBILE SCREEN SHARE
+            # Mouse movements are INVISIBLE on mobile, focus on timing & click variance
+            ENABLE_TIME_FATIGUE = True      # ✅ Timing changes ARE detectable
+            ENABLE_MOUSE_JITTER = True      # ✅ Click position variance IS detectable  
+            ENABLE_MISCLICKS = False        # ❌ Right-clicks might not work on mobile
+            ENABLE_MICRO_PAUSES = True      # ✅ Timing hesitations ARE detectable
+            ENABLE_MOUSE_DRIFT = False      # ❌ Mouse movements INVISIBLE on mobile
+            ENABLE_REACTION_VARIANCE = True # ✅ Reaction delays ARE detectable
             
             # PHASE 1: Time modifications (don't insert events, just modify timing)
             if ENABLE_TIME_FATIGUE:
@@ -842,9 +1387,7 @@ def main():
         print(f"ERROR parsing between max time: {e}", file=sys.stderr)
         return
     
-    # Minimum pause times are now 0
-    within_min_s = 0
-    between_min_s = 0
+    # NO hardcoded minimums - uses dynamic ranges
     
     all_written_paths = []
     
@@ -868,8 +1411,8 @@ def main():
             merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
                 files, rng, v,
                 args.exclude_count,
-                within_min_s, within_max_s, getattr(args, "within_max_pauses"),
-                between_min_s, between_max_s,
+                within_max_s, getattr(args, "within_max_pauses"),
+                between_max_s,
                 folder, input_root,
                 selector
             )
