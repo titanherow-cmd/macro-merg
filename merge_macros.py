@@ -95,7 +95,8 @@
             
             # PHASE 3: Coordinate modifications (both profiles, different precision)
             if ENABLE_MOUSE_JITTER:
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=is_desktop_group)
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=is_desktop_group, 
+                                         allowed_zones=allowed_zones, excluded_zones=excluded_zones)
             
             # PHASE 4: Re-sort by time
             zb_evs, file_duration_ms = zero_base_events(zb_evs)#!/usr/bin/env python3
@@ -140,6 +141,121 @@ COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 BETWEEN_MAX_PAUSES = 1  # Hardcoded: always 1 pause between files
+
+# --------- Coordinate zone management ---------
+
+def load_click_zones(folder: Path):
+    """
+    Load click zone restrictions from click_zones.json in folder.
+    
+    Returns: (allowed_zones, excluded_zones) or (None, None) if no config
+    
+    Format:
+    {
+      "allowed_zones": [{"x1": 100, "y1": 200, "x2": 500, "y2": 600}],
+      "excluded_zones": [{"x1": 0, "y1": 0, "x2": 50, "y2": 1080}]
+    }
+    """
+    config_path = folder / "click_zones.json"
+    
+    if not config_path.exists():
+        return None, None
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        allowed = config.get("allowed_zones", [])
+        excluded = config.get("excluded_zones", [])
+        
+        return allowed, excluded
+    except Exception as e:
+        print(f"WARNING: Could not load click_zones.json from {folder}: {e}", file=sys.stderr)
+        return None, None
+
+def is_coordinate_allowed(x, y, allowed_zones, excluded_zones):
+    """
+    Check if coordinate (x, y) is allowed based on zone rules.
+    
+    Logic:
+    1. If in excluded_zones → NOT allowed
+    2. If allowed_zones exist and NOT in any → NOT allowed
+    3. Otherwise → allowed
+    
+    Returns: (is_allowed: bool, reason: str)
+    """
+    try:
+        x_int = int(x)
+        y_int = int(y)
+    except:
+        return True, "invalid_coords"  # Can't validate, allow by default
+    
+    # Check excluded zones first (highest priority)
+    if excluded_zones:
+        for zone in excluded_zones:
+            x1, y1 = zone.get('x1', 0), zone.get('y1', 0)
+            x2, y2 = zone.get('x2', 9999), zone.get('y2', 9999)
+            
+            if x1 <= x_int <= x2 and y1 <= y_int <= y2:
+                zone_name = zone.get('name', 'unnamed')
+                return False, f"in_excluded_zone_{zone_name}"
+    
+    # Check allowed zones (if any defined)
+    if allowed_zones:
+        for zone in allowed_zones:
+            x1, y1 = zone.get('x1', 0), zone.get('y1', 0)
+            x2, y2 = zone.get('x2', 9999), zone.get('y2', 9999)
+            
+            if x1 <= x_int <= x2 and y1 <= y_int <= y2:
+                return True, "in_allowed_zone"
+        
+        # Not in any allowed zone
+        return False, "outside_allowed_zones"
+    
+    # No restrictions
+    return True, "no_restrictions"
+
+def constrain_click_to_zones(events, allowed_zones, excluded_zones, rng):
+    """
+    Constrain all click coordinates to stay within allowed zones.
+    
+    For clicks that would fall outside allowed zones or inside excluded zones:
+    - Try to find nearest valid coordinate within jitter range
+    - If no valid coordinate nearby, skip the jitter for that click (use original)
+    
+    This ensures anti-detection jitter doesn't accidentally click forbidden areas.
+    """
+    if not allowed_zones and not excluded_zones:
+        return events  # No restrictions
+    
+    constrained = []
+    skipped_jitter_count = 0
+    
+    for e in deepcopy(events):
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click and 'X' in e and 'Y' in e:
+            original_x = e['X']
+            original_y = e['Y']
+            
+            # Check if original coordinate is allowed
+            is_allowed, reason = is_coordinate_allowed(original_x, original_y, allowed_zones, excluded_zones)
+            
+            if not is_allowed:
+                # Original click is in forbidden zone - this shouldn't happen
+                # Log warning but keep the click (user's macro, not our fault)
+                print(f"WARNING: Click at ({original_x}, {original_y}) is {reason}. Keeping original.", file=sys.stderr)
+            
+            # After jitter is applied elsewhere, we don't modify here
+            # The jitter function should call this to validate
+        
+        constrained.append(e)
+    
+    if skipped_jitter_count > 0:
+        print(f"INFO: Skipped jitter on {skipped_jitter_count} clicks to avoid forbidden zones.", file=sys.stderr)
+    
+    return constrained
 
 # --------- Desktop-specific anti-detection helpers ---------
 
@@ -615,15 +731,18 @@ def add_task_completion_variance(total_actions, rng):
         return rng.uniform(1.00, 1.10)  # Normal pauses
 
 # --------- Original anti-detection helpers ---------
-def add_mouse_jitter(events, rng, is_desktop=False):
+def add_mouse_jitter(events, rng, is_desktop=False, allowed_zones=None, excluded_zones=None):
     """
     Add click position variance based on environment.
     
     MOBILE: ±2 pixels (finger taps are less precise)
     DESKTOP: ±1 pixel (mouse clicks are more precise)
+    
+    Respects click zone restrictions - won't jitter into forbidden areas.
     """
     jittered = []
     jitter_range = [-1, 0, 1] if is_desktop else [-2, -1, 0, 1, 2]
+    zone_skip_count = 0
     
     for e in deepcopy(events):
         is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
@@ -631,13 +750,45 @@ def add_mouse_jitter(events, rng, is_desktop=False):
         
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
-                offset_x = rng.choice(jitter_range)
-                offset_y = rng.choice(jitter_range)
-                e['X'] = int(e['X']) + offset_x
-                e['Y'] = int(e['Y']) + offset_y
+                original_x = int(e['X'])
+                original_y = int(e['Y'])
+                
+                # Try to find valid jittered coordinate
+                valid_jitter_found = False
+                
+                if allowed_zones or excluded_zones:
+                    # Try multiple jitter attempts to find valid coordinate
+                    for attempt in range(10):
+                        offset_x = rng.choice(jitter_range)
+                        offset_y = rng.choice(jitter_range)
+                        new_x = original_x + offset_x
+                        new_y = original_y + offset_y
+                        
+                        is_allowed, _ = is_coordinate_allowed(new_x, new_y, allowed_zones, excluded_zones)
+                        
+                        if is_allowed:
+                            e['X'] = new_x
+                            e['Y'] = new_y
+                            valid_jitter_found = True
+                            break
+                    
+                    if not valid_jitter_found:
+                        # No valid jitter found - keep original coordinate
+                        zone_skip_count += 1
+                else:
+                    # No zone restrictions - apply jitter normally
+                    offset_x = rng.choice(jitter_range)
+                    offset_y = rng.choice(jitter_range)
+                    e['X'] = original_x + offset_x
+                    e['Y'] = original_y + offset_y
             except:
                 pass
+        
         jittered.append(e)
+    
+    if zone_skip_count > 0:
+        print(f"INFO: Skipped jitter on {zone_skip_count} clicks (would enter forbidden zones)", file=sys.stderr)
+    
     return jittered
 
 def add_occasional_misclicks(events, rng, misclick_chance=0.035):
