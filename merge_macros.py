@@ -1,4 +1,10 @@
-evs = load_json_events(fpath_obj)
+# Determine environment based on folder path
+        # CRITICAL: Check for "deskt" first (more specific) before "mobile"
+        # Because deskt- osrs is INSIDE the MOBILE folder
+        folder_path_lower = str(folder_path).lower()
+        
+        is_desktop_group = "deskt" in folder_path_lower
+        is_mobile_group = "mobile" in folder_path_lower and not is_desktop_group        evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
         
         # Determine environment based on folder path
@@ -17,11 +23,13 @@ evs = load_json_events(fpath_obj)
                 ENABLE_MOUSE_JITTER = True      # ±2 pixels
                 ENABLE_MICRO_PAUSES = True
                 ENABLE_REACTION_VARIANCE = True
+                ENABLE_PROGRESSIVE_FATIGUE = True # Get tired over time
                 # Desktop features disabled for mobile
                 ENABLE_MOUSE_CURVES = False
                 ENABLE_CURSOR_OVERSHOOTS = False
                 ENABLE_MOUSE_ACCELERATION = False
                 ENABLE_DESKTOP_MISCLICKS = False
+                ENABLE_DESKTOP_MOUSE_DRIFT = False
             
             # === DESKTOP PROFILE === (Full client - mouse tracking enabled)
             elif is_desktop_group:
@@ -34,6 +42,8 @@ evs = load_json_events(fpath_obj)
                 ENABLE_CURSOR_OVERSHOOTS = True # Overshoot then correct
                 ENABLE_MOUSE_ACCELERATION = True # Speed variance
                 ENABLE_DESKTOP_MISCLICKS = True  # Accidental right-clicks
+                ENABLE_DESKTOP_MOUSE_DRIFT = True # Idle mouse fidgeting
+                ENABLE_PROGRESSIVE_FATIGUE = True # Get tired over time
             
             # === DEFAULT PROFILE === (Unknown folder - use safe mobile profile)
             else:
@@ -41,17 +51,25 @@ evs = load_json_events(fpath_obj)
                 ENABLE_MOUSE_JITTER = True
                 ENABLE_MICRO_PAUSES = True
                 ENABLE_REACTION_VARIANCE = True
+                ENABLE_PROGRESSIVE_FATIGUE = True
                 ENABLE_MOUSE_CURVES = False
                 ENABLE_CURSOR_OVERSHOOTS = False
                 ENABLE_MOUSE_ACCELERATION = False
                 ENABLE_DESKTOP_MISCLICKS = False
+                ENABLE_DESKTOP_MOUSE_DRIFT = False
                 is_desktop_group = False  # Treat as mobile
+            
+            # Calculate session progress for fatigue
+            session_progress = calculate_session_progress(idx, len(final_files))
             
             # PHASE 1: Time modifications (applies to both profiles)
             if ENABLE_TIME_FATIGUE:
                 zb_evs, extra_mistake_chance = add_time_of_day_fatigue(zb_evs, rng)
             else:
                 extra_mistake_chance = 0
+            
+            if ENABLE_PROGRESSIVE_FATIGUE:
+                zb_evs = add_progressive_fatigue(zb_evs, rng, session_progress)
             
             if ENABLE_MICRO_PAUSES:
                 zb_evs = add_micro_pauses(zb_evs, rng)
@@ -71,6 +89,9 @@ evs = load_json_events(fpath_obj)
             
             if ENABLE_DESKTOP_MISCLICKS:
                 zb_evs = add_desktop_misclicks(zb_evs, rng)
+            
+            if ENABLE_DESKTOP_MOUSE_DRIFT:
+                zb_evs = add_desktop_mouse_drift(zb_evs, rng)
             
             # PHASE 3: Coordinate modifications (both profiles, different precision)
             if ENABLE_MOUSE_JITTER:
@@ -1190,9 +1211,48 @@ def generate_version_for_folder(files, rng, version_num,
     if not included:
         included = files.copy()
     
+    # Check for "always first" and "always last" files in the folder
+    always_first_file = None
+    always_last_file = None
+    
+    for f in included:
+        fname_lower = Path(f).name.lower()
+        if fname_lower.startswith("always first"):
+            always_first_file = f
+        elif fname_lower.startswith("always last"):
+            always_last_file = f
+    
+    # Remove special ordering files from included list (will be added back in correct position)
+    included = [f for f in included if f not in [always_first_file, always_last_file]]
+    
+    # Decide which version gets which special file (never both in same version)
+    use_always_first_this_version = False
+    use_always_last_this_version = False
+    
+    if always_first_file and always_last_file:
+        # Both exist - randomly assign to different versions
+        # Use version number to determine which gets which
+        if version_num % 2 == 1:  # Odd versions get "always first"
+            use_always_first_this_version = True
+        else:  # Even versions get "always last"
+            use_always_last_this_version = True
+    elif always_first_file:
+        # Only "always first" exists - use it in some versions
+        use_always_first_this_version = (version_num % 3 == 1)  # Every 3rd version starting from 1
+    elif always_last_file:
+        # Only "always last" exists - use it in some versions
+        use_always_last_this_version = (version_num % 3 == 2)  # Every 3rd version starting from 2
+    
     # NO DUPLICATION - each file used only once
     # Use non-repeating shuffle to ensure orders don't repeat
     final_files = selector.shuffle_with_memory(included)
+    
+    # Add special ordering files in correct positions
+    if use_always_first_this_version and always_first_file:
+        final_files.insert(0, always_first_file)
+    
+    if use_always_last_this_version and always_last_file:
+        final_files.append(always_last_file)
     
     # Handle mobile special file
     special_path = None
@@ -1318,7 +1378,13 @@ def generate_version_for_folder(files, rng, version_num,
         parts.append(f"{part_from_filename(Path(f).name)}[{minutes}m]")
     
     letters = number_to_letters(version_num or 1)
-    base_name = f"{letters}_{total_minutes}m= " + " - ".join(parts)
+    
+    # Special naming for "always last" files
+    if use_always_last_this_version and always_last_file:
+        base_name = f"always last - {letters}_{total_minutes}m= " + " - ".join(parts)
+    else:
+        base_name = f"{letters}_{total_minutes}m= " + " - ".join(parts)
+    
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
     merged_fname = f"{safe_name}.json"
     
