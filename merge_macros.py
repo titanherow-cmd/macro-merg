@@ -404,10 +404,16 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
         is_desktop = "deskt" in folder_path_lower
         
         if not is_special:
-            zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
-            zb_evs = add_micro_pauses(zb_evs, rng)
-            zb_evs = add_reaction_variance(zb_evs, rng)
+            # MINIMAL anti-detection - only safe features that don't break clicks
+            # Commented out features that might cause issues:
+            # zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)  # Can shift timing
+            # zb_evs = add_micro_pauses(zb_evs, rng)  # Adds delays
+            # zb_evs = add_reaction_variance(zb_evs, rng)  # Adds delays
+            
+            # ONLY apply jitter - safest feature (only changes X/Y by 1-2 pixels)
             zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=is_desktop)
+            
+            # Re-sort to ensure proper order
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
         
         if is_special:
