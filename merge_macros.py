@@ -160,6 +160,95 @@ def number_to_letters(n: int) -> str:
         n //= 26
     return letters
 
+def add_desktop_mouse_paths(events, rng):
+    """
+    DESKTOP ONLY: Add natural mouse movement before clicks.
+    
+    Instead of cursor teleporting to click location, it moves there naturally:
+    1. Start from previous position
+    2. Move in a slightly curved path with 2-4 intermediate points
+    3. Arrive at target coordinate
+    4. THEN click happens
+    
+    This simulates human mouse movement (no teleporting).
+    """
+    enhanced = []
+    last_x, last_y = None, None
+    
+    for e in deepcopy(events):
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
+        
+        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+            try:
+                target_x = int(e['X'])
+                target_y = int(e['Y'])
+                click_time = int(e.get('Time', 0))
+                
+                # If we have a previous position, create movement path
+                if last_x is not None and last_y is not None:
+                    distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+                    
+                    # Only add path if movement is significant (>30 pixels)
+                    if distance > 30:
+                        # Number of intermediate points based on distance
+                        num_points = min(rng.randint(2, 4), int(distance / 50) + 1)
+                        
+                        # Time for mouse movement (based on distance)
+                        # Humans take roughly 200-400ms to move mouse across screen
+                        movement_duration = min(int(distance * rng.uniform(0.5, 1.0)), 400)
+                        
+                        for i in range(num_points):
+                            # Progress along path (0 to 1)
+                            t = (i + 1) / (num_points + 1)
+                            
+                            # Linear interpolation with slight curve
+                            curve_offset_x = rng.randint(-10, 10) * (1 - abs(2*t - 1))  # Curve in middle
+                            curve_offset_y = rng.randint(-10, 10) * (1 - abs(2*t - 1))
+                            
+                            inter_x = int(last_x + (target_x - last_x) * t + curve_offset_x)
+                            inter_y = int(last_y + (target_y - last_y) * t + curve_offset_y)
+                            
+                            # Time for this point (spread evenly across movement duration)
+                            point_time = click_time - movement_duration + int((movement_duration * t))
+                            
+                            # Create mouse move event
+                            move_event = {
+                                'Time': max(0, point_time),  # Don't go negative
+                                'Type': 'MouseMove',
+                                'X': inter_x,
+                                'Y': inter_y
+                            }
+                            enhanced.append(move_event)
+                        
+                        # Final move to exact target coordinate (just before click)
+                        final_move = {
+                            'Time': max(0, click_time - rng.randint(10, 30)),  # 10-30ms before click
+                            'Type': 'MouseMove',
+                            'X': target_x,
+                            'Y': target_y
+                        }
+                        enhanced.append(final_move)
+                
+                # Update last known position to this click location
+                last_x, last_y = target_x, target_y
+                
+            except Exception as ex:
+                print(f"Warning: Could not add mouse path: {ex}", file=sys.stderr)
+        
+        # Add the original event (click, mousemove, etc.)
+        enhanced.append(e)
+        
+        # Track mouse position from MouseMove events too
+        if e.get('Type') == 'MouseMove' and 'X' in e and 'Y' in e:
+            try:
+                last_x = int(e['X'])
+                last_y = int(e['Y'])
+            except:
+                pass
+    
+    return enhanced
+
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     paused = []
     for e in deepcopy(events):
@@ -180,21 +269,34 @@ def add_reaction_variance(events, rng):
     return varied
 
 def add_mouse_jitter(events, rng, is_desktop=False):
+    """
+    SAFE jitter - only ±1 pixel (both mobile and desktop)
+    
+    This ensures clicks stay VERY close to target.
+    Human finger/mouse variance is naturally ±1 pixel on small targets.
+    """
     jittered = []
-    jitter_range = [-1, 0, 1] if is_desktop else [-2, -1, 0, 1, 2]
+    # Use ±1 pixel for BOTH mobile and desktop (safer)
+    jitter_range = [-1, 0, 1]
+    
     for e in deepcopy(events):
         is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e)
+        
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x = int(e['X'])
                 original_y = int(e['Y'])
+                
+                # Apply minimal jitter (±1 pixel max)
                 offset_x = rng.choice(jitter_range)
                 offset_y = rng.choice(jitter_range)
+                
                 e['X'] = original_x + offset_x
                 e['Y'] = original_y + offset_y
             except:
                 pass
         jittered.append(e)
+    
     return jittered
 
 def add_time_of_day_fatigue(events, rng):
@@ -404,16 +506,30 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
         is_desktop = "deskt" in folder_path_lower
         
         if not is_special:
-            # MINIMAL anti-detection - only safe features that don't break clicks
-            # Commented out features that might cause issues:
-            # zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)  # Can shift timing
-            # zb_evs = add_micro_pauses(zb_evs, rng)  # Adds delays
-            # zb_evs = add_reaction_variance(zb_evs, rng)  # Adds delays
+            # Determine if desktop or mobile
+            folder_path_lower = str(folder_path).lower()
+            is_desktop = "deskt" in folder_path_lower
             
-            # ONLY apply jitter - safest feature (only changes X/Y by 1-2 pixels)
-            zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=is_desktop)
+            # === MOBILE PROFILE === (Screen share - no mouse visible)
+            if not is_desktop:
+                # Timing variations only (mouse movements not tracked)
+                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
+                zb_evs = add_micro_pauses(zb_evs, rng)
+                zb_evs = add_reaction_variance(zb_evs, rng)
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False)
             
-            # Re-sort to ensure proper order
+            # === DESKTOP PROFILE === (Full client - mouse tracked)
+            else:
+                # Add natural mouse movement paths BEFORE other modifications
+                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
+                
+                # Then apply timing variations
+                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
+                zb_evs = add_micro_pauses(zb_evs, rng)
+                zb_evs = add_reaction_variance(zb_evs, rng)
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True)
+            
+            # Re-sort to ensure proper order after all modifications
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
         
         if is_special:
