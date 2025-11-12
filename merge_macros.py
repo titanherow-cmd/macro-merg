@@ -495,7 +495,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
     per_file_inter_ms = {}
     
     # Load click zone restrictions for this folder
-    allowed_zones, excluded_zones = load_click_zones(folder_path)
+    target_zones, excluded_zones = load_click_zones(folder_path)
     
     for idx, fpath in enumerate(final_files):
         fpath_obj = Path(fpath)
@@ -520,7 +520,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, 
-                                         allowed_zones=allowed_zones, excluded_zones=excluded_zones)
+                                         target_zones=target_zones, excluded_zones=excluded_zones)
             
             # === DESKTOP PROFILE === (Full client - mouse tracked)
             else:
@@ -532,7 +532,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True,
-                                         allowed_zones=allowed_zones, excluded_zones=excluded_zones)
+                                         target_zones=target_zones, excluded_zones=excluded_zones)
             
             # Re-sort to ensure proper order after all modifications
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
