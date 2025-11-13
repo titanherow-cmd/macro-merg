@@ -344,6 +344,17 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         if version_num == 2:
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
+    
+    # If only one special file exists, use it in version 1
+    if not use_special_file and always_first_file and not always_last_file and not selector.is_special_used(str(always_first_file)):
+        if version_num == 1:
+            use_special_file = always_first_file
+            selector.mark_special_used(str(always_first_file))
+    
+    if not use_special_file and always_last_file and not always_first_file and not selector.is_special_used(str(always_last_file)):
+        if version_num == 1:
+            use_special_file = always_last_file
+            selector.mark_special_used(str(always_last_file))
 
     final_files = selector.shuffle_with_memory(included)
     if use_special_file == always_first_file:
