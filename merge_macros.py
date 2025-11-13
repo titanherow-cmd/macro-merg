@@ -168,34 +168,56 @@ def number_to_letters(n: int) -> str:
 
 def add_desktop_mouse_paths(events, rng):
     enhanced, last_x, last_y = [], None, None
+    
     for e in deepcopy(events):
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
-        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
+        is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
+        
+        # Add mouse movement ONLY for clicks (not drags), and ONLY if we have previous position
+        if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
+                
+                # Add movement path BEFORE the click
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
-                    if distance > 30:
-                        num_points = min(rng.randint(2, 4), int(distance / 50) + 1)
-                        movement_duration = min(int(distance * rng.uniform(0.5, 1.0)), 400)
-                        for i in range(num_points):
-                            t = (i + 1) / (num_points + 1)
-                            curve_offset_x = rng.randint(-10, 10) * (1 - abs(2*t - 1))
-                            curve_offset_y = rng.randint(-10, 10) * (1 - abs(2*t - 1))
-                            inter_x = int(last_x + (target_x - last_x) * t + curve_offset_x)
-                            inter_y = int(last_y + (target_y - last_y) * t + curve_offset_y)
-                            point_time = click_time - movement_duration + int(movement_duration * t)
+                    
+                    if distance > 30:  # Only add path for significant movements
+                        num_points = rng.randint(3, 5)
+                        movement_duration = int(100 + distance * 0.25)
+                        movement_duration = min(movement_duration, 400)
+                        
+                        for i in range(1, num_points + 1):
+                            t = i / (num_points + 1)
+                            # Ease-in-out curve
+                            t_smooth = t * t * (3 - 2 * t)
+                            
+                            inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
+                            inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                            point_time = click_time - movement_duration + int(movement_duration * t_smooth)
+                            
                             enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
-                        enhanced.append({'Time': max(0, click_time - rng.randint(10, 30)), 'Type': 'MouseMove', 'X': target_x, 'Y': target_y})
+                
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
+        
+        # Add the original event (click, drag, or move)
         enhanced.append(e)
+        
+        # Update position for mouse movement events
         if e.get('Type') == 'MouseMove' and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
             except:
                 pass
+        # Also track position from drag events
+        elif is_drag and 'X' in e and 'Y' in e:
+            try:
+                last_x, last_y = int(e['X']), int(e['Y'])
+            except:
+                pass
+    
     return enhanced
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
@@ -564,9 +586,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     letters = number_to_letters(version_num or 1)
     tag = ""
     if use_special_file == always_first_file and always_first_file is not None:
-        tag = "first"
+        tag = "FIRST"
     elif use_special_file == always_last_file and always_last_file is not None:
-        tag = "last"
+        tag = "LAST"
     
     tag_prefix = f"{tag} - " if tag else ""
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
