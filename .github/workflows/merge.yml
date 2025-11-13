@@ -27,22 +27,6 @@ on:
         description: 'Folders to exempt from pause/AFK rules (comma-separated folder paths, or leave empty for none)'
         required: false
         default: ''
-      disable_intra_pauses:
-        description: 'Disable intra-file pauses for exempted folders'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      disable_afk:
-        description: 'Disable AFK pauses for exempted folders'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 jobs:
   merge:
@@ -114,15 +98,13 @@ jobs:
           import json
           
           exempted_input = "${{ github.event.inputs.exempted_folders }}"
-          disable_intra = "${{ github.event.inputs.disable_intra_pauses }}"
-          disable_afk = "${{ github.event.inputs.disable_afk }}"
-          
           folders = [f.strip() for f in exempted_input.split(',') if f.strip()]
           
+          # Hard-coded: if exempted, disable both intra-pauses and AFK
           config = {
               "exempted_folders": folders,
-              "disable_intra_pauses": disable_intra.lower() == "true",
-              "disable_afk": disable_afk.lower() == "true"
+              "disable_intra_pauses": len(folders) > 0,
+              "disable_afk": len(folders) > 0
           }
           
           with open("exemption_config.json", "w") as f:
