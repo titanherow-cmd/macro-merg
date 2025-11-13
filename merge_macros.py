@@ -564,9 +564,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     letters = number_to_letters(version_num or 1)
     tag = ""
     if use_special_file == always_first_file and always_first_file is not None:
-        tag = "FIRST"
+        tag = "first"
     elif use_special_file == always_last_file and always_last_file is not None:
-        tag = "LAST"
+        tag = "last"
     
     tag_prefix = f"{tag} - " if tag else ""
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
