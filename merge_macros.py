@@ -55,7 +55,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true  # ensures git uses GITHUB_TOKEN for push
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -79,10 +79,8 @@ jobs:
           mkdir -p "$(dirname "$COUNTER_FILE")"
           echo "$NEXT" > "$COUNTER_FILE"
           
-          # Export for subsequent steps
           echo "BUNDLE_SEQ=$NEXT" >> "$GITHUB_ENV"
           echo "BUMPED counter: $PREV -> $NEXT"
-          echo "NEXT=$NEXT" > /tmp/merge_next.txt
 
       - name: Commit and push bumped counter back to repo
         if: always()
@@ -97,55 +95,34 @@ jobs:
             exit 0
           fi
           
-          # Configure git user and commit
           git config user.name "github-actions[bot]" || true
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
           git add "$COUNTER_FILE"
           
-          # Check if there is actually anything to commit
           if git diff --staged --quiet; then
             echo "No changes to counter to commit."
           else
             NEXT=$(cat "$COUNTER_FILE" || echo "")
             git commit -m "CI: bump merged bundle counter to ${NEXT}" || true
-            
-            # push to the current branch
             git push origin HEAD || (echo "git push failed" && false)
             echo "Pushed updated counter: ${NEXT}"
           fi
 
       - name: Create exemption config from UI input
         run: |
-          set -euo pipefail
-          
-          EXEMPTED="${{ github.event.inputs.exempted_folders }}"
-          DISABLE_INTRA="${{ github.event.inputs.disable_intra_pauses }}"
-          DISABLE_AFK="${{ github.event.inputs.disable_afk }}"
-          
-          echo "Exempted folders input: '${EXEMPTED}'"
-          echo "Disable intra-pauses: ${DISABLE_INTRA}"
-          echo "Disable AFK: ${DISABLE_AFK}"
-          
-          # Create Python dict from comma-separated list
-          if [ -z "${EXEMPTED}" ]; then
-            FOLDERS_JSON="[]"
-          else
-            # Convert comma-separated to JSON array
-            FOLDERS_JSON=$(python3 -c "
+          python3 << 'PYTHON_EOF'
           import json
-          folders = [f.strip() for f in '${EXEMPTED}'.split(',') if f.strip()]
-          print(json.dumps(folders))
-          ")
-          fi
           
-          # Create config file
-          python3 << EOF
-          import json
+          exempted_input = "${{ github.event.inputs.exempted_folders }}"
+          disable_intra = "${{ github.event.inputs.disable_intra_pauses }}"
+          disable_afk = "${{ github.event.inputs.disable_afk }}"
+          
+          folders = [f.strip() for f in exempted_input.split(',') if f.strip()]
           
           config = {
-              "exempted_folders": $FOLDERS_JSON,
-              "disable_intra_pauses": $DISABLE_INTRA,
-              "disable_afk": $DISABLE_AFK
+              "exempted_folders": folders,
+              "disable_intra_pauses": disable_intra.lower() == "true",
+              "disable_afk": disable_afk.lower() == "true"
           }
           
           with open("exemption_config.json", "w") as f:
@@ -153,7 +130,7 @@ jobs:
           
           print("Created exemption_config.json:")
           print(json.dumps(config, indent=2))
-          EOF
+          PYTHON_EOF
 
       - name: Show originals (debug)
         run: |
@@ -192,7 +169,7 @@ jobs:
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --exclude-count "${EXCLUDE_COUNT}"
 
-      - name: Zip merged outputs (ensure top-level folder name matches merged bundle)
+      - name: Zip merged outputs
         if: always()
         run: |
           set -euo pipefail
@@ -206,7 +183,6 @@ jobs:
           OUTPUT_BASE="merged_bundle_${BUNDLE}"
           echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
           
-          # cd into 'output' so the zip contains OUTPUT_BASE as top-level
           if [ -d "output/${OUTPUT_BASE}" ]; then
             (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
             ls -la "${OUTPUT_BASE}.zip" || true
