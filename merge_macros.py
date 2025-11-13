@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 merge_macros.py (Complete Working Version)
-Environment-specific anti-detection for OSRS botting
+Environment-specific anti-detection for OSRS botting with click zone awareness
 """
 
 from pathlib import Path
@@ -58,6 +58,42 @@ def write_counter_file(n: int):
     except Exception:
         pass
 
+def load_click_zones(folder_path: Path):
+    """
+    Load click zone configuration from click_zones.json
+    Returns (target_zones, excluded_zones)
+    """
+    target_zones = []
+    excluded_zones = []
+    
+    # Look for click_zones.json in folder or parent directories
+    search_paths = [
+        folder_path / "click_zones.json",
+        folder_path.parent / "click_zones.json",
+        Path.cwd() / "click_zones.json",
+        Path.cwd() / "originals" / "click_zones.json"
+    ]
+    
+    for zone_file in search_paths:
+        if zone_file.exists():
+            try:
+                data = json.loads(zone_file.read_text(encoding="utf-8"))
+                target_zones = data.get("target_zones", [])
+                excluded_zones = data.get("excluded_zones", [])
+                return target_zones, excluded_zones
+            except Exception as e:
+                print(f"WARNING: Failed to load click zones from {zone_file}: {e}", file=sys.stderr)
+    
+    return target_zones, excluded_zones
+
+def is_click_in_zone(x: int, y: int, zone: dict) -> bool:
+    """Check if click coordinate is within a zone"""
+    try:
+        return (zone['x1'] <= x <= zone['x2'] and 
+                zone['y1'] <= y <= zone['y2'])
+    except:
+        return False
+
 def find_all_dirs_with_json(input_root: Path):
     if not input_root.exists() or not input_root.is_dir():
         return []
@@ -79,7 +115,7 @@ def find_all_dirs_with_json(input_root: Path):
 
 def find_json_files_in_dir(dirpath: Path):
     try:
-        return sorted([p for p in dirpath.glob("*.json") if p.is_file()])
+        return sorted([p for p in dirpath.glob("*.json") if p.is_file() and not p.name.startswith("click_zones")])
     except Exception:
         return []
 
@@ -169,8 +205,6 @@ def add_desktop_mouse_paths(events, rng):
     2. Move in a slightly curved path with 2-4 intermediate points
     3. Arrive at target coordinate
     4. THEN click happens
-    
-    This simulates human mouse movement (no teleporting).
     """
     enhanced = []
     last_x, last_y = None, None
@@ -194,52 +228,42 @@ def add_desktop_mouse_paths(events, rng):
                         # Number of intermediate points based on distance
                         num_points = min(rng.randint(2, 4), int(distance / 50) + 1)
                         
-                        # Time for mouse movement (based on distance)
-                        # Humans take roughly 200-400ms to move mouse across screen
+                        # Time for mouse movement
                         movement_duration = min(int(distance * rng.uniform(0.5, 1.0)), 400)
                         
                         for i in range(num_points):
-                            # Progress along path (0 to 1)
                             t = (i + 1) / (num_points + 1)
-                            
-                            # Linear interpolation with slight curve
-                            curve_offset_x = rng.randint(-10, 10) * (1 - abs(2*t - 1))  # Curve in middle
+                            curve_offset_x = rng.randint(-10, 10) * (1 - abs(2*t - 1))
                             curve_offset_y = rng.randint(-10, 10) * (1 - abs(2*t - 1))
                             
                             inter_x = int(last_x + (target_x - last_x) * t + curve_offset_x)
                             inter_y = int(last_y + (target_y - last_y) * t + curve_offset_y)
                             
-                            # Time for this point (spread evenly across movement duration)
                             point_time = click_time - movement_duration + int((movement_duration * t))
                             
-                            # Create mouse move event
                             move_event = {
-                                'Time': max(0, point_time),  # Don't go negative
+                                'Time': max(0, point_time),
                                 'Type': 'MouseMove',
                                 'X': inter_x,
                                 'Y': inter_y
                             }
                             enhanced.append(move_event)
                         
-                        # Final move to exact target coordinate (just before click)
                         final_move = {
-                            'Time': max(0, click_time - rng.randint(10, 30)),  # 10-30ms before click
+                            'Time': max(0, click_time - rng.randint(10, 30)),
                             'Type': 'MouseMove',
                             'X': target_x,
                             'Y': target_y
                         }
                         enhanced.append(final_move)
                 
-                # Update last known position to this click location
                 last_x, last_y = target_x, target_y
                 
             except Exception as ex:
                 print(f"Warning: Could not add mouse path: {ex}", file=sys.stderr)
         
-        # Add the original event (click, mousemove, etc.)
         enhanced.append(e)
         
-        # Track mouse position from MouseMove events too
         if e.get('Type') == 'MouseMove' and 'X' in e and 'Y' in e:
             try:
                 last_x = int(e['X'])
@@ -268,33 +292,52 @@ def add_reaction_variance(events, rng):
         varied.append(e)
     return varied
 
-def add_mouse_jitter(events, rng, is_desktop=False):
+def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
     """
-    SAFE jitter - only ±1 pixel (both mobile and desktop)
+    Smart jitter with zone awareness
+    - Keeps clicks VERY close to target (±1 pixel)
+    - Respects target zones (green = preferred areas)
+    - Avoids excluded zones (red = forbidden areas)
+    """
+    if target_zones is None:
+        target_zones = []
+    if excluded_zones is None:
+        excluded_zones = []
     
-    This ensures clicks stay VERY close to target.
-    Human finger/mouse variance is naturally ±1 pixel on small targets.
-    """
     jittered = []
-    # Use ±1 pixel for BOTH mobile and desktop (safer)
     jitter_range = [-1, 0, 1]
     
     for e in deepcopy(events):
-        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e)
+        is_click = (e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 
+                   'button' in e or 'Button' in e)
         
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x = int(e['X'])
                 original_y = int(e['Y'])
                 
-                # Apply minimal jitter (±1 pixel max)
-                offset_x = rng.choice(jitter_range)
-                offset_y = rng.choice(jitter_range)
+                # Check if click is in excluded zone - if so, skip jitter
+                in_excluded = any(is_click_in_zone(original_x, original_y, zone) 
+                                 for zone in excluded_zones)
                 
-                e['X'] = original_x + offset_x
-                e['Y'] = original_y + offset_y
+                if in_excluded:
+                    # Don't jitter clicks in forbidden zones - keep exact
+                    pass
+                else:
+                    # Check if in target zone - if so, apply careful jitter
+                    in_target = any(is_click_in_zone(original_x, original_y, zone) 
+                                   for zone in target_zones)
+                    
+                    if in_target or not target_zones:
+                        # Apply minimal jitter (±1 pixel max)
+                        offset_x = rng.choice(jitter_range)
+                        offset_y = rng.choice(jitter_range)
+                        
+                        e['X'] = original_x + offset_x
+                        e['Y'] = original_y + offset_y
             except:
                 pass
+        
         jittered.append(e)
     
     return jittered
@@ -441,7 +484,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
     if not included:
         included = files.copy()
     
-    # Check for "always first" and "always last" files
     always_first_file = None
     always_last_file = None
     for f in included:
@@ -472,7 +514,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
     if use_always_last_this_version and always_last_file:
         final_files.append(always_last_file)
     
-    # Handle mobile special file
     special_path = None
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group:
@@ -488,14 +529,14 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
                 final_files.insert(0, str(special_path))
             final_files.append(str(special_path))
     
+    # Load click zones for this folder
+    target_zones, excluded_zones = load_click_zones(folder_path)
+    
     merged = []
     pause_info = {"inter_file_pauses": [], "intra_file_pauses": []}
     time_cursor = 0
     per_file_event_ms = {}
     per_file_inter_ms = {}
-    
-    # Load click zone restrictions for this folder
-    target_zones, excluded_zones = load_click_zones(folder_path)
     
     for idx, fpath in enumerate(final_files):
         fpath_obj = Path(fpath)
@@ -504,37 +545,29 @@ def generate_version_for_folder(files, rng, version_num, exclude_count,
         evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
         
-        # Determine if desktop or mobile
-        folder_path_lower = str(folder_path).lower()
-        is_desktop = "deskt" in folder_path_lower
-        
         if not is_special:
-            # Determine if desktop or mobile
             folder_path_lower = str(folder_path).lower()
             is_desktop = "deskt" in folder_path_lower
             
-            # === MOBILE PROFILE === (Screen share - no mouse visible)
+            # MOBILE PROFILE
             if not is_desktop:
-                # Timing variations only (mouse movements not tracked)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, 
-                                         target_zones=target_zones, excluded_zones=excluded_zones)
+                                         target_zones=target_zones, 
+                                         excluded_zones=excluded_zones)
             
-            # === DESKTOP PROFILE === (Full client - mouse tracked)
+            # DESKTOP PROFILE
             else:
-                # Add natural mouse movement paths BEFORE other modifications
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                
-                # Then apply timing variations
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True,
-                                         target_zones=target_zones, excluded_zones=excluded_zones)
+                                         target_zones=target_zones, 
+                                         excluded_zones=excluded_zones)
             
-            # Re-sort to ensure proper order after all modifications
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
         
         if is_special:
@@ -651,38 +684,4 @@ def main():
             rel_folder = Path(folder.name)
         
         out_folder_for_group = output_root / rel_folder
-        out_folder_for_group.mkdir(parents=True, exist_ok=True)
-        
-        selector = NonRepeatingSelector(rng)
-        
-        for v in range(1, max(1, args.versions) + 1):
-            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
-                files, rng, v, args.exclude_count,
-                within_max_s, getattr(args, "within_max_pauses"), between_max_s,
-                folder, input_root, selector
-            )
-            
-            if not merged_fname:
-                continue
-            
-            out_path = out_folder_for_group / merged_fname
-            try:
-                out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
-                print(f"WROTE: {out_path}")
-                all_written_paths.append(out_path)
-            except Exception as e:
-                print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
-    
-    zip_path = output_parent / f"{output_base_name}.zip"
-    with ZipFile(zip_path, "w") as zf:
-        for fpath in all_written_paths:
-            try:
-                arcname = str(fpath.relative_to(output_parent))
-            except Exception:
-                arcname = f"{output_base_name}/{fpath.name}"
-            zf.write(fpath, arcname=arcname)
-    
-    print("DONE. Created zip:", zip_path)
-
-if __name__ == "__main__":
-    main()
+        out_folder_for_group.mkdir(parents=True, exist_ok=True
