@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+final_files = [f for f in final_files if f is not None]#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with Zone Awareness (FIXED)"""
 
 from pathlib import Path
@@ -356,7 +356,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group and special_path is not None:
-        final_files = [f for f in final_files if Path(f).resolve() != special_path.resolve()]
+        final_files = [f for f in final_files if f is not None and Path(f).resolve() != special_path.resolve()]
         if final_files:
             mid_idx = len(final_files) // 2
             final_files.insert(min(mid_idx + 1, len(final_files)), str(special_path))
@@ -367,6 +367,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
     per_file_event_ms, per_file_inter_ms = {}, {}
     for idx, fpath in enumerate(final_files):
+        if fpath is None:
+            continue
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
         evs, file_duration_ms = load_json_events(fpath_obj), 0
@@ -401,6 +403,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     total_ms, total_minutes = time_cursor if merged else 0, compute_minutes_from_ms(time_cursor if merged else 0)
     parts = []
     for f in final_files:
+        if f is None:
+            continue
         fname = Path(f).name.lower()
         if fname.startswith("always first"):
             part_name = "first"
