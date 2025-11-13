@@ -277,18 +277,19 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
         now = datetime.now()
         hour, is_weekend = now.hour, now.weekday() >= 5
         
-        if 23 <= hour or hour < 5:
-            fatigue_min, fatigue_max = 1.05, 1.10
-        elif 6 <= hour < 12:
-            fatigue_min, fatigue_max = 0.98, 1.02
-        elif 18 <= hour < 23:
-            fatigue_min, fatigue_max = 1.0, 1.05
-        else:
-            fatigue_min, fatigue_max = 1.02, 1.08
+        # MUCH MORE SUBTLE fatigue multipliers
+        if 23 <= hour or hour < 5:  # Late night - very slight slowdown
+            fatigue_min, fatigue_max = 1.00, 1.02
+        elif 6 <= hour < 12:  # Morning - slightly faster
+            fatigue_min, fatigue_max = 0.99, 1.00
+        elif 18 <= hour < 23:  # Evening - minimal slowdown
+            fatigue_min, fatigue_max = 1.00, 1.01
+        else:  # Afternoon - barely noticeable
+            fatigue_min, fatigue_max = 1.00, 1.01
         
         if is_weekend:
-            fatigue_min += 0.02
-            fatigue_max += 0.03
+            fatigue_min += 0.005  # Tiny weekend adjustment
+            fatigue_max += 0.01
         
         fatigue_multiplier = rng.uniform(fatigue_min, fatigue_max)
         
