@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness & Heatmap"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math
