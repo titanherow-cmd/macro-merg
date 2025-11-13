@@ -1,4 +1,18 @@
-#!/usr/bin/env python3
+use_special_file = None
+    if always_first_file and always_last_file:
+        # Only use one, alternating by version
+        if version_num % 2 == 1:
+            use_special_file = always_first_file
+        else:
+            use_special_file = always_last_file
+    elif always_first_file:
+        # Use only in some versions (1 out of 3)
+        if version_num == 1:
+            use_special_file = always_first_file
+    elif always_last_file:
+        # Use only in some versions (1 out of 3)
+        if version_num == 2:
+            use_special_file = always_last_file#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
 
 from pathlib import Path
@@ -311,13 +325,19 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     included, excluded = selector.select_files(regular_files, exclude_count)
     if not included:
         included = regular_files.copy()
+    
+    # Decide which special file to use (only once total across all versions)
     use_special_file = None
-    if always_first_file and always_last_file:
-        use_special_file = always_first_file if version_num % 2 == 1 else always_last_file
-    elif always_first_file:
-        use_special_file = always_first_file if version_num % 3 == 1 else None
-    elif always_last_file:
-        use_special_file = always_last_file if version_num % 3 == 2 else None
+    if always_first_file and not selector.is_special_used(str(always_first_file)):
+        if rng.random() < 0.5 and (not always_last_file or selector.is_special_used(str(always_last_file))):
+            use_special_file = always_first_file
+            selector.mark_special_used(str(always_first_file))
+    
+    if not use_special_file and always_last_file and not selector.is_special_used(str(always_last_file)):
+        if not always_first_file or selector.is_special_used(str(always_first_file)):
+            use_special_file = always_last_file
+            selector.mark_special_used(str(always_last_file))
+    
     final_files = selector.shuffle_with_memory(included)
     if use_special_file == always_first_file:
         final_files.insert(0, always_first_file)
