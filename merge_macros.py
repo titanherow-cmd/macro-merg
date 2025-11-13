@@ -324,18 +324,34 @@ def locate_special_file(folder: Path, input_root: Path):
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector):
     if not files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    included, excluded = selector.select_files(files, exclude_count)
+    
+    # Separate special files from regular files
+    always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
+    always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
+    regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
+    
+    if not regular_files:
+        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
+    
+    included, excluded = selector.select_files(regular_files, exclude_count)
     if not included:
-        included = files.copy()
-    always_first_file = next((f for f in included if Path(f).name.lower().startswith("always first")), None)
-    always_last_file = next((f for f in included if Path(f).name.lower().startswith("always last")), None)
-    included = [f for f in included if f not in [always_first_file, always_last_file]]
-    use_always_first = (version_num % 2 == 1) if always_first_file and always_last_file else (version_num % 3 == 1) if always_first_file else False
-    use_always_last = (version_num % 2 == 0) if always_first_file and always_last_file else (version_num % 3 == 2) if always_last_file else False
+        included = regular_files.copy()
+    
+    # Decide which special file to use (only one per version)
+    use_special_file = None
+    if always_first_file and always_last_file:
+        use_special_file = always_first_file if version_num % 2 == 1 else always_last_file
+    elif always_first_file:
+        use_special_file = always_first_file if version_num % 3 == 1 else None
+    elif always_last_file:
+        use_special_file = always_last_file if version_num % 3 == 2 else None
+    
     final_files = selector.shuffle_with_memory(included)
-    if use_always_first and always_first_file:
+    
+    # Add special file at appropriate position
+    if use_special_file == always_first_file:
         final_files.insert(0, always_first_file)
-    if use_always_last and always_last_file:
+    elif use_special_file == always_last_file:
         final_files.append(always_last_file)
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
@@ -382,9 +398,22 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
     total_ms, total_minutes = time_cursor if merged else 0, compute_minutes_from_ms(time_cursor if merged else 0)
-    parts = [f"{part_from_filename(Path(f).name)}[{compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))}m]" for f in final_files]
+    parts = []
+    for f in final_files:
+        fname = Path(f).name.lower()
+        if fname.startswith("always first"):
+            part_name = "first"
+        elif fname.startswith("always last"):
+            part_name = "last"
+        else:
+            part_name = part_from_filename(f)
+        minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
+        parts.append(f"{part_name}[{minutes}m]")
+    
     letters = number_to_letters(version_num or 1)
-    base_name = f"{'always last - ' if use_always_last else ''}{letters}_{total_minutes}m= {' - '.join(parts)}"
+    tag = "first" if use_special_file == always_first_file else "last" if use_special_file == always_last_file else ""
+    tag_prefix = f"{tag} - " if tag else ""
+    base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
