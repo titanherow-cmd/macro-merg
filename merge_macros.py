@@ -47,7 +47,6 @@ def write_counter_file(n: int):
         pass
 
 def load_exemption_config():
-    """Load folder exemption config from workflow"""
     config_file = Path.cwd() / "exemption_config.json"
     if config_file.exists():
         try:
@@ -62,7 +61,6 @@ def load_exemption_config():
     return {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
 
 def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
-    """Check if folder matches any exemption pattern"""
     folder_str = str(folder_path).lower().replace("\\", "/")
     for exempted in exempted_folders:
         if exempted.lower().replace("\\", "/") in folder_str:
@@ -290,6 +288,97 @@ def add_afk_pause(events, rng):
 def apply_shifts(events, shift_ms):
     return [{**deepcopy(e), 'Time': int(e.get('Time', 0)) + int(shift_ms)} for e in events]
 
+def generate_heatmap(folder_path: Path):
+    try:
+        from PIL import Image, ImageDraw
+        import numpy as np
+    except ImportError:
+        print(f"WARNING: PIL or numpy not installed. Skipping heatmap.", file=sys.stderr)
+        return
+    
+    json_files = find_json_files_in_dir(folder_path)
+    if not json_files:
+        return
+    
+    clicks = []
+    for json_file in json_files:
+        try:
+            events = load_json_events(json_file)
+            for event in events:
+                is_click = event.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in event or 'Button' in event
+                if is_click and 'X' in event and 'Y' in event and event['X'] is not None and event['Y'] is not None:
+                    try:
+                        x, y = int(event['X']), int(event['Y'])
+                        if 0 <= x <= 2000 and 0 <= y <= 2000:
+                            clicks.append((x, y))
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Error processing {json_file}: {e}", file=sys.stderr)
+    
+    if not clicks:
+        return
+    
+    max_x = max([c[0] for c in clicks]) + 50 if clicks else 800
+    max_y = max([c[1] for c in clicks]) + 50 if clicks else 600
+    max_x = max(max_x, 800)
+    max_y = max(max_y, 600)
+    
+    heatmap = np.zeros((max_y, max_x), dtype=np.float32)
+    
+    for x, y in clicks:
+        if 0 <= x < max_x and 0 <= y < max_y:
+            y_min, y_max = max(0, y - 30), min(max_y, y + 30)
+            x_min, x_max = max(0, x - 30), min(max_x, x + 30)
+            for yy in range(y_min, y_max):
+                for xx in range(x_min, x_max):
+                    dist = ((xx - x)**2 + (yy - y)**2)**0.5
+                    heatmap[yy, xx] += np.exp(-(dist**2) / 200)
+    
+    if heatmap.max() > 0:
+        heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
+    else:
+        return
+    
+    img = Image.new('RGB', (max_x, max_y), color=(20, 20, 30))
+    pixels = img.load()
+    
+    for y in range(max_y):
+        for x in range(max_x):
+            val = heatmap[y, x]
+            if val > 0:
+                if val < 85:
+                    r, g, b = 0, int(val * 3), 255
+                elif val < 170:
+                    r, g, b = 0, 255, int(255 - (val - 85) * 3)
+                else:
+                    r, g, b = int((val - 170) * 3), 255, 0
+                pixels[x, y] = (r, g, b)
+            else:
+                pixels[x, y] = (20, 20, 30)
+    
+    legend_height = 60
+    legend_img = Image.new('RGB', (max_x, legend_height), color=(40, 40, 50))
+    draw = ImageDraw.Draw(legend_img)
+    
+    legend_items = [(255, 0, 0, "Red=Hotspot"), (255, 255, 0, "Yellow=Medium"), (0, 255, 0, "Green=Low"), (0, 255, 255, "Cyan=Minimal")]
+    
+    for i, (r, g, b, label) in enumerate(legend_items):
+        x_pos = 10 + i * (max_x // 4)
+        draw.rectangle([x_pos, 10, x_pos + 15, 25], fill=(r, g, b))
+        draw.text((x_pos + 20, 10), label, fill=(255, 255, 255))
+    
+    combined = Image.new('RGB', (max_x, max_y + legend_height), color=(40, 40, 50))
+    combined.paste(img, (0, 0))
+    combined.paste(legend_img, (0, max_y))
+    
+    try:
+        heatmap_path = folder_path / "heatmap.png"
+        combined.save(heatmap_path)
+        print(f"✓ Generated heatmap: {heatmap_path}")
+    except Exception as e:
+        print(f"ERROR saving heatmap: {e}", file=sys.stderr)
+
 class NonRepeatingSelector:
     def __init__(self, rng):
         self.rng = rng
@@ -368,12 +457,10 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         elif version_num == 2 and not selector.is_special_used(str(always_last_file)):
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
-    
     elif always_first_exists and not always_last_exists:
         if version_num == 1 and not selector.is_special_used(str(always_first_file)):
             use_special_file = always_first_file
             selector.mark_special_used(str(always_first_file))
-    
     elif always_last_exists and not always_first_exists:
         if version_num == 1 and not selector.is_special_used(str(always_last_file)):
             use_special_file = always_last_file
@@ -477,9 +564,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     letters = number_to_letters(version_num or 1)
     tag = ""
     if use_special_file == always_first_file and always_first_file is not None:
-        tag = "first"
+        tag = "FIRST"
     elif use_special_file == always_last_file and always_last_file is not None:
-        tag = "last"
+        tag = "LAST"
     
     tag_prefix = f"{tag} - " if tag else ""
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
@@ -539,6 +626,9 @@ def main():
                 all_written_paths.append(out_path)
             except Exception as e:
                 print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
+        
+        generate_heatmap(folder)
+    
     zip_path = output_parent / f"{output_base_name}.zip"
     with ZipFile(zip_path, "w") as zf:
         for fpath in all_written_paths:
