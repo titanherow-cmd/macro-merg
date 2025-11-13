@@ -46,6 +46,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Python dependencies
+        run: pip install Pillow numpy
+
       - name: Bump run counter (expose BUNDLE_SEQ)
         id: bump
         run: |
@@ -100,7 +103,6 @@ jobs:
           exempted_input = "${{ github.event.inputs.exempted_folders }}"
           folders = [f.strip() for f in exempted_input.split(',') if f.strip()]
           
-          # Hard-coded: if exempted, disable both intra-pauses and AFK
           config = {
               "exempted_folders": folders,
               "disable_intra_pauses": len(folders) > 0,
