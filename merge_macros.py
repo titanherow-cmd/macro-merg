@@ -16,7 +16,7 @@ if not is_special:
         intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng)[0] if zb_evs else zb_evs)
         
         # Apply AFK pause to 50% of files
-        if rng.random() < 0.5:
+        if not is_special and rng.random() < 0.5:
             intra_evs = add_afk_pause(intra_evs, rng)def add_afk_pause(events, rng):
     """
     Add random AFK pause to simulate player going idle.
