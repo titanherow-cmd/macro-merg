@@ -260,7 +260,8 @@ class NonRepeatingSelector:
     def select_files(self, files, exclude_count):
         if not files:
             return [], []
-        n, file_indices = len(files), list(range(n))
+        n = len(files)
+        file_indices = list(range(n))
         max_exclude = min(exclude_count, max(0, n - 1))
         all_possible = [frozenset(combo) for exclude_k in range(0, max_exclude + 1) for combo in combinations(file_indices, exclude_k)]
         available = [c for c in all_possible if c not in self.used_combos]
