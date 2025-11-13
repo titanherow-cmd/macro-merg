@@ -1,4 +1,79 @@
-#!/usr/bin/env python3
+if not is_special:
+            is_desktop = "deskt" in str(folder_path).lower()
+            if not is_desktop:
+                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
+                zb_evs = add_micro_pauses(zb_evs, rng)
+                zb_evs = add_reaction_variance(zb_evs, rng)
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
+            else:
+                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
+                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
+                zb_evs = add_micro_pauses(zb_evs, rng)
+                zb_evs = add_reaction_variance(zb_evs, rng)
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
+            zb_evs, file_duration_ms = zero_base_events(zb_evs)
+        
+        intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng)[0] if zb_evs else zb_evs)
+        
+        # Apply AFK pause to 50% of files
+        if rng.random() < 0.5:
+            intra_evs = add_afk_pause(intra_evs, rng)def add_afk_pause(events, rng):
+    """
+    Add random AFK pause to simulate player going idle.
+    70% chance: 5 min (300s) or less
+    30% chance: 5-20 min (300s-1200s)
+    """
+    if not events:
+        return deepcopy(events)
+    
+    evs = deepcopy(events)
+    
+    # Decide AFK duration based on probability
+    if rng.random() < 0.7:
+        # 70%: 5 minutes or less (0-300 seconds)
+        afk_seconds = rng.randint(60, 300)
+    else:
+        # 30%: 5-20 minutes (300-1200 seconds)
+        afk_seconds = rng.randint(300, 1200)
+    
+    afk_ms = afk_seconds * 1000
+    
+    # Insert AFK pause at random point (but not at start, somewhere mid-way)
+    if len(evs) > 1:
+        insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4)
+    else:
+        insert_idx = 0
+    
+    # Shift all events after insertion point by AFK duration
+    for j in range(insert_idx, len(evs)):
+        evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
+    
+    return evsdef insert_intra_pauses(events, rng):
+    """Randomly insert human-like pauses within a file"""
+    if not events:
+        return deepcopy(events), []
+    evs = deepcopy(events)
+    n = len(evs)
+    if n < 2:
+        return evs, []
+    
+    # Randomly decide how many pauses (0-3 human-like breaks)
+    num_pauses = rng.randint(0, 3)
+    if num_pauses == 0:
+        return evs, []
+    
+    # Randomly pick positions for pauses
+    chosen = rng.sample(range(n-1), min(num_pauses, n-1))
+    pauses_info = []
+    
+    for gap_idx in sorted(chosen):
+        # Random pause duration: 2-15 seconds (human thinks/reads)
+        pause_ms = rng.randint(2000, 15000)
+        for j in range(gap_idx+1, n):
+            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+        pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
+    
+    return evs, pauses_info#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with Zone Awareness (FIXED)"""
 
 from pathlib import Path
@@ -389,13 +464,14 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
         
-        intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng, within_max_pauses, 0, int(within_max_s))[0] if within_max_pauses > 0 else zb_evs)
+        intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng)[0] if zb_evs else zb_evs)
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         if idx < len(final_files) - 1:
-            pause_ms = 1000 if is_special else rng.randint(0, int(between_max_s * 1000))
+            # Random pause between files: 1-12 seconds (human session breaks)
+            pause_ms = rng.randint(1000, 12000)
             time_cursor += pause_ms
             per_file_inter_ms[str(fpath_obj)] = pause_ms
             pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
