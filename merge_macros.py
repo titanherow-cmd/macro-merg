@@ -1,80 +1,5 @@
-if not is_special:
-            is_desktop = "deskt" in str(folder_path).lower()
-            if not is_desktop:
-                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
-                zb_evs = add_micro_pauses(zb_evs, rng)
-                zb_evs = add_reaction_variance(zb_evs, rng)
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
-            else:
-                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng)
-                zb_evs = add_micro_pauses(zb_evs, rng)
-                zb_evs = add_reaction_variance(zb_evs, rng)
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
-            zb_evs, file_duration_ms = zero_base_events(zb_evs)
-        
-        intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng)[0] if zb_evs else zb_evs)
-        
-        # Apply AFK pause to 50% of files
-        if not is_special and rng.random() < 0.5:
-            intra_evs = add_afk_pause(intra_evs, rng)def add_afk_pause(events, rng):
-    """
-    Add random AFK pause to simulate player going idle.
-    70% chance: 5 min (300s) or less
-    30% chance: 5-20 min (300s-1200s)
-    """
-    if not events:
-        return deepcopy(events)
-    
-    evs = deepcopy(events)
-    
-    # Decide AFK duration based on probability
-    if rng.random() < 0.7:
-        # 70%: 5 minutes or less (0-300 seconds)
-        afk_seconds = rng.randint(60, 300)
-    else:
-        # 30%: 5-20 minutes (300-1200 seconds)
-        afk_seconds = rng.randint(300, 1200)
-    
-    afk_ms = afk_seconds * 1000
-    
-    # Insert AFK pause at random point (but not at start, somewhere mid-way)
-    if len(evs) > 1:
-        insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4)
-    else:
-        insert_idx = 0
-    
-    # Shift all events after insertion point by AFK duration
-    for j in range(insert_idx, len(evs)):
-        evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
-    
-    return evsdef insert_intra_pauses(events, rng):
-    """Randomly insert human-like pauses within a file"""
-    if not events:
-        return deepcopy(events), []
-    evs = deepcopy(events)
-    n = len(evs)
-    if n < 2:
-        return evs, []
-    
-    # Randomly decide how many pauses (0-3 human-like breaks)
-    num_pauses = rng.randint(0, 3)
-    if num_pauses == 0:
-        return evs, []
-    
-    # Randomly pick positions for pauses
-    chosen = rng.sample(range(n-1), min(num_pauses, n-1))
-    pauses_info = []
-    
-    for gap_idx in sorted(chosen):
-        # Random pause duration: 2-15 seconds (human thinks/reads)
-        pause_ms = rng.randint(2000, 15000)
-        for j in range(gap_idx+1, n):
-            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
-    
-    return evs, pauses_info#!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with Zone Awareness (FIXED)"""
+#!/usr/bin/env python3
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math
@@ -122,11 +47,7 @@ def write_counter_file(n: int):
         pass
 
 def load_click_zones(folder_path: Path):
-    search_paths = [
-        folder_path / "click_zones.json",
-        folder_path.parent / "click_zones.json",
-        Path.cwd() / "click_zones.json"
-    ]
+    search_paths = [folder_path / "click_zones.json", folder_path.parent / "click_zones.json", Path.cwd() / "click_zones.json"]
     for zone_file in search_paths:
         if zone_file.exists():
             try:
@@ -180,16 +101,7 @@ def load_json_events(path: Path):
 def zero_base_events(events):
     if not events:
         return [], 0
-    events_with_time = []
-    for e in events:
-        try:
-            t = int(e.get("Time", 0))
-        except:
-            try:
-                t = int(float(e.get("Time", 0)))
-            except:
-                t = 0
-        events_with_time.append((e, t))
+    events_with_time = [(e, int(e.get("Time", 0)) if isinstance(e.get("Time", 0), int) else int(float(e.get("Time", 0)))) for e in events]
     try:
         events_with_time.sort(key=lambda x: x[1])
     except Exception as e:
@@ -197,25 +109,15 @@ def zero_base_events(events):
     if not events_with_time:
         return [], 0
     min_t = events_with_time[0][1]
-    shifted = []
-    for (e, t) in events_with_time:
-        ne = deepcopy(e)
-        ne["Time"] = t - min_t
-        shifted.append(ne)
+    shifted = [{**deepcopy(e), "Time": t - min_t} for (e, t) in events_with_time]
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
 def part_from_filename(fname: str):
     stem = Path(fname).stem
-    letters = [ch for ch in stem if ch.isalpha()]
-    digits = [ch for ch in stem if ch.isdigit()]
-    token_chars = [ch.lower() for ch in letters[:4]]
-    if len(token_chars) < 4:
-        token_chars.extend(digits[:4 - len(token_chars)])
-    if not token_chars:
-        alnum = [ch.lower() for ch in stem if ch.isalnum()]
-        token_chars = alnum[:4]
-    return ''.join(token_chars)
+    letters = [ch.lower() for ch in stem if ch.isalpha()][:4]
+    digits = [ch for ch in stem if ch.isdigit()][:4-len(letters)]
+    return ''.join(letters + digits) or ''.join([ch.lower() for ch in stem if ch.isalnum()][:4])
 
 def compute_minutes_from_ms(ms: int):
     return math.ceil(ms / 60000) if ms > 0 else 0
@@ -231,14 +133,12 @@ def number_to_letters(n: int) -> str:
     return letters
 
 def add_desktop_mouse_paths(events, rng):
-    enhanced = []
-    last_x, last_y = None, None
+    enhanced, last_x, last_y = [], None, None
     for e in deepcopy(events):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
-                target_x, target_y = int(e['X']), int(e['Y'])
-                click_time = int(e.get('Time', 0))
+                target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
                     if distance > 30:
@@ -281,19 +181,16 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
         target_zones = []
     if excluded_zones is None:
         excluded_zones = []
-    jittered = []
-    jitter_range = [-1, 0, 1]
+    jittered, jitter_range = [], [-1, 0, 1]
     for e in deepcopy(events):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x, original_y = int(e['X']), int(e['Y'])
                 in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
-                if not in_excluded:
-                    in_target = any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones)
-                    if in_target or not target_zones:
-                        e['X'] = original_x + rng.choice(jitter_range)
-                        e['Y'] = original_y + rng.choice(jitter_range)
+                if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
+                    e['X'] = original_x + rng.choice(jitter_range)
+                    e['Y'] = original_y + rng.choice(jitter_range)
             except:
                 pass
         jittered.append(e)
@@ -321,22 +218,38 @@ def add_time_of_day_fatigue(events, rng):
     except:
         return events, 0.0
 
-def insert_intra_pauses(events, rng, max_pauses, min_s, max_s):
-    if not events or max_pauses <= 0:
+def insert_intra_pauses(events, rng):
+    if not events:
         return deepcopy(events), []
     evs = deepcopy(events)
     n = len(evs)
     if n < 2:
         return evs, []
-    k = rng.randint(1, min(max_pauses, n-1))
-    chosen = rng.sample(range(n-1), k)
+    num_pauses = rng.randint(0, 3)
+    if num_pauses == 0:
+        return evs, []
+    chosen = rng.sample(range(n-1), min(num_pauses, n-1))
     pauses_info = []
     for gap_idx in sorted(chosen):
-        pause_ms = rng.randint(min_s * 1000, max_s * 1000)
+        pause_ms = rng.randint(2000, 15000)
         for j in range(gap_idx+1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
         pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
     return evs, pauses_info
+
+def add_afk_pause(events, rng):
+    if not events:
+        return deepcopy(events)
+    evs = deepcopy(events)
+    if rng.random() < 0.7:
+        afk_seconds = rng.randint(60, 300)
+    else:
+        afk_seconds = rng.randint(300, 1200)
+    afk_ms = afk_seconds * 1000
+    insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
+    for j in range(insert_idx, len(evs)):
+        evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
+    return evs
 
 def apply_shifts(events, shift_ms):
     return [{**deepcopy(e), 'Time': int(e.get('Time', 0)) + int(shift_ms)} for e in events]
@@ -389,20 +302,14 @@ def locate_special_file(folder: Path, input_root: Path):
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector):
     if not files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    
-    # Separate special files from regular files
     always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
     always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
     regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
-    
     if not regular_files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    
     included, excluded = selector.select_files(regular_files, exclude_count)
     if not included:
         included = regular_files.copy()
-    
-    # Decide which special file to use (only one per version)
     use_special_file = None
     if always_first_file and always_last_file:
         use_special_file = always_first_file if version_num % 2 == 1 else always_last_file
@@ -410,16 +317,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         use_special_file = always_first_file if version_num % 3 == 1 else None
     elif always_last_file:
         use_special_file = always_last_file if version_num % 3 == 2 else None
-    
     final_files = selector.shuffle_with_memory(included)
-    
-    # Add special file at appropriate position
     if use_special_file == always_first_file:
         final_files.insert(0, always_first_file)
     elif use_special_file == always_last_file:
         final_files.append(always_last_file)
-    
-    # Handle mobile special file
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group and special_path is not None:
@@ -430,25 +332,17 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             final_files.insert(0, str(special_path))
         final_files.append(str(special_path))
-    
-    # Remove None values before processing
     final_files = [f for f in final_files if f is not None]
-    
-    # Load click zones
     target_zones, excluded_zones = load_click_zones(folder_path)
-    
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
     per_file_event_ms, per_file_inter_ms = {}, {}
-    
     for idx, fpath in enumerate(final_files):
         if fpath is None:
             continue
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-        
         evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
-        
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             if not is_desktop:
@@ -463,14 +357,16 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
-        
-        intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng)[0] if zb_evs else zb_evs)
+            intra_evs, _ = insert_intra_pauses(zb_evs, rng)
+            if rng.random() < 0.5:
+                intra_evs = add_afk_pause(intra_evs, rng)
+        else:
+            intra_evs = zb_evs
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         if idx < len(final_files) - 1:
-            # Random pause between files: 1-12 seconds (human session breaks)
             pause_ms = rng.randint(1000, 12000)
             time_cursor += pause_ms
             per_file_inter_ms[str(fpath_obj)] = pause_ms
@@ -478,10 +374,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
-    
     total_ms = time_cursor if merged else 0
     total_minutes = compute_minutes_from_ms(total_ms)
-    
     parts = []
     for f in final_files:
         if f is None:
@@ -495,7 +389,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             part_name = part_from_filename(f)
         minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
         parts.append(f"{part_name}[{minutes}m]")
-    
     letters = number_to_letters(version_num or 1)
     tag = "first" if use_special_file == always_first_file else "last" if use_special_file == always_last_file else ""
     tag_prefix = f"{tag} - " if tag else ""
