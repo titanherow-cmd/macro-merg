@@ -1,4 +1,4 @@
-final_files = [f for f in final_files if f is not None]#!/usr/bin/env python3
+#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with Zone Awareness (FIXED)"""
 
 from pathlib import Path
@@ -122,10 +122,11 @@ def zero_base_events(events):
     if not events_with_time:
         return [], 0
     min_t = events_with_time[0][1]
-    shifted = [{"Time": t - min_t, **deepcopy(e)} if isinstance(e, dict) else {**deepcopy(e), "Time": t - min_t} for (e, t) in events_with_time]
-    for i, (_, t) in enumerate(events_with_time):
-        shifted[i] = deepcopy(events_with_time[i][0])
-        shifted[i]["Time"] = t - min_t
+    shifted = []
+    for (e, t) in events_with_time:
+        ne = deepcopy(e)
+        ne["Time"] = t - min_t
+        shifted.append(ne)
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
@@ -175,18 +176,8 @@ def add_desktop_mouse_paths(events, rng):
                             inter_x = int(last_x + (target_x - last_x) * t + curve_offset_x)
                             inter_y = int(last_y + (target_y - last_y) * t + curve_offset_y)
                             point_time = click_time - movement_duration + int(movement_duration * t)
-                            enhanced.append({
-                                'Time': max(0, point_time),
-                                'Type': 'MouseMove',
-                                'X': inter_x,
-                                'Y': inter_y
-                            })
-                        enhanced.append({
-                            'Time': max(0, click_time - rng.randint(10, 30)),
-                            'Type': 'MouseMove',
-                            'X': target_x,
-                            'Y': target_y
-                        })
+                            enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
+                        enhanced.append({'Time': max(0, click_time - rng.randint(10, 30)), 'Type': 'MouseMove', 'X': target_x, 'Y': target_y})
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
@@ -281,8 +272,7 @@ class NonRepeatingSelector:
     def select_files(self, files, exclude_count):
         if not files:
             return [], []
-        n = len(files)
-        file_indices = list(range(n))
+        n, file_indices = len(files), list(range(n))
         max_exclude = min(exclude_count, max(0, n - 1))
         all_possible = [frozenset(combo) for exclude_k in range(0, max_exclude + 1) for combo in combinations(file_indices, exclude_k)]
         available = [c for c in all_possible if c not in self.used_combos]
@@ -353,6 +343,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         final_files.insert(0, always_first_file)
     elif use_special_file == always_last_file:
         final_files.append(always_last_file)
+    
+    # Handle mobile special file
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group and special_path is not None:
@@ -363,16 +355,25 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             final_files.insert(0, str(special_path))
         final_files.append(str(special_path))
+    
+    # Remove None values before processing
+    final_files = [f for f in final_files if f is not None]
+    
+    # Load click zones
     target_zones, excluded_zones = load_click_zones(folder_path)
+    
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
     per_file_event_ms, per_file_inter_ms = {}, {}
+    
     for idx, fpath in enumerate(final_files):
         if fpath is None:
             continue
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-        evs, file_duration_ms = load_json_events(fpath_obj), 0
+        
+        evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
+        
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             if not is_desktop:
@@ -387,6 +388,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
+        
         intra_evs = zb_evs if is_special else (insert_intra_pauses(zb_evs, rng, within_max_pauses, 0, int(within_max_s))[0] if within_max_pauses > 0 else zb_evs)
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
         shifted = apply_shifts(intra_evs, time_cursor)
@@ -400,7 +402,10 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
-    total_ms, total_minutes = time_cursor if merged else 0, compute_minutes_from_ms(time_cursor if merged else 0)
+    
+    total_ms = time_cursor if merged else 0
+    total_minutes = compute_minutes_from_ms(total_ms)
+    
     parts = []
     for f in final_files:
         if f is None:
