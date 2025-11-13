@@ -8,7 +8,7 @@ on:
         required: true
         default: '26'
       within_max_time:
-        description: 'Intra-file max pause time (seconds)'
+        description: 'Intra-file max pause time (seconds) - Used for EXEMPTED folders only'
         required: true
         default: '33'
       within_max_pauses:
@@ -45,9 +45,6 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: pip install Pillow numpy
 
       - name: Bump run counter (expose BUNDLE_SEQ)
         id: bump
