@@ -1,25 +1,11 @@
-use_special_file = None
-    if always_first_file and always_last_file:
-        # Only use one, alternating by version
-        if version_num % 2 == 1:
-            use_special_file = always_first_file
-        else:
-            use_special_file = always_last_file
-    elif always_first_file:
-        # Use only in some versions (1 out of 3)
-        if version_num == 1:
-            use_special_file = always_first_file
-    elif always_last_file:
-        # Use only in some versions (1 out of 3)
-        if version_num == 2:
-            use_special_file = always_last_file#!/usr/bin/env python3
+#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math
 from copy import deepcopy
 from zipfile import ZipFile
-from itertools import combinations
+from itertools import combinations, permutations
 
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
@@ -115,7 +101,16 @@ def load_json_events(path: Path):
 def zero_base_events(events):
     if not events:
         return [], 0
-    events_with_time = [(e, int(e.get("Time", 0)) if isinstance(e.get("Time", 0), int) else int(float(e.get("Time", 0)))) for e in events]
+    events_with_time = []
+    for e in events:
+        try:
+            t = int(e.get("Time", 0))
+        except:
+            try:
+                t = int(float(e.get("Time", 0)))
+            except:
+                t = 0
+        events_with_time.append((e, t))
     try:
         events_with_time.sort(key=lambda x: x[1])
     except Exception as e:
@@ -123,7 +118,11 @@ def zero_base_events(events):
     if not events_with_time:
         return [], 0
     min_t = events_with_time[0][1]
-    shifted = [{**deepcopy(e), "Time": t - min_t} for (e, t) in events_with_time]
+    shifted = []
+    for (e, t) in events_with_time:
+        ne = deepcopy(e)
+        ne["Time"] = t - min_t
+        shifted.append(ne)
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
@@ -270,7 +269,10 @@ def apply_shifts(events, shift_ms):
 
 class NonRepeatingSelector:
     def __init__(self, rng):
-        self.rng, self.used_combos = rng, set()
+        self.rng = rng
+        self.used_combos = set()
+        self.special_files_used = set()
+
     def select_files(self, files, exclude_count):
         if not files:
             return [], []
@@ -287,6 +289,7 @@ class NonRepeatingSelector:
         excluded = [files[i] for i in chosen_exclude_indices]
         included = [files[i] for i in file_indices if i not in chosen_exclude_indices]
         return included if included else files.copy(), excluded
+
     def shuffle_with_memory(self, items):
         if not items or len(items) <= 1:
             return items
@@ -294,7 +297,6 @@ class NonRepeatingSelector:
             shuffled = items.copy()
             self.rng.shuffle(shuffled)
             return shuffled
-        from itertools import permutations
         all_perms = list(permutations(items))
         available = [p for p in all_perms if p not in self.used_combos]
         if not available:
@@ -303,6 +305,12 @@ class NonRepeatingSelector:
         chosen = self.rng.choice(available)
         self.used_combos.add(chosen)
         return list(chosen)
+
+    def mark_special_used(self, fname):
+        self.special_files_used.add(fname)
+
+    def is_special_used(self, fname):
+        return fname in self.special_files_used
 
 def locate_special_file(folder: Path, input_root: Path):
     for cand in [folder / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
@@ -325,24 +333,24 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     included, excluded = selector.select_files(regular_files, exclude_count)
     if not included:
         included = regular_files.copy()
-    
-    # Decide which special file to use (only once total across all versions)
+
     use_special_file = None
     if always_first_file and not selector.is_special_used(str(always_first_file)):
         if rng.random() < 0.5 and (not always_last_file or selector.is_special_used(str(always_last_file))):
             use_special_file = always_first_file
             selector.mark_special_used(str(always_first_file))
-    
+
     if not use_special_file and always_last_file and not selector.is_special_used(str(always_last_file)):
         if not always_first_file or selector.is_special_used(str(always_first_file)):
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
-    
+
     final_files = selector.shuffle_with_memory(included)
     if use_special_file == always_first_file:
         final_files.insert(0, always_first_file)
     elif use_special_file == always_last_file:
         final_files.append(always_last_file)
+
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group and special_path is not None:
@@ -357,6 +365,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     target_zones, excluded_zones = load_click_zones(folder_path)
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
     per_file_event_ms, per_file_inter_ms = {}, {}
+
     for idx, fpath in enumerate(final_files):
         if fpath is None:
             continue
@@ -364,6 +373,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
         evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
+
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             if not is_desktop:
@@ -383,10 +393,12 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 intra_evs = add_afk_pause(intra_evs, rng)
         else:
             intra_evs = zb_evs
+
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
+
         if idx < len(final_files) - 1:
             pause_ms = rng.randint(1000, 12000)
             time_cursor += pause_ms
@@ -395,6 +407,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
+
     total_ms = time_cursor if merged else 0
     total_minutes = compute_minutes_from_ms(total_ms)
     parts = []
@@ -410,6 +423,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             part_name = part_from_filename(f)
         minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
         parts.append(f"{part_name}[{minutes}m]")
+
     letters = number_to_letters(version_num or 1)
     tag = "first" if use_special_file == always_first_file else "last" if use_special_file == always_last_file else ""
     tag_prefix = f"{tag} - " if tag else ""
