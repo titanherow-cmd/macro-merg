@@ -335,24 +335,27 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         included = regular_files.copy()
 
     use_special_file = None
-    if always_first_file and not selector.is_special_used(str(always_first_file)):
-        if version_num == 1:
+    always_first_exists = always_first_file is not None
+    always_last_exists = always_last_file is not None
+    
+    # Both files exist
+    if always_first_exists and always_last_exists:
+        if version_num == 1 and not selector.is_special_used(str(always_first_file)):
             use_special_file = always_first_file
             selector.mark_special_used(str(always_first_file))
-    
-    if not use_special_file and always_last_file and not selector.is_special_used(str(always_last_file)):
-        if version_num == 2:
+        elif version_num == 2 and not selector.is_special_used(str(always_last_file)):
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
     
-    # If only one special file exists, use it in version 1
-    if not use_special_file and always_first_file and not always_last_file and not selector.is_special_used(str(always_first_file)):
-        if version_num == 1:
+    # Only always_first exists
+    elif always_first_exists and not always_last_exists:
+        if version_num == 1 and not selector.is_special_used(str(always_first_file)):
             use_special_file = always_first_file
             selector.mark_special_used(str(always_first_file))
     
-    if not use_special_file and always_last_file and not always_first_file and not selector.is_special_used(str(always_last_file)):
-        if version_num == 1:
+    # Only always_last exists
+    elif always_last_exists and not always_first_exists:
+        if version_num == 1 and not selector.is_special_used(str(always_last_file)):
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
 
