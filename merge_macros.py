@@ -355,8 +355,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         final_files.append(always_last_file)
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
-    if is_mobile_group and special_path:
-        final_files = [f for f in final_files if Path(f).resolve() != special_path]
+    if is_mobile_group and special_path is not None:
+        final_files = [f for f in final_files if Path(f).resolve() != special_path.resolve()]
         if final_files:
             mid_idx = len(final_files) // 2
             final_files.insert(min(mid_idx + 1, len(final_files)), str(special_path))
@@ -367,7 +367,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
     per_file_event_ms, per_file_inter_ms = {}, {}
     for idx, fpath in enumerate(final_files):
-        fpath_obj, is_special = Path(fpath), special_path is not None and Path(fpath).resolve() == special_path.resolve()
+        fpath_obj = Path(fpath)
+        is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
         evs, file_duration_ms = load_json_events(fpath_obj), 0
         zb_evs, file_duration_ms = zero_base_events(evs)
         if not is_special:
