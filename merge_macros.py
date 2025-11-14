@@ -120,8 +120,13 @@ def load_json_events(path: Path):
     return deepcopy(data) if isinstance(data, list) else []
 
 def zero_base_events(events):
+    """
+    CRITICAL: Normalizes timestamps to start at 0, preserves event order.
+    Does NOT modify event structure, only shifts Time values.
+    """
     if not events:
         return [], 0
+    
     events_with_time = []
     for e in events:
         try:
@@ -132,18 +137,25 @@ def zero_base_events(events):
             except:
                 t = 0
         events_with_time.append((e, t))
+    
+    # Sort by time (critical for maintaining event order)
     try:
         events_with_time.sort(key=lambda x: x[1])
-    except Exception as e:
-        print(f"WARNING: Could not sort events: {e}", file=sys.stderr)
+    except Exception as ex:
+        print(f"WARNING: Could not sort events: {ex}", file=sys.stderr)
+    
     if not events_with_time:
         return [], 0
+    
     min_t = events_with_time[0][1]
     shifted = []
+    
     for (e, t) in events_with_time:
         ne = deepcopy(e)
+        # Shift time to start from 0
         ne["Time"] = t - min_t
         shifted.append(ne)
+    
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
@@ -167,20 +179,28 @@ def number_to_letters(n: int) -> str:
     return letters
 
 def add_desktop_mouse_paths(events, rng):
+    """
+    CRITICAL: This function adds mouse movement BEFORE clicks only.
+    Never adds movement during or after clicks to prevent drag interpretation.
+    """
     enhanced, last_x, last_y = [], None, None
     
     for e in deepcopy(events):
+        # Identify event types
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
         is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
+        is_mouse_move = e.get('Type') == 'MouseMove'
         
+        # ONLY process clicks (not drags, not moves)
         if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
                 
+                # Add movement path BEFORE the click (if we have a previous position)
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
                     
-                    if distance > 30:
+                    if distance > 30:  # Only for significant movements
                         num_points = rng.randint(3, 5)
                         movement_duration = int(100 + distance * 0.25)
                         movement_duration = min(movement_duration, 400)
@@ -191,21 +211,28 @@ def add_desktop_mouse_paths(events, rng):
                             
                             inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
                             inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                            # CRITICAL: All movement points BEFORE click time
                             point_time = click_time - movement_duration + int(movement_duration * t_smooth)
                             
-                            enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
+                            # Ensure movement is BEFORE click
+                            if point_time < click_time:
+                                enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
                 
+                # Update last known position
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
         
+        # Add the original event unchanged
         enhanced.append(e)
         
-        if e.get('Type') == 'MouseMove' and 'X' in e and 'Y' in e:
+        # Track position updates from MouseMove events
+        if is_mouse_move and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
             except:
                 pass
+        # Track position from drag events (but don't modify them)
         elif is_drag and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
@@ -251,23 +278,34 @@ def add_reaction_variance(events, rng):
     return varied
 
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
+    """
+    CRITICAL: Only modifies X/Y coordinates, NEVER modifies timing.
+    Jitter happens at the exact moment of click, not after.
+    """
     if target_zones is None:
         target_zones = []
     if excluded_zones is None:
         excluded_zones = []
     jittered, jitter_range = [], [-1, 0, 1]
+    
     for e in events:
         new_e = deepcopy(e)
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x, original_y = int(e['X']), int(e['Y'])
                 in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
+                
                 if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
+                    # Only modify X/Y, keep Time unchanged
                     new_e['X'] = original_x + rng.choice(jitter_range)
                     new_e['Y'] = original_y + rng.choice(jitter_range)
+                    # CRITICAL: Keep original time
+                    new_e['Time'] = int(e.get('Time', 0))
             except:
                 pass
+        
         jittered.append(new_e)
     return jittered
 
@@ -534,17 +572,28 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
             if not is_desktop:
+                # Mobile: No mouse paths, just timing variations
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
+                # Re-normalize after timing changes
+                zb_evs, _ = zero_base_events(zb_evs)
+                # Apply AFK pauses LAST (after all timing is settled)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
+                # Desktop: Add mouse paths FIRST (before click), then timing variations
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
+                # Re-normalize after mouse paths
+                zb_evs, _ = zero_base_events(zb_evs)
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
+                # Re-normalize after timing changes
+                zb_evs, _ = zero_base_events(zb_evs)
+                # Apply AFK pauses LAST (after all timing is settled)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             
+            # Final normalization before adding intra pauses
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
             
             if is_exempted:
