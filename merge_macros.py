@@ -216,9 +216,13 @@ def add_desktop_mouse_paths(events, rng):
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     result = []
-    for e in events:
+    for i, e in enumerate(events):
         new_e = deepcopy(e)
-        if rng.random() < micropause_chance:
+        
+        # CRITICAL: Never add micro-pauses to clicks themselves
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        
+        if not is_click and rng.random() < micropause_chance:
             new_e['Time'] = int(e.get('Time', 0)) + rng.randint(50, 250)
         else:
             new_e['Time'] = int(e.get('Time', 0))
@@ -227,11 +231,22 @@ def add_micro_pauses(events, rng, micropause_chance=0.15):
 
 def add_reaction_variance(events, rng):
     varied = []
+    prev_event_time = 0
+    
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         is_click = e.get('Type') in ['Click', 'RightClick'] or 'button' in e or 'Button' in e
+        
+        # Only add delay if there's at least 500ms gap since last event (ensures click completes)
         if is_click and i > 0 and rng.random() < 0.3:
-            new_e['Time'] = int(e.get('Time', 0)) + rng.randint(200, 600)
+            current_time = int(e.get('Time', 0))
+            gap_since_last = current_time - prev_event_time
+            
+            # Only add variance if gap is healthy (500ms+)
+            if gap_since_last >= 500:
+                new_e['Time'] = current_time + rng.randint(200, 600)
+        
+        prev_event_time = int(new_e.get('Time', 0))
         varied.append(new_e)
     return varied
 
@@ -277,7 +292,37 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     if num_pauses == 0:
         return evs, 0.0
     
-    pause_locations = rng.sample(range(n - 1), min(num_pauses, n - 1))
+    # CRITICAL: Track click times to avoid interfering with clicks
+    click_times = []
+    for i, e in enumerate(evs):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click:
+            click_time = int(e.get('Time', 0))
+            click_times.append((i, click_time))
+    
+    # Find safe locations (not within 1000ms after any click)
+    safe_locations = []
+    for gap_idx in range(n - 1):
+        event_time = int(evs[gap_idx].get('Time', 0))
+        next_event_time = int(evs[gap_idx + 1].get('Time', 0))
+        
+        # Check if this gap is safe (1000ms+ after last click)
+        is_safe = True
+        for click_idx, click_time in click_times:
+            # Don't insert pause within 1000ms after a click
+            if click_idx <= gap_idx and (event_time - click_time) < 1000:
+                is_safe = False
+                break
+        
+        if is_safe:
+            safe_locations.append(gap_idx)
+    
+    if not safe_locations:
+        return evs, 0.0
+    
+    # Pick random safe locations for pauses
+    num_pauses = min(num_pauses, len(safe_locations))
+    pause_locations = rng.sample(safe_locations, num_pauses)
     
     for gap_idx in sorted(pause_locations, reverse=True):
         pause_ms = rng.randint(0, 72000)
@@ -305,7 +350,34 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     if num_pauses == 0:
         return evs, []
     
-    chosen = rng.sample(range(n-1), min(num_pauses, n-1))
+    # CRITICAL: Track click times to avoid interfering with clicks
+    click_times = []
+    for i, e in enumerate(evs):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click:
+            click_time = int(e.get('Time', 0))
+            click_times.append((i, click_time))
+    
+    # Find safe locations (not within 1000ms after any click)
+    safe_locations = []
+    for gap_idx in range(n - 1):
+        event_time = int(evs[gap_idx].get('Time', 0))
+        
+        # Check if this gap is safe (1000ms+ after last click)
+        is_safe = True
+        for click_idx, click_time in click_times:
+            if click_idx <= gap_idx and (event_time - click_time) < 1000:
+                is_safe = False
+                break
+        
+        if is_safe:
+            safe_locations.append(gap_idx)
+    
+    if not safe_locations:
+        return evs, []
+    
+    num_pauses = min(num_pauses, len(safe_locations))
+    chosen = rng.sample(safe_locations, num_pauses)
     pauses_info = []
     
     for gap_idx in sorted(chosen):
