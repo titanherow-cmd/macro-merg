@@ -105,18 +105,25 @@ def find_json_files_in_dir(dirpath: Path):
         return []
 
 def load_json_events(path: Path):
+    """
+    CRITICAL: Load events WITHOUT any modifications.
+    Preserves original click structure including button states.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         print(f"WARNING: Failed to read {path}: {e}", file=sys.stderr)
         return []
+    
     if isinstance(data, dict):
         for k in ("events", "items", "entries", "records", "actions"):
             if k in data and isinstance(data[k], list):
+                # Return EXACT copy - don't modify anything
                 return deepcopy(data[k])
         if "Time" in data:
             return [deepcopy(data)]
         return []
+    
     return deepcopy(data) if isinstance(data, list) else []
 
 def zero_base_events(events):
@@ -159,7 +166,32 @@ def zero_base_events(events):
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
-def part_from_filename(fname: str):
+def preserve_click_integrity(events):
+    """
+    CRITICAL: Ensures click events remain intact.
+    Some recorders use MouseDown/MouseUp pairs - we must preserve their timing.
+    """
+    preserved = []
+    
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        
+        # Check if this is part of a click sequence
+        event_type = e.get('Type', '')
+        
+        # Preserve these EXACTLY as recorded
+        if any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
+            # Don't modify button press/release events AT ALL
+            new_e['Time'] = int(e.get('Time', 0))  # Keep exact timing
+            new_e['PROTECTED'] = True  # Mark as protected
+        
+        preserved.append(new_e)
+    
+    return preserved
+
+def is_protected_event(event):
+    """Check if event is marked as protected (click down/up)"""
+    return event.get('PROTECTED', False)
     stem = Path(fname).stem
     letters = [ch.lower() for ch in stem if ch.isalpha()][:4]
     digits = [ch for ch in stem if ch.isdigit()][:4-len(letters)]
@@ -246,7 +278,12 @@ def add_micro_pauses(events, rng, micropause_chance=0.15):
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         
-        # CRITICAL: Never add micro-pauses to clicks themselves
+        # CRITICAL: Never modify protected events (button press/release)
+        if is_protected_event(e):
+            result.append(new_e)
+            continue
+        
+        # Never add micro-pauses to clicks themselves
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         
         if not is_click and rng.random() < micropause_chance:
@@ -262,14 +299,20 @@ def add_reaction_variance(events, rng):
     
     for i, e in enumerate(events):
         new_e = deepcopy(e)
+        
+        # CRITICAL: Never modify protected events
+        if is_protected_event(e):
+            prev_event_time = int(e.get('Time', 0))
+            varied.append(new_e)
+            continue
+        
         is_click = e.get('Type') in ['Click', 'RightClick'] or 'button' in e or 'Button' in e
         
-        # Only add delay if there's at least 500ms gap since last event (ensures click completes)
+        # Only add delay if there's at least 500ms gap since last event
         if is_click and i > 0 and rng.random() < 0.3:
             current_time = int(e.get('Time', 0))
             gap_since_last = current_time - prev_event_time
             
-            # Only add variance if gap is healthy (500ms+)
             if gap_since_last >= 500:
                 new_e['Time'] = current_time + rng.randint(200, 600)
         
@@ -280,7 +323,7 @@ def add_reaction_variance(events, rng):
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
     """
     CRITICAL: Only modifies X/Y coordinates, NEVER modifies timing.
-    Jitter happens at the exact moment of click, not after.
+    Skips protected events entirely.
     """
     if target_zones is None:
         target_zones = []
@@ -290,6 +333,12 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     
     for e in events:
         new_e = deepcopy(e)
+        
+        # CRITICAL: Never modify protected events
+        if is_protected_event(e):
+            jittered.append(new_e)
+            continue
+        
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
@@ -298,10 +347,8 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
                 in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
                 
                 if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
-                    # Only modify X/Y, keep Time unchanged
                     new_e['X'] = original_x + rng.choice(jitter_range)
                     new_e['Y'] = original_y + rng.choice(jitter_range)
-                    # CRITICAL: Keep original time
                     new_e['Time'] = int(e.get('Time', 0))
             except:
                 pass
@@ -570,6 +617,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             is_desktop = "deskt" in str(folder_path).lower()
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
             is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
+            
+            # CRITICAL: Preserve click integrity first
+            zb_evs = preserve_click_integrity(zb_evs)
             
             if not is_desktop:
                 # Mobile: No mouse paths, just timing variations
