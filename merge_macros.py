@@ -130,12 +130,14 @@ def zero_base_events(events):
     """
     CRITICAL: Normalizes timestamps to start at 0, preserves event order.
     Does NOT modify event structure, only shifts Time values.
+    This function does a stable sort by (Time, original_index) to avoid
+    reordering events that share the same timestamp (prevents Down/Up flips).
     """
     if not events:
         return [], 0
     
     events_with_time = []
-    for e in events:
+    for idx, e in enumerate(events):
         try:
             t = int(e.get("Time", 0))
         except:
@@ -143,11 +145,11 @@ def zero_base_events(events):
                 t = int(float(e.get("Time", 0)))
             except:
                 t = 0
-        events_with_time.append((e, t))
+        events_with_time.append((e, t, idx))
     
-    # Sort by time (critical for maintaining event order)
+    # Sort by time, then by original index to keep stable ordering for equal times
     try:
-        events_with_time.sort(key=lambda x: x[1])
+        events_with_time.sort(key=lambda x: (x[1], x[2]))
     except Exception as ex:
         print(f"WARNING: Could not sort events: {ex}", file=sys.stderr)
     
@@ -157,7 +159,7 @@ def zero_base_events(events):
     min_t = events_with_time[0][1]
     shifted = []
     
-    for (e, t) in events_with_time:
+    for (e, t, _) in events_with_time:
         ne = deepcopy(e)
         # Shift time to start from 0
         ne["Time"] = t - min_t
@@ -192,10 +194,6 @@ def preserve_click_integrity(events):
 def is_protected_event(event):
     """Check if event is marked as protected (click down/up)"""
     return event.get('PROTECTED', False)
-    stem = Path(fname).stem
-    letters = [ch.lower() for ch in stem if ch.isalpha()][:4]
-    digits = [ch for ch in stem if ch.isdigit()][:4-len(letters)]
-    return ''.join(letters + digits) or ''.join([ch.lower() for ch in stem if ch.isalnum()][:4])
 
 def compute_minutes_from_ms(ms: int):
     return math.ceil(ms / 60000) if ms > 0 else 0
@@ -209,6 +207,17 @@ def number_to_letters(n: int) -> str:
         letters = chr(ord('A') + (n % 26)) + letters
         n //= 26
     return letters
+
+def part_from_filename(path: str) -> str:
+    """
+    Extract a reasonable 'part' name from a filename or path.
+    Default: return the filename stem (without extension).
+    This fixes the NameError when the function was missing.
+    """
+    try:
+        return Path(str(path)).stem
+    except:
+        return str(path)
 
 def add_desktop_mouse_paths(events, rng):
     """
