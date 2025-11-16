@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness
+
+Patched to:
+- make filenames safe and bounded (make_filename_safe)
+- provide safe fallback write on OSError
+- record a manifest mapping attempted descriptive names -> actual written filenames
+- handle SIGINT/SIGTERM to write manifest on cancellation
+- return base descriptive name from generate_version_for_folder so manifest can include it
+"""
 
 from pathlib import Path
-import argparse, json, random, re, sys, os, math, hashlib
+import argparse, json, random, re, sys, os, math, hashlib, time, signal
 from copy import deepcopy
 from zipfile import ZipFile
 from itertools import combinations, permutations
@@ -10,6 +18,24 @@ from itertools import combinations, permutations
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
+
+# Global cancellation flag set by signal handler
+CANCELED = False
+
+def _signal_handler(signum, frame):
+    global CANCELED
+    CANCELED = True
+    # Raise KeyboardInterrupt to unwind gracefully
+    raise KeyboardInterrupt(f"Received signal {signum}")
+
+# Register handlers for SIGINT and SIGTERM (works on Unix)
+signal.signal(signal.SIGINT, _signal_handler)
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+except Exception:
+    # some environments may not support setting SIGTERM handler
+    pass
+
 
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
@@ -212,7 +238,6 @@ def part_from_filename(path: str) -> str:
     """
     Extract a reasonable 'part' name from a filename or path.
     Default: return the filename stem (without extension).
-    This fixes the NameError when the function was missing.
     """
     try:
         return Path(str(path)).stem
@@ -224,11 +249,6 @@ def make_filename_safe(name: str, max_filename_len: int = 120) -> str:
     Produce a filesystem-safe filename (no invalid characters) and ensure it
     is at most max_filename_len characters long. If truncation is required,
     append an 8-char hash suffix to preserve uniqueness.
-
-    - Removes characters invalid in filenames: / \ : * ? " < > |
-    - Collapses multiple whitespace to single space and trims.
-    - If the cleaned name fits max_filename_len, returns it as-is.
-    - If not, returns <prefix>_<hash>.
     """
     if name is None:
         name = ""
@@ -248,81 +268,52 @@ def make_filename_safe(name: str, max_filename_len: int = 120) -> str:
     return f"{prefix}_{h}"
 
 def add_desktop_mouse_paths(events, rng):
-    """
-    CRITICAL: This function adds mouse movement BEFORE clicks only.
-    Never adds movement during or after clicks to prevent drag interpretation.
-    """
     enhanced, last_x, last_y = [], None, None
-    
     for e in deepcopy(events):
-        # Identify event types
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
         is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
         is_mouse_move = e.get('Type') == 'MouseMove'
-        
-        # ONLY process clicks (not drags, not moves)
         if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
-                
-                # Add movement path BEFORE the click (if we have a previous position)
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
-                    
-                    if distance > 30:  # Only for significant movements
+                    if distance > 30:
                         num_points = rng.randint(3, 5)
                         movement_duration = int(100 + distance * 0.25)
                         movement_duration = min(movement_duration, 400)
-                        
                         for i in range(1, num_points + 1):
                             t = i / (num_points + 1)
                             t_smooth = t * t * (3 - 2 * t)
-                            
                             inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
                             inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
-                            # CRITICAL: All movement points BEFORE click time
                             point_time = click_time - movement_duration + int(movement_duration * t_smooth)
-                            
-                            # Ensure movement is BEFORE click
                             if point_time < click_time:
                                 enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
-                
-                # Update last known position
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
-        
-        # Add the original event unchanged
         enhanced.append(e)
-        
-        # Track position updates from MouseMove events
         if is_mouse_move and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
             except:
                 pass
-        # Track position from drag events (but don't modify them)
         elif is_drag and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
             except:
                 pass
-    
     return enhanced
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     result = []
     for i, e in enumerate(events):
         new_e = deepcopy(e)
-        
-        # CRITICAL: Never modify protected events (button press/release)
         if is_protected_event(e):
             result.append(new_e)
             continue
-        
-        # Never add micro-pauses to clicks themselves
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
-        
         if not is_click and rng.random() < micropause_chance:
             new_e['Time'] = int(e.get('Time', 0)) + rng.randint(50, 250)
         else:
@@ -333,183 +324,126 @@ def add_micro_pauses(events, rng, micropause_chance=0.15):
 def add_reaction_variance(events, rng):
     varied = []
     prev_event_time = 0
-    
     for i, e in enumerate(events):
         new_e = deepcopy(e)
-        
-        # CRITICAL: Never modify protected events
         if is_protected_event(e):
             prev_event_time = int(e.get('Time', 0))
             varied.append(new_e)
             continue
-        
         is_click = e.get('Type') in ['Click', 'RightClick'] or 'button' in e or 'Button' in e
-        
-        # Only add delay if there's at least 500ms gap since last event
         if is_click and i > 0 and rng.random() < 0.3:
             current_time = int(e.get('Time', 0))
             gap_since_last = current_time - prev_event_time
-            
             if gap_since_last >= 500:
                 new_e['Time'] = current_time + rng.randint(200, 600)
-        
         prev_event_time = int(new_e.get('Time', 0))
         varied.append(new_e)
     return varied
 
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
-    """
-    CRITICAL: Only modifies X/Y coordinates, NEVER modifies timing.
-    Skips protected events entirely.
-    """
     if target_zones is None:
         target_zones = []
     if excluded_zones is None:
         excluded_zones = []
     jittered, jitter_range = [], [-1, 0, 1]
-    
     for e in events:
         new_e = deepcopy(e)
-        
-        # CRITICAL: Never modify protected events
         if is_protected_event(e):
             jittered.append(new_e)
             continue
-        
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
-        
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x, original_y = int(e['X']), int(e['Y'])
                 in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
-                
                 if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
                     new_e['X'] = original_x + rng.choice(jitter_range)
                     new_e['Y'] = original_y + rng.choice(jitter_range)
                     new_e['Time'] = int(e.get('Time', 0))
             except:
                 pass
-        
         jittered.append(new_e)
     return jittered
 
 def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     if not events:
         return events, 0.0
-    
     if is_exempted:
         return deepcopy(events), 0.0
-    
     if rng.random() < 0.20:
         return deepcopy(events), 0.0
-    
     evs = deepcopy(events)
     n = len(evs)
-    
     if n < 2:
         return evs, 0.0
-    
     num_pauses = rng.randint(0, 3)
-    
     if num_pauses == 0:
         return evs, 0.0
-    
-    # CRITICAL: Track click times to avoid interfering with clicks
     click_times = []
     for i, e in enumerate(evs):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         if is_click:
             click_time = int(e.get('Time', 0))
             click_times.append((i, click_time))
-    
-    # Find safe locations (not within 1000ms after any click)
     safe_locations = []
     for gap_idx in range(n - 1):
         event_time = int(evs[gap_idx].get('Time', 0))
         next_event_time = int(evs[gap_idx + 1].get('Time', 0))
-        
-        # Check if this gap is safe (1000ms+ after last click)
         is_safe = True
         for click_idx, click_time in click_times:
-            # Don't insert pause within 1000ms after a click
             if click_idx <= gap_idx and (event_time - click_time) < 1000:
                 is_safe = False
                 break
-        
         if is_safe:
             safe_locations.append(gap_idx)
-    
     if not safe_locations:
         return evs, 0.0
-    
-    # Pick random safe locations for pauses
     num_pauses = min(num_pauses, len(safe_locations))
     pause_locations = rng.sample(safe_locations, num_pauses)
-    
     for gap_idx in sorted(pause_locations, reverse=True):
         pause_ms = rng.randint(0, 72000)
-        
         for j in range(gap_idx + 1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-    
     return evs, 0.0
 
 def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
     if not events:
         return deepcopy(events), []
-    
     evs = deepcopy(events)
     n = len(evs)
-    
     if n < 2:
         return evs, []
-    
     if not is_exempted:
         return evs, []
-    
     num_pauses = rng.randint(0, max_num_pauses)
-    
     if num_pauses == 0:
         return evs, []
-    
-    # CRITICAL: Track click times to avoid interfering with clicks
     click_times = []
     for i, e in enumerate(evs):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
         if is_click:
             click_time = int(e.get('Time', 0))
             click_times.append((i, click_time))
-    
-    # Find safe locations (not within 1000ms after any click)
     safe_locations = []
     for gap_idx in range(n - 1):
         event_time = int(evs[gap_idx].get('Time', 0))
-        
-        # Check if this gap is safe (1000ms+ after last click)
         is_safe = True
         for click_idx, click_time in click_times:
             if click_idx <= gap_idx and (event_time - click_time) < 1000:
                 is_safe = False
                 break
-        
         if is_safe:
             safe_locations.append(gap_idx)
-    
     if not safe_locations:
         return evs, []
-    
     num_pauses = min(num_pauses, len(safe_locations))
     chosen = rng.sample(safe_locations, num_pauses)
     pauses_info = []
-    
     for gap_idx in sorted(chosen):
         pause_ms = rng.randint(0, int(max_pause_s * 1000))
-        
         for j in range(gap_idx+1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        
         pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
-    
     return evs, pauses_info
 
 def add_afk_pause(events, rng):
@@ -590,13 +524,17 @@ def locate_special_file(folder: Path, input_root: Path):
     return None
 
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None):
+    """
+    Returns:
+        safe_filename (str), base_name (descriptive, unsanitized), merged_events (list), finals, pause_info, excluded, total_minutes
+    """
     if not files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
+        return None, None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
     always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
     regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
     if not regular_files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
+        return None, None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     included, excluded = selector.select_files(regular_files, exclude_count)
     if not included:
         included = regular_files.copy()
@@ -744,7 +682,16 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
     # make a bounded filesystem-safe filename
     safe_name = make_filename_safe(base_name, max_filename_len=120)
-    return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
+    return f"{safe_name}.json", base_name, merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
+
+def _write_manifest(manifest: list, output_root: Path, counter: int):
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_root / f"manifest_{counter}.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"WROTE MANIFEST: {manifest_path}")
+    except Exception as e:
+        print(f"WARNING: Failed to write manifest: {e}", file=sys.stderr)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -775,53 +722,105 @@ def main():
     except Exception as e:
         print(f"ERROR parsing time: {e}", file=sys.stderr)
         return
+
+    # manifest entries will store mapping and metadata for each produced file
+    manifest = []
     all_written_paths = []
     exemption_config = load_exemption_config()
-    for folder in folder_dirs:
-        files = find_json_files_in_dir(folder)
-        if not files:
-            continue
-        try:
-            rel_folder = folder.relative_to(input_root)
-        except:
-            rel_folder = Path(folder.name)
-        out_folder_for_group = output_root / rel_folder
-        out_folder_for_group.mkdir(parents=True, exist_ok=True)
-        selector = NonRepeatingSelector(rng)
-        for v in range(1, max(1, args.versions) + 1):
-            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, between_max_s, folder, input_root, selector, exemption_config)
-            if not merged_fname:
+
+    try:
+        for folder in folder_dirs:
+            if CANCELED:
+                raise KeyboardInterrupt("Canceled by signal")
+            files = find_json_files_in_dir(folder)
+            if not files:
                 continue
-            out_path = out_folder_for_group / merged_fname
             try:
-                out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
-                print(f"WROTE: {out_path}")
-                all_written_paths.append(out_path)
-            except OSError as e:
-                # Log original failure and attempt a short hashed fallback filename
-                print(f"WARNING: Failed to write {out_path}: {e}", file=sys.stderr)
-                try:
-                    content_hash = hashlib.sha1(json.dumps(merged_events, ensure_ascii=False).encode('utf-8')).hexdigest()[:12]
-                    fallback_name = f"merged_{content_hash}.json"
-                    fallback_path = out_folder_for_group / fallback_name
-                    fallback_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
-                    print(f"WROTE (fallback): {fallback_path}")
-                    all_written_paths.append(fallback_path)
-                except Exception as e2:
-                    print(f"ERROR: fallback write failed for {out_path}: {e2}", file=sys.stderr)
-            except Exception as e:
-                # non-OS error: log it
-                print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
-    
-    zip_path = output_parent / f"{output_base_name}.zip"
-    with ZipFile(zip_path, "w") as zf:
-        for fpath in all_written_paths:
-            try:
-                arcname = str(fpath.relative_to(output_parent))
+                rel_folder = folder.relative_to(input_root)
             except:
-                arcname = f"{output_base_name}/{fpath.name}"
-            zf.write(fpath, arcname=arcname)
-    print(f"DONE. Created: {zip_path}")
+                rel_folder = Path(folder.name)
+            out_folder_for_group = output_root / rel_folder
+            out_folder_for_group.mkdir(parents=True, exist_ok=True)
+            selector = NonRepeatingSelector(rng)
+            for v in range(1, max(1, args.versions) + 1):
+                if CANCELED:
+                    raise KeyboardInterrupt("Canceled by signal")
+                merged_fname, base_name, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
+                    files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, between_max_s, folder, input_root, selector, exemption_config
+                )
+                if not merged_fname:
+                    continue
+                out_path = out_folder_for_group / merged_fname
+                entry = {
+                    "attempted_name": base_name if base_name is not None else merged_fname,
+                    "attempted_safe_name": merged_fname,
+                    "actual_name": None,
+                    "folder": str(rel_folder),
+                    "version": v,
+                    "seed": args.seed,
+                    "wrote": False,
+                    "error": None,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }
+                try:
+                    out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
+                    entry["actual_name"] = str(out_path.name)
+                    entry["wrote"] = True
+                    print(f"WROTE: {out_path}")
+                    all_written_paths.append(out_path)
+                except OSError as e:
+                    # handle too-long filenames and other filesystem errors gracefully
+                    entry["error"] = f"OSError: {e}"
+                    print(f"WARNING: Failed to write {out_path}: {e}", file=sys.stderr)
+                    try:
+                        content_hash = hashlib.sha1(json.dumps(merged_events, ensure_ascii=False).encode('utf-8')).hexdigest()[:12]
+                        fallback_name = f"merged_{content_hash}.json"
+                        fallback_path = out_folder_for_group / fallback_name
+                        fallback_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
+                        entry["actual_name"] = str(fallback_path.name)
+                        entry["wrote"] = True
+                        entry["fallback"] = True
+                        print(f"WROTE (fallback): {fallback_path}")
+                        all_written_paths.append(fallback_path)
+                    except Exception as e2:
+                        entry["error"] += f" | fallback_error: {e2}"
+                        print(f"ERROR: fallback write failed for {out_path}: {e2}", file=sys.stderr)
+                except Exception as e:
+                    entry["error"] = f"Exception: {e}"
+                    print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
+                manifest.append(entry)
+
+            # periodically write manifest so progress is preserved in long runs
+            _write_manifest(manifest, output_root, counter)
+
+    except KeyboardInterrupt as ki:
+        print(f"INFO: Run interrupted: {ki}", file=sys.stderr)
+        # write manifest before exiting
+        _write_manifest(manifest, output_root, counter)
+        print("INFO: Manifest written after interrupt. Exiting.", file=sys.stderr)
+        return
+    except Exception as e:
+        print(f"ERROR: Unexpected exception: {e}", file=sys.stderr)
+        _write_manifest(manifest, output_root, counter)
+        raise
+
+    # Final manifest write
+    _write_manifest(manifest, output_root, counter)
+
+    # try creating zip archive of all written files (skip if none)
+    try:
+        zip_path = output_parent / f"{output_base_name}.zip"
+        with ZipFile(zip_path, "w") as zf:
+            for fpath in all_written_paths:
+                try:
+                    arcname = str(fpath.relative_to(output_parent))
+                except:
+                    arcname = f"{output_base_name}/{fpath.name}"
+                zf.write(fpath, arcname=arcname)
+        print(f"DONE. Created: {zip_path}")
+    except Exception as e:
+        print(f"WARNING: Failed to create ZIP archive: {e}", file=sys.stderr)
+        print("Completed file writes but skipping ZIP creation.", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
