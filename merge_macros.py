@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness
 
-Patched to:
-- make filenames safe and bounded
+Patched features included (kept from previous patches):
+- make filenames safe and bounded (make_filename_safe)
 - safe fallback write on OSError
 - manifest mapping attempted descriptive names -> actual written filenames
 - signal handling to write manifest on cancellation
-- create one zip per top-level output group (e.g. MOBILE, deskt- osrs) instead of a single combined zip
+- create one zip per top-level output group (e.g. MOBILE, deskt- osrs)
+- batching flags (--batch-index/--batch-count)
+- max-files flag (--max-files)
+
+New change in this patch:
+- added --group CLI option to restrict processing to only 'mobile', 'desktop', or 'all' top-level input groups.
 """
 
 from pathlib import Path
@@ -636,7 +641,16 @@ def main():
     parser.add_argument("--within-max-time", default="33")
     parser.add_argument("--within-max-pauses", type=int, default=2)
     parser.add_argument("--between-max-time", default="18")
+    parser.add_argument("--max-files", type=int, default=0,
+                        help="Maximum number of output files to write in this run (0 = unlimited)")
+    parser.add_argument("--batch-index", type=int, default=0,
+                        help="Index of this batch (0-based) when splitting folders across jobs")
+    parser.add_argument("--batch-count", type=int, default=1,
+                        help="Number of batches to split the work across (use with --batch-index)")
+    parser.add_argument("--group", choices=["mobile", "desktop", "all"], default="all",
+                        help="Restrict processing to only the mobile or desktop top-level input group (default: all)")
     args = parser.parse_args()
+
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
     input_root, output_parent = Path(args.input_dir), Path(args.output_dir)
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -656,9 +670,37 @@ def main():
         print(f"ERROR parsing time: {e}", file=sys.stderr)
         return
 
+    # Apply group filter if requested (mobile/desktop/all)
+    if args.group != "all":
+        def is_group_folder(p: Path) -> bool:
+            # Determine top-level component relative to input_root if possible
+            try:
+                rel = p.relative_to(input_root)
+                first = rel.parts[0].lower() if rel.parts else str(p).lower()
+            except Exception:
+                first = str(p).lower()
+            if args.group == "mobile":
+                return "mobile" in first
+            else:  # desktop
+                return "desk" in first or "desktop" in first
+        orig_count = len(folder_dirs)
+        folder_dirs = [p for p in folder_dirs if is_group_folder(p)]
+        print(f"INFO: group filter '{args.group}' applied: {len(folder_dirs)} / {orig_count} folders selected", file=sys.stderr)
+
+    # Apply batching if requested
+    if args.batch_count > 1:
+        if args.batch_index < 0 or args.batch_index >= args.batch_count:
+            print(f"ERROR: --batch-index must be in [0, {args.batch_count-1}]", file=sys.stderr)
+            return
+        folder_dirs = [fd for i, fd in enumerate(folder_dirs) if (i % args.batch_count) == args.batch_index]
+        print(f"INFO: Batch {args.batch_index}/{args.batch_count} processing {len(folder_dirs)} folder(s)", file=sys.stderr)
+
     manifest = []
     all_written_paths = []
     exemption_config = load_exemption_config()
+
+    written_count = 0
+    max_files = args.max_files or 0
 
     try:
         for folder in folder_dirs:
@@ -700,6 +742,7 @@ def main():
                     entry["wrote"] = True
                     print(f"WROTE: {out_path}")
                     all_written_paths.append(out_path)
+                    written_count += 1
                 except OSError as e:
                     entry["error"] = f"OSError: {e}"
                     print(f"WARNING: Failed to write {out_path}: {e}", file=sys.stderr)
@@ -713,6 +756,7 @@ def main():
                         entry["fallback"] = True
                         print(f"WROTE (fallback): {fallback_path}")
                         all_written_paths.append(fallback_path)
+                        written_count += 1
                     except Exception as e2:
                         entry["error"] += f" | fallback_error: {e2}"
                         print(f"ERROR: fallback write failed for {out_path}: {e2}", file=sys.stderr)
@@ -721,6 +765,12 @@ def main():
                     print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
                 manifest.append(entry)
 
+                # Stop early if reached max-files
+                if max_files and written_count >= max_files:
+                    print(f"INFO: Reached --max-files={max_files}, stopping early.", file=sys.stderr)
+                    raise KeyboardInterrupt("Reached max-files")
+
+            # periodically write manifest so progress is preserved in long runs
             _write_manifest(manifest, output_root, counter)
 
     except KeyboardInterrupt as ki:
@@ -743,11 +793,9 @@ def main():
                 rel = fpath.relative_to(output_root)
                 first = rel.parts[0] if rel.parts else "root"
             except Exception:
-                # fallback: use parent folder name
                 first = fpath.parent.name or "root"
             groups[first].append(fpath)
 
-        # For each group, create a zip file containing that group's files
         for group_name, paths in groups.items():
             try:
                 zip_name = f"{output_base_name}_{group_name}.zip"
