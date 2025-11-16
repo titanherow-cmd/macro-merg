@@ -31,6 +31,7 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours maximum (GitHub's limit)
     permissions:
       contents: write
     
@@ -165,13 +166,22 @@ jobs:
           echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
           
           if [ -d "output/${OUTPUT_BASE}" ]; then
-            (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
-            ls -la "${OUTPUT_BASE}.zip" || true
-            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+            # Check if directory has content
+            if [ "$(ls -A output/${OUTPUT_BASE})" ]; then
+              (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
+              ls -lh "${OUTPUT_BASE}.zip" || true
+              echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+              echo "✅ Successfully created zip with $(find output/${OUTPUT_BASE} -type f | wc -l) files"
+            else
+              echo "⚠️ Output directory is empty"
+              touch empty_placeholder.txt
+              zip "${OUTPUT_BASE}.zip" empty_placeholder.txt || true
+              echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+            fi
           else
-            echo "No 'output/${OUTPUT_BASE}' found; creating empty zip fallback"
-            touch empty_file.txt
-            zip "${OUTPUT_BASE}.zip" empty_file.txt || true
+            echo "❌ No 'output/${OUTPUT_BASE}' found; creating empty zip fallback"
+            touch empty_placeholder.txt
+            zip "${OUTPUT_BASE}.zip" empty_placeholder.txt || true
             echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
           fi
       
@@ -181,3 +191,4 @@ jobs:
         with:
           name: merged-bundle
           path: ${{ env.ZIP_NAME }}
+          retention-days: 90
