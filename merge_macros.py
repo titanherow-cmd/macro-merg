@@ -2,14 +2,15 @@
 """
 merge_macros.py - Merge and augment macro JSONs
 
+This is a corrected version that ensures exemption config helpers are present.
 Features:
 - Safe filename generation (truncation + hash)
 - Fallback write on OSError (short hashed filename)
-- Manifest mapping attempted descriptive names -> actual written filename
+- Manifest writing (attempted -> actual filename)
 - CLI flags: --group, --max-files, --batch-index / --batch-count
 - --top-level-only to only treat immediate children under input root as groups
 - --dry-run prints discovered folders and exits
-- Signal handling to write manifest on interrupt
+- Signal handling so manifest is written on interrupt
 """
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, hashlib, time, signal
@@ -83,7 +84,43 @@ def write_counter_file(n: int):
     except:
         pass
 
-# --- JSON/event utilities (kept intentionally conservative) ---
+# --- Exemption config helpers (fixed: these were missing) ---
+def load_exemption_config():
+    """
+    Load exemption_config.json from cwd if present.
+    Returns a dict with keys:
+      - exempted_folders: set()
+      - disable_intra_pauses: bool
+      - disable_afk: bool
+    """
+    config_file = Path.cwd() / "exemption_config.json"
+    if config_file.exists():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            return {
+                "exempted_folders": set(data.get("exempted_folders", [])),
+                "disable_intra_pauses": data.get("disable_intra_pauses", False),
+                "disable_afk": data.get("disable_afk", False)
+            }
+        except Exception as e:
+            print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
+    return {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
+
+def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
+    """
+    Return True if folder_path contains any of the exempted_folders substring.
+    Comparison is case-insensitive and normalizes slashes.
+    """
+    try:
+        folder_str = str(folder_path).lower().replace("\\", "/")
+        for exempted in exempted_folders:
+            if exempted and exempted.lower().replace("\\", "/") in folder_str:
+                return True
+    except Exception:
+        pass
+    return False
+
+# --- JSON/event utilities ---
 def load_json_events(path: Path):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -147,7 +184,7 @@ def is_click_in_zone(x, y, zone):
     except:
         return False
 
-# --- discovery ---
+# --- discovery helpers ---
 def find_all_dirs_with_json(input_root: Path, top_level_only: bool = True):
     if not input_root.exists() or not input_root.is_dir():
         return []
@@ -180,7 +217,7 @@ def find_json_files_in_dir(dirpath: Path):
     except:
         return []
 
-# --- selector class (unchanged behavior) ---
+# --- selector and misc (unchanged) ---
 class NonRepeatingSelector:
     def __init__(self, rng):
         self.rng = rng
@@ -232,7 +269,7 @@ def locate_special_file(folder: Path, input_root: Path):
             return p.resolve()
     return None
 
-# --- core merging (kept conservative and similar to your original) ---
+# --- core merging (kept conservative and similar to original) ---
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config=None):
     if not files:
         return None, None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
@@ -378,6 +415,237 @@ def write_manifest(manifest, output_root: Path, counter: int):
     except Exception as e:
         print(f"WARNING: Failed writing manifest: {e}", file=sys.stderr)
 
+# --- remaining utility functions used above but defined below (to keep file complete) ---
+def load_click_zones(folder_path: Path):
+    search_paths = [folder_path / "click_zones.json", folder_path.parent / "click_zones.json", Path.cwd() / "click_zones.json"]
+    for zone_file in search_paths:
+        if zone_file.exists():
+            try:
+                data = json.loads(zone_file.read_text(encoding="utf-8"))
+                return data.get("target_zones", []), data.get("excluded_zones", [])
+            except Exception as e:
+                print(f"WARNING: Failed to load {zone_file}: {e}", file=sys.stderr)
+    return [], []
+
+def compute_minutes_from_ms(ms: int):
+    return math.ceil(ms / 60000) if ms > 0 else 0
+
+def number_to_letters(n: int) -> str:
+    if n <= 0:
+        return ""
+    letters = ""
+    while n > 0:
+        n -= 1
+        letters = chr(ord('A') + (n % 26)) + letters
+        n //= 26
+    return letters
+
+def part_from_filename(path: str) -> str:
+    try:
+        return Path(str(path)).stem
+    except:
+        return str(path)
+
+def add_desktop_mouse_paths(events, rng):
+    enhanced, last_x, last_y = [], None, None
+    for e in deepcopy(events):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
+        is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
+        is_mouse_move = e.get('Type') == 'MouseMove'
+        if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+            try:
+                target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
+                if last_x is not None and last_y is not None:
+                    distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+                    if distance > 30:
+                        num_points = rng.randint(3, 5)
+                        movement_duration = int(100 + distance * 0.25)
+                        movement_duration = min(movement_duration, 400)
+                        for i in range(1, num_points + 1):
+                            t = i / (num_points + 1)
+                            t_smooth = t * t * (3 - 2 * t)
+                            inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
+                            inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                            point_time = click_time - movement_duration + int(movement_duration * t_smooth)
+                            if point_time < click_time:
+                                enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
+                last_x, last_y = target_x, target_y
+            except Exception as ex:
+                print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
+        enhanced.append(e)
+        if is_mouse_move and 'X' in e and 'Y' in e:
+            try:
+                last_x, last_y = int(e['X']), int(e['Y'])
+            except:
+                pass
+        elif is_drag and 'X' in e and 'Y' in e:
+            try:
+                last_x, last_y = int(e['X']), int(e['Y'])
+            except:
+                pass
+    return enhanced
+
+def add_micro_pauses(events, rng, micropause_chance=0.15):
+    result = []
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        if is_protected_event(e):
+            result.append(new_e)
+            continue
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if not is_click and rng.random() < micropause_chance:
+            new_e['Time'] = int(e.get('Time', 0)) + rng.randint(50, 250)
+        else:
+            new_e['Time'] = int(e.get('Time', 0))
+        result.append(new_e)
+    return result
+
+def add_reaction_variance(events, rng):
+    varied = []
+    prev_event_time = 0
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        if is_protected_event(e):
+            prev_event_time = int(e.get('Time', 0))
+            varied.append(new_e)
+            continue
+        is_click = e.get('Type') in ['Click', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click and i > 0 and rng.random() < 0.3:
+            current_time = int(e.get('Time', 0))
+            gap_since_last = current_time - prev_event_time
+            if gap_since_last >= 500:
+                new_e['Time'] = current_time + rng.randint(200, 600)
+        prev_event_time = int(new_e.get('Time', 0))
+        varied.append(new_e)
+    return varied
+
+def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
+    if target_zones is None:
+        target_zones = []
+    if excluded_zones is None:
+        excluded_zones = []
+    jittered, jitter_range = [], [-1, 0, 1]
+    for e in events:
+        new_e = deepcopy(e)
+        if is_protected_event(e):
+            jittered.append(new_e)
+            continue
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+            try:
+                original_x, original_y = int(e['X']), int(e['Y'])
+                in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
+                if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
+                    new_e['X'] = original_x + rng.choice(jitter_range)
+                    new_e['Y'] = original_y + rng.choice(jitter_range)
+                new_e['Time'] = int(e.get('Time', 0))
+            except:
+                pass
+        jittered.append(new_e)
+    return jittered
+
+def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
+    if not events:
+        return events, 0.0
+    if is_exempted:
+        return deepcopy(events), 0.0
+    if rng.random() < 0.20:
+        return deepcopy(events), 0.0
+    evs = deepcopy(events)
+    n = len(evs)
+    if n < 2:
+        return evs, 0.0
+    num_pauses = rng.randint(0, 3)
+    if num_pauses == 0:
+        return evs, 0.0
+    click_times = []
+    for i, e in enumerate(evs):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click:
+            click_time = int(e.get('Time', 0))
+            click_times.append((i, click_time))
+    safe_locations = []
+    for gap_idx in range(n - 1):
+        event_time = int(evs[gap_idx].get('Time', 0))
+        is_safe = True
+        for click_idx, click_time in click_times:
+            if click_idx <= gap_idx and (event_time - click_time) < 1000:
+                is_safe = False
+                break
+        if is_safe:
+            safe_locations.append(gap_idx)
+    if not safe_locations:
+        return evs, 0.0
+    num_pauses = min(num_pauses, len(safe_locations))
+    pause_locations = rng.sample(safe_locations, num_pauses)
+    for gap_idx in sorted(pause_locations, reverse=True):
+        pause_ms = rng.randint(0, 72000)
+        for j in range(gap_idx + 1, n):
+            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+    return evs, 0.0
+
+def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
+    if not events:
+        return deepcopy(events), []
+    evs = deepcopy(events)
+    n = len(evs)
+    if n < 2:
+        return evs, []
+    if not is_exempted:
+        return evs, []
+    num_pauses = rng.randint(0, max_num_pauses)
+    if num_pauses == 0:
+        return evs, []
+    click_times = []
+    for i, e in enumerate(evs):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click:
+            click_time = int(e.get('Time', 0))
+            click_times.append((i, click_time))
+    safe_locations = []
+    for gap_idx in range(n - 1):
+        event_time = int(evs[gap_idx].get('Time', 0))
+        is_safe = True
+        for click_idx, click_time in click_times:
+            if click_idx <= gap_idx and (event_time - click_time) < 1000:
+                is_safe = False
+                break
+        if is_safe:
+            safe_locations.append(gap_idx)
+    if not safe_locations:
+        return evs, []
+    num_pauses = min(num_pauses, len(safe_locations))
+    chosen = rng.sample(safe_locations, num_pauses)
+    pauses_info = []
+    for gap_idx in sorted(chosen):
+        pause_ms = rng.randint(0, int(max_pause_s * 1000))
+        for j in range(gap_idx+1, n):
+            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+        pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
+    return evs, pauses_info
+
+def add_afk_pause(events, rng):
+    if not events:
+        return deepcopy(events)
+    evs = deepcopy(events)
+    if rng.random() < 0.7:
+        afk_seconds = rng.randint(60, 300)
+    else:
+        afk_seconds = rng.randint(300, 1200)
+    afk_ms = afk_seconds * 1000
+    insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
+    for j in range(insert_idx, len(evs)):
+        evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
+    return evs
+
+def apply_shifts(events, shift_ms):
+    result = []
+    for e in events:
+        new_e = deepcopy(e)
+        new_e['Time'] = int(e.get('Time', 0)) + int(shift_ms)
+        result.append(new_e)
+    return result
+
 # --- main CLI ---
 def main():
     parser = argparse.ArgumentParser()
@@ -393,7 +661,7 @@ def main():
     parser.add_argument("--batch-index", type=int, default=0)
     parser.add_argument("--batch-count", type=int, default=1)
     parser.add_argument("--group", choices=["mobile", "desktop", "all"], default="all")
-    parser.add_argument("--top-level-only", action="store_true", default=True, help="Only treat immediate children of input-dir as groups")
+    parser.add_argument("--top-level-only", action="store_true", default=True)
     parser.add_argument("--dry-run", action="store_true", help="List discovered folders and exit")
     args = parser.parse_args()
 
@@ -516,7 +784,6 @@ def main():
 
     write_manifest(manifest, output_root, counter)
 
-    # Create per-group ZIPs at repository root so CI upload step can find them reliably
     groups = defaultdict(list)
     for p in all_written:
         try:
@@ -528,9 +795,7 @@ def main():
 
     for group_name, paths in groups.items():
         zip_name = f"merged_bundle_{counter}_{group_name}.zip"
-        zip_path = output_parent.parent.joinpath(zip_name) if output_parent.parent else Path(zip_name)
-        # ensure zip path is repo root
-        zip_path = Path(zip_name).resolve() if False else Path(zip_name)
+        zip_path = Path(zip_name)
         try:
             with ZipFile(zip_path, "w") as zf:
                 for p in paths:
