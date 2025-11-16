@@ -2,11 +2,11 @@
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness
 
 Patched to:
-- make filenames safe and bounded (make_filename_safe)
-- provide safe fallback write on OSError
-- record a manifest mapping attempted descriptive names -> actual written filenames
-- handle SIGINT/SIGTERM to write manifest on cancellation
-- return base descriptive name from generate_version_for_folder so manifest can include it
+- make filenames safe and bounded
+- safe fallback write on OSError
+- manifest mapping attempted descriptive names -> actual written filenames
+- signal handling to write manifest on cancellation
+- create one zip per top-level output group (e.g. MOBILE, deskt- osrs) instead of a single combined zip
 """
 
 from pathlib import Path
@@ -14,6 +14,7 @@ import argparse, json, random, re, sys, os, math, hashlib, time, signal
 from copy import deepcopy
 from zipfile import ZipFile
 from itertools import combinations, permutations
+from collections import defaultdict
 
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
@@ -28,14 +29,12 @@ def _signal_handler(signum, frame):
     # Raise KeyboardInterrupt to unwind gracefully
     raise KeyboardInterrupt(f"Received signal {signum}")
 
-# Register handlers for SIGINT and SIGTERM (works on Unix)
+# Register handlers for SIGINT/SIGTERM (works on Unix)
 signal.signal(signal.SIGINT, _signal_handler)
 try:
     signal.signal(signal.SIGTERM, _signal_handler)
 except Exception:
-    # some environments may not support setting SIGTERM handler
     pass
-
 
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
@@ -131,37 +130,23 @@ def find_json_files_in_dir(dirpath: Path):
         return []
 
 def load_json_events(path: Path):
-    """
-    CRITICAL: Load events WITHOUT any modifications.
-    Preserves original click structure including button states.
-    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         print(f"WARNING: Failed to read {path}: {e}", file=sys.stderr)
         return []
-    
     if isinstance(data, dict):
         for k in ("events", "items", "entries", "records", "actions"):
             if k in data and isinstance(data[k], list):
-                # Return EXACT copy - don't modify anything
                 return deepcopy(data[k])
         if "Time" in data:
             return [deepcopy(data)]
         return []
-    
     return deepcopy(data) if isinstance(data, list) else []
 
 def zero_base_events(events):
-    """
-    CRITICAL: Normalizes timestamps to start at 0, preserves event order.
-    Does NOT modify event structure, only shifts Time values.
-    This function does a stable sort by (Time, original_index) to avoid
-    reordering events that share the same timestamp (prevents Down/Up flips).
-    """
     if not events:
         return [], 0
-    
     events_with_time = []
     for idx, e in enumerate(events):
         try:
@@ -172,53 +157,33 @@ def zero_base_events(events):
             except:
                 t = 0
         events_with_time.append((e, t, idx))
-    
-    # Sort by time, then by original index to keep stable ordering for equal times
     try:
         events_with_time.sort(key=lambda x: (x[1], x[2]))
     except Exception as ex:
         print(f"WARNING: Could not sort events: {ex}", file=sys.stderr)
-    
     if not events_with_time:
         return [], 0
-    
     min_t = events_with_time[0][1]
     shifted = []
-    
     for (e, t, _) in events_with_time:
         ne = deepcopy(e)
-        # Shift time to start from 0
         ne["Time"] = t - min_t
         shifted.append(ne)
-    
     duration_ms = shifted[-1]["Time"] if shifted else 0
     return shifted, duration_ms
 
 def preserve_click_integrity(events):
-    """
-    CRITICAL: Ensures click events remain intact.
-    Some recorders use MouseDown/MouseUp pairs - we must preserve their timing.
-    """
     preserved = []
-    
     for i, e in enumerate(events):
         new_e = deepcopy(e)
-        
-        # Check if this is part of a click sequence
         event_type = e.get('Type', '')
-        
-        # Preserve these EXACTLY as recorded
         if any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
-            # Don't modify button press/release events AT ALL
-            new_e['Time'] = int(e.get('Time', 0))  # Keep exact timing
-            new_e['PROTECTED'] = True  # Mark as protected
-        
+            new_e['Time'] = int(e.get('Time', 0))
+            new_e['PROTECTED'] = True
         preserved.append(new_e)
-    
     return preserved
 
 def is_protected_event(event):
-    """Check if event is marked as protected (click down/up)"""
     return event.get('PROTECTED', False)
 
 def compute_minutes_from_ms(ms: int):
@@ -235,34 +200,21 @@ def number_to_letters(n: int) -> str:
     return letters
 
 def part_from_filename(path: str) -> str:
-    """
-    Extract a reasonable 'part' name from a filename or path.
-    Default: return the filename stem (without extension).
-    """
     try:
         return Path(str(path)).stem
     except:
         return str(path)
 
 def make_filename_safe(name: str, max_filename_len: int = 120) -> str:
-    """
-    Produce a filesystem-safe filename (no invalid characters) and ensure it
-    is at most max_filename_len characters long. If truncation is required,
-    append an 8-char hash suffix to preserve uniqueness.
-    """
     if name is None:
         name = ""
-    # remove invalid chars
     cleaned = ''.join(ch for ch in name if ch not in '/\\:*?"<>|')
-    # collapse whitespace
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     if len(cleaned) <= max_filename_len:
         return cleaned
-    # truncate with hash
     h = hashlib.sha1(cleaned.encode('utf-8')).hexdigest()[:8]
     keep = max_filename_len - len(h) - 1
     if keep <= 0:
-        # fallback to just hash if max length too small
         return h
     prefix = cleaned[:keep].rstrip()
     return f"{prefix}_{h}"
@@ -524,10 +476,6 @@ def locate_special_file(folder: Path, input_root: Path):
     return None
 
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None):
-    """
-    Returns:
-        safe_filename (str), base_name (descriptive, unsanitized), merged_events (list), finals, pause_info, excluded, total_minutes
-    """
     if not files:
         return None, None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
@@ -592,41 +540,27 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             is_desktop = "deskt" in str(folder_path).lower()
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
             is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
-            
-            # CRITICAL: Preserve click integrity first
             zb_evs = preserve_click_integrity(zb_evs)
-            
             if not is_desktop:
-                # Mobile: No mouse paths, just timing variations
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
-                # Re-normalize after timing changes
                 zb_evs, _ = zero_base_events(zb_evs)
-                # Apply AFK pauses LAST (after all timing is settled)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
-                # Desktop: Add mouse paths FIRST (before click), then timing variations
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                # Re-normalize after mouse paths
                 zb_evs, _ = zero_base_events(zb_evs)
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
-                # Re-normalize after timing changes
                 zb_evs, _ = zero_base_events(zb_evs)
-                # Apply AFK pauses LAST (after all timing is settled)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
-            
-            # Final normalization before adding intra pauses
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
-            
             if is_exempted:
                 if not exemption_config.get("disable_intra_pauses", False):
                     intra_evs, _ = insert_intra_pauses(zb_evs, rng, is_exempted=True, max_pause_s=within_max_s, max_num_pauses=within_max_pauses)
                 else:
                     intra_evs = zb_evs
-                
                 if not exemption_config.get("disable_afk", False) and rng.random() < 0.5:
                     intra_evs = add_afk_pause(intra_evs, rng)
             else:
@@ -680,7 +614,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     
     tag_prefix = f"{tag} - " if tag else ""
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
-    # make a bounded filesystem-safe filename
     safe_name = make_filename_safe(base_name, max_filename_len=120)
     return f"{safe_name}.json", base_name, merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
@@ -723,7 +656,6 @@ def main():
         print(f"ERROR parsing time: {e}", file=sys.stderr)
         return
 
-    # manifest entries will store mapping and metadata for each produced file
     manifest = []
     all_written_paths = []
     exemption_config = load_exemption_config()
@@ -769,7 +701,6 @@ def main():
                     print(f"WROTE: {out_path}")
                     all_written_paths.append(out_path)
                 except OSError as e:
-                    # handle too-long filenames and other filesystem errors gracefully
                     entry["error"] = f"OSError: {e}"
                     print(f"WARNING: Failed to write {out_path}: {e}", file=sys.stderr)
                     try:
@@ -790,12 +721,10 @@ def main():
                     print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
                 manifest.append(entry)
 
-            # periodically write manifest so progress is preserved in long runs
             _write_manifest(manifest, output_root, counter)
 
     except KeyboardInterrupt as ki:
         print(f"INFO: Run interrupted: {ki}", file=sys.stderr)
-        # write manifest before exiting
         _write_manifest(manifest, output_root, counter)
         print("INFO: Manifest written after interrupt. Exiting.", file=sys.stderr)
         return
@@ -804,23 +733,37 @@ def main():
         _write_manifest(manifest, output_root, counter)
         raise
 
-    # Final manifest write
     _write_manifest(manifest, output_root, counter)
 
-    # try creating zip archive of all written files (skip if none)
+    # Create separate ZIP files per top-level group under output_root (e.g., MOBILE, deskt- osrs)
     try:
-        zip_path = output_parent / f"{output_base_name}.zip"
-        with ZipFile(zip_path, "w") as zf:
-            for fpath in all_written_paths:
-                try:
-                    arcname = str(fpath.relative_to(output_parent))
-                except:
-                    arcname = f"{output_base_name}/{fpath.name}"
-                zf.write(fpath, arcname=arcname)
-        print(f"DONE. Created: {zip_path}")
+        groups = defaultdict(list)
+        for fpath in all_written_paths:
+            try:
+                rel = fpath.relative_to(output_root)
+                first = rel.parts[0] if rel.parts else "root"
+            except Exception:
+                # fallback: use parent folder name
+                first = fpath.parent.name or "root"
+            groups[first].append(fpath)
+
+        # For each group, create a zip file containing that group's files
+        for group_name, paths in groups.items():
+            try:
+                zip_name = f"{output_base_name}_{group_name}.zip"
+                zip_path = output_parent / zip_name
+                with ZipFile(zip_path, "w") as zf:
+                    for p in paths:
+                        try:
+                            arcname = str(p.relative_to(output_parent))
+                        except Exception:
+                            arcname = f"{output_base_name}/{p.name}"
+                        zf.write(p, arcname=arcname)
+                print(f"DONE. Created group ZIP: {zip_path}")
+            except Exception as e:
+                print(f"WARNING: Failed to create ZIP for group {group_name}: {e}", file=sys.stderr)
     except Exception as e:
-        print(f"WARNING: Failed to create ZIP archive: {e}", file=sys.stderr)
-        print("Completed file writes but skipping ZIP creation.", file=sys.stderr)
+        print(f"WARNING: Failed to create group ZIPs: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
