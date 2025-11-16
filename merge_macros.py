@@ -2,7 +2,7 @@
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
 
 from pathlib import Path
-import argparse, json, random, re, sys, os, math
+import argparse, json, random, re, sys, os, math, hashlib
 from copy import deepcopy
 from zipfile import ZipFile
 from itertools import combinations, permutations
@@ -218,6 +218,34 @@ def part_from_filename(path: str) -> str:
         return Path(str(path)).stem
     except:
         return str(path)
+
+def make_filename_safe(name: str, max_filename_len: int = 120) -> str:
+    """
+    Produce a filesystem-safe filename (no invalid characters) and ensure it
+    is at most max_filename_len characters long. If truncation is required,
+    append an 8-char hash suffix to preserve uniqueness.
+
+    - Removes characters invalid in filenames: / \ : * ? " < > |
+    - Collapses multiple whitespace to single space and trims.
+    - If the cleaned name fits max_filename_len, returns it as-is.
+    - If not, returns <prefix>_<hash>.
+    """
+    if name is None:
+        name = ""
+    # remove invalid chars
+    cleaned = ''.join(ch for ch in name if ch not in '/\\:*?"<>|')
+    # collapse whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    if len(cleaned) <= max_filename_len:
+        return cleaned
+    # truncate with hash
+    h = hashlib.sha1(cleaned.encode('utf-8')).hexdigest()[:8]
+    keep = max_filename_len - len(h) - 1
+    if keep <= 0:
+        # fallback to just hash if max length too small
+        return h
+    prefix = cleaned[:keep].rstrip()
+    return f"{prefix}_{h}"
 
 def add_desktop_mouse_paths(events, rng):
     """
@@ -714,7 +742,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     
     tag_prefix = f"{tag} - " if tag else ""
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {' - '.join(parts)}"
-    safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
+    # make a bounded filesystem-safe filename
+    safe_name = make_filename_safe(base_name, max_filename_len=120)
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
 def main():
@@ -768,7 +797,20 @@ def main():
                 out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"WROTE: {out_path}")
                 all_written_paths.append(out_path)
+            except OSError as e:
+                # Log original failure and attempt a short hashed fallback filename
+                print(f"WARNING: Failed to write {out_path}: {e}", file=sys.stderr)
+                try:
+                    content_hash = hashlib.sha1(json.dumps(merged_events, ensure_ascii=False).encode('utf-8')).hexdigest()[:12]
+                    fallback_name = f"merged_{content_hash}.json"
+                    fallback_path = out_folder_for_group / fallback_name
+                    fallback_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
+                    print(f"WROTE (fallback): {fallback_path}")
+                    all_written_paths.append(fallback_path)
+                except Exception as e2:
+                    print(f"ERROR: fallback write failed for {out_path}: {e2}", file=sys.stderr)
             except Exception as e:
+                # non-OS error: log it
                 print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
     
     zip_path = output_parent / f"{output_base_name}.zip"
