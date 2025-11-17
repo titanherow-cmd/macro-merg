@@ -202,42 +202,47 @@ def part_from_filename(path: str) -> str:
 
 def add_desktop_mouse_paths(events, rng):
     """
-    CRITICAL FIX: Adds mouse movement BEFORE clicks with GUARANTEED chronological order.
-    The bug was: mouse paths were inserted with timestamps that could end up AFTER the click
-    when events were re-sorted, breaking the click sequence.
+    CRITICAL FIX v2: Adds mouse movement BEFORE clicks WITHOUT breaking event order.
     
-    FIX: Calculate movement timestamps relative to PREVIOUS event, not the click itself.
+    THE BUG: Inserting events while iterating caused MouseMove events to appear
+    out of order after re-sorting. Event at Time 508 appeared at Time 569!
+    
+    THE FIX: Build a list of (insert_before_index, new_event) pairs, then
+    insert them in reverse order so indices don't shift.
     """
-    enhanced = []
-    last_x, last_y = None, None
-    last_time = 0
+    if not events:
+        return events
     
-    for e in deepcopy(events):
+    events_copy = deepcopy(events)
+    insertions = []  # List of (index, event) pairs to insert
+    last_x, last_y = None, None
+    
+    for idx, e in enumerate(events_copy):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
         is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
         is_mouse_move = e.get('Type') == 'MouseMove'
         
-        current_time = int(e.get('Time', 0))
-        
         if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 target_x, target_y = int(e['X']), int(e['Y'])
+                click_time = int(e.get('Time', 0))
                 
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
                     
                     if distance > 30:
+                        # Find the previous event's time
+                        prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
+                        available_time = click_time - prev_time
+                        
                         num_points = rng.randint(3, 5)
                         movement_duration = int(100 + distance * 0.25)
                         movement_duration = min(movement_duration, 400)
                         
-                        # CRITICAL FIX: Calculate available time window
-                        available_time = current_time - last_time
-                        
-                        # Only add mouse paths if we have enough time
-                        if available_time > movement_duration:
-                            # Start movement from last_time, end BEFORE current click
-                            movement_start = current_time - movement_duration
+                        # Only add paths if we have enough time window
+                        if available_time > movement_duration + 10:  # +10ms safety margin
+                            # Calculate movement window BEFORE the click
+                            movement_start = click_time - movement_duration
                             
                             for i in range(1, num_points + 1):
                                 t = i / (num_points + 1)
@@ -246,23 +251,23 @@ def add_desktop_mouse_paths(events, rng):
                                 inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
                                 inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
                                 
-                                # CRITICAL: Ensure point_time is ALWAYS between last_time and current_time
+                                # CRITICAL: Timestamp must be STRICTLY between prev_time and click_time
                                 point_time = movement_start + int(movement_duration * t_smooth)
-                                point_time = max(last_time + 1, min(point_time, current_time - 1))
+                                point_time = max(prev_time + 1, min(point_time, click_time - 1))
                                 
-                                enhanced.append({
+                                new_event = {
                                     'Time': point_time,
                                     'Type': 'MouseMove',
                                     'X': inter_x,
                                     'Y': inter_y
-                                })
+                                }
+                                
+                                # Store (index_to_insert_before, event)
+                                insertions.append((idx, new_event))
                 
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
-        
-        enhanced.append(e)
-        last_time = current_time
         
         if is_mouse_move and 'X' in e and 'Y' in e:
             try:
@@ -275,7 +280,11 @@ def add_desktop_mouse_paths(events, rng):
             except:
                 pass
     
-    return enhanced
+    # CRITICAL: Insert in REVERSE order so indices don't shift
+    for insert_idx, new_event in reversed(insertions):
+        events_copy.insert(insert_idx, new_event)
+    
+    return events_copy
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     result = []
