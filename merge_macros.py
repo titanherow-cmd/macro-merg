@@ -201,40 +201,68 @@ def part_from_filename(path: str) -> str:
         return str(path)
 
 def add_desktop_mouse_paths(events, rng):
-    """Adds mouse movement BEFORE clicks only."""
-    enhanced, last_x, last_y = [], None, None
+    """
+    CRITICAL FIX: Adds mouse movement BEFORE clicks with GUARANTEED chronological order.
+    The bug was: mouse paths were inserted with timestamps that could end up AFTER the click
+    when events were re-sorted, breaking the click sequence.
+    
+    FIX: Calculate movement timestamps relative to PREVIOUS event, not the click itself.
+    """
+    enhanced = []
+    last_x, last_y = None, None
+    last_time = 0
     
     for e in deepcopy(events):
         is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
         is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
         is_mouse_move = e.get('Type') == 'MouseMove'
         
+        current_time = int(e.get('Time', 0))
+        
         if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
-                target_x, target_y, click_time = int(e['X']), int(e['Y']), int(e.get('Time', 0))
+                target_x, target_y = int(e['X']), int(e['Y'])
                 
                 if last_x is not None and last_y is not None:
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+                    
                     if distance > 30:
                         num_points = rng.randint(3, 5)
                         movement_duration = int(100 + distance * 0.25)
                         movement_duration = min(movement_duration, 400)
                         
-                        for i in range(1, num_points + 1):
-                            t = i / (num_points + 1)
-                            t_smooth = t * t * (3 - 2 * t)
-                            inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
-                            inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
-                            point_time = click_time - movement_duration + int(movement_duration * t_smooth)
+                        # CRITICAL FIX: Calculate available time window
+                        available_time = current_time - last_time
+                        
+                        # Only add mouse paths if we have enough time
+                        if available_time > movement_duration:
+                            # Start movement from last_time, end BEFORE current click
+                            movement_start = current_time - movement_duration
                             
-                            if point_time < click_time:
-                                enhanced.append({'Time': max(0, point_time), 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y})
+                            for i in range(1, num_points + 1):
+                                t = i / (num_points + 1)
+                                t_smooth = t * t * (3 - 2 * t)
+                                
+                                inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
+                                inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                                
+                                # CRITICAL: Ensure point_time is ALWAYS between last_time and current_time
+                                point_time = movement_start + int(movement_duration * t_smooth)
+                                point_time = max(last_time + 1, min(point_time, current_time - 1))
+                                
+                                enhanced.append({
+                                    'Time': point_time,
+                                    'Type': 'MouseMove',
+                                    'X': inter_x,
+                                    'Y': inter_y
+                                })
                 
                 last_x, last_y = target_x, target_y
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
         
         enhanced.append(e)
+        last_time = current_time
         
         if is_mouse_move and 'X' in e and 'Y' in e:
             try:
@@ -534,7 +562,7 @@ def locate_special_file(folder: Path, input_root: Path):
 
 def select_files_for_target_duration(files, rng, selector, target_minutes=25, max_files=4):
     """
-    NEW: Select files to reach target duration (~25 min) with max 4 files.
+    Select files to reach target duration (~25 min) with max 4 files.
     Uses non-repeating selection logic.
     """
     if not files or max_files <= 0:
@@ -567,7 +595,7 @@ def select_files_for_target_duration(files, rng, selector, target_minutes=25, ma
 
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25, max_files_per_version=4):
     """
-    Reverted to original structure but with smart file selection based on target duration.
+    Generate a merged version with smart file selection and FIXED mouse path timing.
     """
     if not files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
@@ -579,7 +607,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     if not regular_files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
-    # NEW: Select files to reach target duration
+    # Select files to reach target duration
     selected_files = select_files_for_target_duration(regular_files, rng, selector, target_minutes, max_files_per_version)
     
     if not selected_files:
@@ -647,7 +675,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
             is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
-            # CRITICAL: Preserve click integrity FIRST - this prevents click-to-drag bug
+            # CRITICAL: Preserve click integrity FIRST
             zb_evs = preserve_click_integrity(zb_evs)
             
             if not is_desktop:
@@ -655,19 +683,23 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
                 
+                # Re-normalize after modifications
                 zb_evs, _ = zero_base_events(zb_evs)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
+                # CRITICAL FIX: Add mouse paths FIRST, then re-normalize to ensure order
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                zb_evs, _ = zero_base_events(zb_evs)
+                zb_evs, _ = zero_base_events(zb_evs)  # Re-sort after adding mouse paths
                 
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
                 
+                # Re-normalize after modifications
                 zb_evs, _ = zero_base_events(zb_evs)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             
+            # Final normalization
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
             
             if is_exempted:
@@ -718,11 +750,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             continue
         
         fname = Path(f).name.lower()
-        # FIXED: Check for special files and use correct lowercase labels
+        # Check for special files and use correct lowercase labels
         if fname.startswith("always first"):
-            part_name = "first"  # lowercase for parts list
+            part_name = "first"
         elif fname.startswith("always last"):
-            part_name = "last"  # lowercase for parts list
+            part_name = "last"
         else:
             part_name = part_from_filename(f)
         
@@ -733,11 +765,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     tag = ""
     
     if use_special_file == always_first_file and always_first_file is not None:
-        tag = "FIRST"  # Already uppercase
+        tag = "FIRST"
     elif use_special_file == always_last_file and always_last_file is not None:
-        tag = "LAST"  # Already uppercase
+        tag = "LAST"
     
-    # FIXED: Ensure tag stays uppercase in prefix
+    # Ensure tag stays uppercase in prefix
     tag_prefix = f"{tag} - " if tag else ""
     
     # Build filename with smart truncation
