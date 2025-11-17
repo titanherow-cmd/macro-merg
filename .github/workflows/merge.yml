@@ -23,10 +23,14 @@ on:
         description: 'Max files to randomly exclude per version'
         required: true
         default: '10'
-      target_duration:
-        description: 'Target duration per output file in minutes (flexible 40-60 min range)'
+      target_minutes:
+        description: 'Target duration per merged file in minutes'
         required: true
-        default: '50'
+        default: '25'
+      max_files:
+        description: 'Maximum files to merge per version'
+        required: true
+        default: '4'
       exempted_folders:
         description: 'Folders to exempt from pause/AFK rules (comma-separated folder paths, or leave empty for none)'
         required: false
