@@ -688,27 +688,24 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             zb_evs = preserve_click_integrity(zb_evs)
             
             if not is_desktop:
-                zb_evs = add_micro_pauses(zb_evs, rng)
-                zb_evs = add_reaction_variance(zb_evs, rng)
+                # Mobile: only spatial modifications (no mouse paths)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
                 
-                # Re-normalize after modifications
-                zb_evs, _ = zero_base_events(zb_evs)
-                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
-            else:
-                # CRITICAL FIX: Add mouse paths FIRST, then re-normalize to ensure order
-                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                zb_evs, _ = zero_base_events(zb_evs)  # Re-sort after adding mouse paths
-                
+                # Time modifications
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
+                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
+            else:
+                # Desktop: spatial modifications first (jitter + mouse paths)
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
+                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
                 
-                # Re-normalize after modifications
-                zb_evs, _ = zero_base_events(zb_evs)
+                # Time modifications AFTER spatial changes
+                zb_evs = add_micro_pauses(zb_evs, rng)
+                zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             
-            # Final normalization
+            # CRITICAL: Single final normalization after ALL modifications
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
             
             if is_exempted:
