@@ -202,85 +202,102 @@ def part_from_filename(path: str) -> str:
 
 def add_desktop_mouse_paths(events, rng):
     """
-    CRITICAL FIX v2: Adds mouse movement BEFORE clicks WITHOUT breaking event order.
+    CRITICAL FIX v3: Never insert MouseMove between MouseDown/MouseUp pairs!
     
-    THE BUG: Inserting events while iterating caused MouseMove events to appear
-    out of order after re-sorting. Event at Time 508 appeared at Time 569!
+    THE BUG: Inserting MouseMove events between MouseDown and MouseUp breaks
+    the click sequence and turns clicks into drags.
     
-    THE FIX: Build a list of (insert_before_index, new_event) pairs, then
-    insert them in reverse order so indices don't shift.
+    THE FIX: Only insert mouse paths BEFORE simple Click events, never between
+    button press/release pairs.
     """
     if not events:
         return events
     
     events_copy = deepcopy(events)
+    
+    # First pass: Identify all MouseDown/MouseUp pairs to protect them
+    protected_ranges = []
+    i = 0
+    while i < len(events_copy):
+        event_type = events_copy[i].get('Type', '')
+        
+        # Check if this is a button press event
+        if any(t in event_type for t in ['MouseDown', 'LeftDown', 'RightDown']):
+            # Find the matching release event
+            for j in range(i + 1, len(events_copy)):
+                next_type = events_copy[j].get('Type', '')
+                if any(t in next_type for t in ['MouseUp', 'LeftUp', 'RightUp']):
+                    # Protect this range [i, j] inclusive
+                    protected_ranges.append((i, j))
+                    i = j  # Skip to after the MouseUp
+                    break
+        i += 1
+    
     insertions = []  # List of (index, event) pairs to insert
     last_x, last_y = None, None
     
     for idx, e in enumerate(events_copy):
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick']
-        is_drag = e.get('Type') in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag']
-        is_mouse_move = e.get('Type') == 'MouseMove'
+        event_type = e.get('Type', '')
+        is_click = event_type in ['Click', 'LeftClick', 'RightClick']
+        is_drag = any(t in event_type for t in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag'])
+        is_mouse_move = event_type == 'MouseMove'
+        is_button_event = any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
         
-        if is_click and not is_drag and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
-            try:
-                target_x, target_y = int(e['X']), int(e['Y'])
-                click_time = int(e.get('Time', 0))
-                
-                if last_x is not None and last_y is not None:
-                    distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+        # CRITICAL: Check if this index is within a protected range
+        in_protected_range = any(start <= idx <= end for start, end in protected_ranges)
+        
+        # Only add mouse paths for simple Click events, NOT for button press/release
+        if is_click and not is_drag and not is_button_event and not in_protected_range:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    target_x, target_y = int(e['X']), int(e['Y'])
+                    click_time = int(e.get('Time', 0))
                     
-                    if distance > 30:
-                        # Find the previous event's time
-                        prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
-                        available_time = click_time - prev_time
+                    if last_x is not None and last_y is not None:
+                        distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
                         
-                        num_points = rng.randint(3, 5)
-                        movement_duration = int(100 + distance * 0.25)
-                        movement_duration = min(movement_duration, 400)
-                        
-                        # Only add paths if we have enough time window
-                        if available_time > movement_duration + 10:  # +10ms safety margin
-                            # Calculate movement window BEFORE the click
-                            movement_start = click_time - movement_duration
+                        if distance > 30:
+                            prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
+                            available_time = click_time - prev_time
                             
-                            for i in range(1, num_points + 1):
-                                t = i / (num_points + 1)
-                                t_smooth = t * t * (3 - 2 * t)
+                            num_points = rng.randint(3, 5)
+                            movement_duration = int(100 + distance * 0.25)
+                            movement_duration = min(movement_duration, 400)
+                            
+                            if available_time > movement_duration + 10:
+                                movement_start = click_time - movement_duration
                                 
-                                inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
-                                inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
-                                
-                                # CRITICAL: Timestamp must be STRICTLY between prev_time and click_time
-                                point_time = movement_start + int(movement_duration * t_smooth)
-                                point_time = max(prev_time + 1, min(point_time, click_time - 1))
-                                
-                                new_event = {
-                                    'Time': point_time,
-                                    'Type': 'MouseMove',
-                                    'X': inter_x,
-                                    'Y': inter_y
-                                }
-                                
-                                # Store (index_to_insert_before, event)
-                                insertions.append((idx, new_event))
-                
-                last_x, last_y = target_x, target_y
-            except Exception as ex:
-                print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
+                                for i in range(1, num_points + 1):
+                                    t = i / (num_points + 1)
+                                    t_smooth = t * t * (3 - 2 * t)
+                                    
+                                    inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
+                                    inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                                    
+                                    point_time = movement_start + int(movement_duration * t_smooth)
+                                    point_time = max(prev_time + 1, min(point_time, click_time - 1))
+                                    
+                                    new_event = {
+                                        'Time': point_time,
+                                        'Type': 'MouseMove',
+                                        'X': inter_x,
+                                        'Y': inter_y
+                                    }
+                                    
+                                    insertions.append((idx, new_event))
+                    
+                    last_x, last_y = target_x, target_y
+                except Exception as ex:
+                    print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
         
-        if is_mouse_move and 'X' in e and 'Y' in e:
-            try:
-                last_x, last_y = int(e['X']), int(e['Y'])
-            except:
-                pass
-        elif is_drag and 'X' in e and 'Y' in e:
+        # Track cursor position from all movement events
+        if (is_mouse_move or is_click or is_drag) and 'X' in e and 'Y' in e:
             try:
                 last_x, last_y = int(e['X']), int(e['Y'])
             except:
                 pass
     
-    # CRITICAL: Insert in REVERSE order so indices don't shift
+    # Insert in REVERSE order so indices don't shift
     for insert_idx, new_event in reversed(insertions):
         events_copy.insert(insert_idx, new_event)
     
