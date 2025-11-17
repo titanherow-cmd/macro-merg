@@ -105,10 +105,7 @@ def find_json_files_in_dir(dirpath: Path):
         return []
 
 def load_json_events(path: Path):
-    """
-    CRITICAL: Load events WITHOUT any modifications.
-    Preserves original click structure including button states.
-    """
+    """CRITICAL: Load events WITHOUT any modifications."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -126,12 +123,7 @@ def load_json_events(path: Path):
     return deepcopy(data) if isinstance(data, list) else []
 
 def zero_base_events(events):
-    """
-    CRITICAL: Normalizes timestamps to start at 0, preserves event order.
-    Does NOT modify event structure, only shifts Time values.
-    This function does a stable sort by (Time, original_index) to avoid
-    reordering events that share the same timestamp (prevents Down/Up flips).
-    """
+    """CRITICAL: Normalizes timestamps, stable sort by (time, index)."""
     if not events:
         return [], 0
     
@@ -165,10 +157,7 @@ def zero_base_events(events):
     return shifted, duration_ms
 
 def preserve_click_integrity(events):
-    """
-    CRITICAL: Ensures click events remain intact.
-    Some recorders use MouseDown/MouseUp pairs - we must preserve their timing.
-    """
+    """CRITICAL FIX: Mark click events as protected but return ALL events."""
     preserved = []
     for i, e in enumerate(events):
         new_e = deepcopy(e)
@@ -183,7 +172,7 @@ def preserve_click_integrity(events):
     return preserved
 
 def is_protected_event(event):
-    """Check if event is marked as protected (click down/up)"""
+    """Check if event is marked as protected"""
     return event.get('PROTECTED', False)
 
 def compute_minutes_from_ms(ms: int):
@@ -200,17 +189,14 @@ def number_to_letters(n: int) -> str:
     return letters
 
 def part_from_filename(path: str) -> str:
-    """Extract a reasonable 'part' name from a filename or path."""
+    """Extract filename stem"""
     try:
         return Path(str(path)).stem
     except:
         return str(path)
 
 def add_desktop_mouse_paths(events, rng):
-    """
-    CRITICAL: This function adds mouse movement BEFORE clicks only.
-    Never adds movement during or after clicks to prevent drag interpretation.
-    """
+    """Adds mouse movement BEFORE clicks only."""
     enhanced, last_x, last_y = [], None, None
     
     for e in deepcopy(events):
@@ -305,10 +291,7 @@ def add_reaction_variance(events, rng):
     return varied
 
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
-    """
-    CRITICAL: Only modifies X/Y coordinates, NEVER modifies timing.
-    Skips protected events entirely.
-    """
+    """Only modifies X/Y coordinates, never timing."""
     if target_zones is None:
         target_zones = []
     if excluded_zones is None:
@@ -462,7 +445,6 @@ def add_afk_pause(events, rng):
         afk_seconds = rng.randint(300, 1200)
     
     afk_ms = afk_seconds * 1000
-    
     insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
     
     for j in range(insert_idx, len(evs)):
@@ -545,249 +527,45 @@ def locate_special_file(folder: Path, input_root: Path):
     
     return None
 
-def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_duration_minutes=50):
+def select_files_for_target_duration(files, rng, selector, target_minutes=25, max_files=4):
     """
-    NEW: Now generates multiple output files if content exceeds target duration.
-    Target duration is flexible (40-60 minutes is acceptable range).
+    NEW: Select files to reach target duration (~25 min) with max 4 files.
+    Uses non-repeating selection logic.
+    """
+    if not files or max_files <= 0:
+        return []
+    
+    # Estimate duration for each file (quick check without full processing)
+    file_durations = {}
+    for f in files:
+        try:
+            evs = load_json_events(Path(f))
+            _, base_dur = zero_base_events(evs)
+            # Rough estimate: base duration * 1.3 for overhead
+            file_durations[f] = int(base_dur * 1.3 / 60000)  # Convert to minutes
+        except:
+            file_durations[f] = 5  # Default estimate
+    
+    # Select files to reach target
+    selected = []
+    total_minutes = 0
+    available_files = files.copy()
+    
+    while len(selected) < max_files and available_files and total_minutes < target_minutes:
+        # Pick random file
+        chosen = rng.choice(available_files)
+        selected.append(chosen)
+        total_minutes += file_durations.get(chosen, 5)
+        available_files.remove(chosen)
+    
+    return selected
+
+def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25, max_files_per_version=4):
+    """
+    Reverted to original structure but with smart file selection based on target duration.
     """
     if not files:
-        return [], []  # Return empty lists instead of None
-    
-    always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
-    always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
-    regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
-    
-    if not regular_files:
-        return [], []
-    
-    included, excluded = selector.select_files(regular_files, exclude_count)
-    
-    if not included:
-        included = regular_files.copy()
-    
-    use_special_file = None
-    always_first_exists = always_first_file is not None
-    always_last_exists = always_last_file is not None
-    
-    if always_first_exists and always_last_exists:
-        if version_num == 1 and not selector.is_special_used(str(always_first_file)):
-            use_special_file = always_first_file
-            selector.mark_special_used(str(always_first_file))
-        elif version_num == 2 and not selector.is_special_used(str(always_last_file)):
-            use_special_file = always_last_file
-            selector.mark_special_used(str(always_last_file))
-    elif always_first_exists and not always_last_exists:
-        if version_num == 1 and not selector.is_special_used(str(always_first_file)):
-            use_special_file = always_first_file
-            selector.mark_special_used(str(always_first_file))
-    elif always_last_exists and not always_first_exists:
-        if version_num == 1 and not selector.is_special_used(str(always_last_file)):
-            use_special_file = always_last_file
-            selector.mark_special_used(str(always_last_file))
-    
-    final_files = selector.shuffle_with_memory(included)
-    
-    if use_special_file == always_first_file:
-        final_files.insert(0, always_first_file)
-    elif use_special_file == always_last_file:
-        final_files.append(always_last_file)
-    
-    special_path = locate_special_file(folder_path, input_root)
-    is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
-    
-    if is_mobile_group and special_path is not None:
-        final_files = [f for f in final_files if f is not None and Path(f).resolve() != special_path.resolve()]
-        if final_files:
-            mid_idx = len(final_files) // 2
-            final_files.insert(min(mid_idx + 1, len(final_files)), str(special_path))
-        else:
-            final_files.insert(0, str(special_path))
-            final_files.append(str(special_path))
-    
-    final_files = [f for f in final_files if f is not None]
-    
-    target_zones, excluded_zones = load_click_zones(folder_path)
-    
-    # NEW: Process files into chunks based on target duration
-    target_ms = target_duration_minutes * 60 * 1000
-    min_acceptable_ms = int(target_ms * 0.8)  # 40 minutes minimum
-    max_acceptable_ms = int(target_ms * 1.2)  # 60 minutes maximum
-    
-    output_chunks = []
-    current_chunk_files = []
-    current_chunk_duration = 0
-    
-    print(f"Processing {len(final_files)} files with target duration ~{target_duration_minutes}m per output file...")
-    
-    for idx, fpath in enumerate(final_files):
-        if fpath is None:
-            continue
-        
-        fpath_obj = Path(fpath)
-        is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-        
-        # Quick duration estimate (load and check base duration)
-        evs = load_json_events(fpath_obj)
-        _, file_base_duration = zero_base_events(evs)
-        
-        # Estimate final duration (rough approximation including pauses)
-        # Typical overhead: micro-pauses, reaction variance, fatigue, inter-file gaps
-        estimated_duration = int(file_base_duration * 1.3)  # ~30% overhead estimate
-        
-        # Check if adding this file would exceed max acceptable duration
-        if current_chunk_duration > 0 and (current_chunk_duration + estimated_duration) > max_acceptable_ms:
-            # Current chunk is complete, save it
-            if current_chunk_duration >= min_acceptable_ms or idx == len(final_files) - 1:
-                output_chunks.append(list(current_chunk_files))
-                print(f"  Chunk {len(output_chunks)}: {len(current_chunk_files)} files, ~{compute_minutes_from_ms(current_chunk_duration)}m")
-                current_chunk_files = []
-                current_chunk_duration = 0
-        
-        # Add file to current chunk
-        current_chunk_files.append(fpath)
-        current_chunk_duration += estimated_duration
-    
-    # Don't forget the last chunk
-    if current_chunk_files:
-        output_chunks.append(current_chunk_files)
-        print(f"  Chunk {len(output_chunks)}: {len(current_chunk_files)} files, ~{compute_minutes_from_ms(current_chunk_duration)}m")
-    
-    # Now process each chunk into an actual merged file
-    all_results = []
-    
-    for chunk_idx, chunk_files in enumerate(output_chunks):
-        merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
-        per_file_event_ms, per_file_inter_ms = {}, {}
-        
-        for idx, fpath in enumerate(chunk_files):
-            if fpath is None:
-                continue
-            
-            fpath_obj = Path(fpath)
-            is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-            
-            evs = load_json_events(fpath_obj)
-            zb_evs, file_duration_ms = zero_base_events(evs)
-            
-            if not is_special:
-                is_desktop = "deskt" in str(folder_path).lower()
-                
-                exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
-                is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
-                
-                zb_evs = preserve_click_integrity(zb_evs)
-                
-                if not is_desktop:
-                    zb_evs = add_micro_pauses(zb_evs, rng)
-                    zb_evs = add_reaction_variance(zb_evs, rng)
-                    zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
-                    
-                    zb_evs, _ = zero_base_events(zb_evs)
-                    zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
-                else:
-                    zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                    zb_evs, _ = zero_base_events(zb_evs)
-                    
-                    zb_evs = add_micro_pauses(zb_evs, rng)
-                    zb_evs = add_reaction_variance(zb_evs, rng)
-                    zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
-                    
-                    zb_evs, _ = zero_base_events(zb_evs)
-                    zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
-                
-                zb_evs, file_duration_ms = zero_base_events(zb_evs)
-                
-                if is_exempted:
-                    if not exemption_config.get("disable_intra_pauses", False):
-                        intra_evs, _ = insert_intra_pauses(zb_evs, rng, is_exempted=True, max_pause_s=within_max_s, max_num_pauses=within_max_pauses)
-                    else:
-                        intra_evs = zb_evs
-                    
-                    if not exemption_config.get("disable_afk", False) and rng.random() < 0.5:
-                        intra_evs = add_afk_pause(intra_evs, rng)
-                else:
-                    intra_evs = zb_evs
-                    if rng.random() < 0.5:
-                        intra_evs = add_afk_pause(intra_evs, rng)
-            else:
-                intra_evs = zb_evs
-            
-            per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
-            
-            shifted = apply_shifts(intra_evs, time_cursor)
-            merged.extend(shifted)
-            
-            time_cursor = shifted[-1]["Time"] if shifted else time_cursor
-            
-            if idx < len(chunk_files) - 1:
-                exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
-                is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
-                
-                if is_exempted:
-                    pause_ms = rng.randint(0, int(between_max_s * 1000))
-                else:
-                    pause_ms = rng.randint(1000, 12000)
-                
-                time_cursor += pause_ms
-                per_file_inter_ms[str(fpath_obj)] = pause_ms
-                pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
-            else:
-                per_file_inter_ms[str(fpath_obj)] = 1000
-                time_cursor += 1000
-        
-        total_ms = time_cursor if merged else 0
-        total_minutes = compute_minutes_from_ms(total_ms)
-        
-        # Build filename parts but limit total length
-        parts = []
-        for f in chunk_files:
-            if f is None:
-                continue
-            
-            fname = Path(f).name.lower()
-            if fname.startswith("always first"):
-                part_name = "first"
-            elif fname.startswith("always last"):
-                part_name = "last"
-            else:
-                part_name = part_from_filename(f)
-            
-            minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
-            parts.append(f"{part_name}[{minutes}m]")
-        
-        letters = number_to_letters(version_num or 1)
-        
-        # If multiple chunks, add chunk suffix
-        if len(output_chunks) > 1:
-            chunk_suffix = f"_pt{chunk_idx + 1}of{len(output_chunks)}"
-        else:
-            chunk_suffix = ""
-        
-        tag = ""
-        if use_special_file == always_first_file and always_first_file is not None and chunk_idx == 0:
-            tag = "FIRST"
-        elif use_special_file == always_last_file and always_last_file is not None and chunk_idx == len(output_chunks) - 1:
-            tag = "LAST"
-        
-        tag_prefix = f"{tag} - " if tag else ""
-        
-        # SMART FILENAME: Build full name but truncate if too long
-        parts_str = ' - '.join(parts)
-        base_name = f"{tag_prefix}{letters}{chunk_suffix}_{total_minutes}m= {parts_str}"
-        
-        # Maximum safe filename length
-        MAX_FILENAME_LENGTH = 200
-        
-        if len(base_name) > MAX_FILENAME_LENGTH:
-            # Truncate and add indicator
-            file_count = len(chunk_files)
-            base_name = f"{tag_prefix}{letters}{chunk_suffix}_{total_minutes}m_{file_count}files"
-        
-        safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
-        
-        all_results.append((f"{safe_name}.json", merged, [str(p) for p in chunk_files], pause_info, [str(p) for p in excluded], total_minutes))
-    
-    return all_results, excluded
+        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
     always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
     always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
@@ -796,10 +574,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     if not regular_files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
-    included, excluded = selector.select_files(regular_files, exclude_count)
+    # NEW: Select files to reach target duration
+    selected_files = select_files_for_target_duration(regular_files, rng, selector, target_minutes, max_files_per_version)
     
-    if not included:
-        included = regular_files.copy()
+    if not selected_files:
+        selected_files = regular_files[:max_files_per_version]
     
     use_special_file = None
     always_first_exists = always_first_file is not None
@@ -821,7 +600,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             use_special_file = always_last_file
             selector.mark_special_used(str(always_last_file))
     
-    final_files = selector.shuffle_with_memory(included)
+    final_files = selector.shuffle_with_memory(selected_files)
     
     if use_special_file == always_first_file:
         final_files.insert(0, always_first_file)
@@ -926,7 +705,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     total_ms = time_cursor if merged else 0
     total_minutes = compute_minutes_from_ms(total_ms)
     
-    # Build filename parts but limit total length
+    # Build filename parts
     parts = []
     for f in final_files:
         if f is None:
@@ -953,19 +732,20 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     
     tag_prefix = f"{tag} - " if tag else ""
     
-    # SMART FILENAME: Build full name but truncate if too long
+    # Build filename with smart truncation
     parts_str = ' - '.join(parts)
     base_name = f"{tag_prefix}{letters}_{total_minutes}m= {parts_str}"
     
-    # Maximum safe filename length (most filesystems support 255, we'll use 200 to be safe)
     MAX_FILENAME_LENGTH = 200
     
     if len(base_name) > MAX_FILENAME_LENGTH:
-        # Truncate and add indicator
         file_count = len(final_files)
         base_name = f"{tag_prefix}{letters}_{total_minutes}m_{file_count}files"
     
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
+    
+    # Calculate excluded files for reporting
+    excluded = [f for f in regular_files if f not in selected_files]
     
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
@@ -979,7 +759,8 @@ def main():
     parser.add_argument("--within-max-time", default="33")
     parser.add_argument("--within-max-pauses", type=int, default=2)
     parser.add_argument("--between-max-time", default="18")
-    parser.add_argument("--target-duration", type=int, default=50, help="Target duration per output file in minutes (default: 50)")
+    parser.add_argument("--target-minutes", type=int, default=25, help="Target duration per merged file in minutes")
+    parser.add_argument("--max-files", type=int, default=4, help="Maximum files to merge per version")
     
     args = parser.parse_args()
     
@@ -1026,26 +807,26 @@ def main():
         
         selector = NonRepeatingSelector(rng)
         
+        print(f"Processing folder: {rel_folder} ({len(files)} files available)")
+        
         for v in range(1, max(1, args.versions) + 1):
-            # NEW: Now returns multiple results per version
-            results, excluded = generate_version_for_folder(
+            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
                 files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
-                between_max_s, folder, input_root, selector, exemption_config, target_duration_minutes=args.target_duration
+                between_max_s, folder, input_root, selector, exemption_config, 
+                target_minutes=args.target_minutes, max_files_per_version=args.max_files
             )
             
-            if not results:
+            if not merged_fname:
                 continue
             
-            # Process each result (might be multiple files if content was split)
-            for merged_fname, merged_events, finals, pauses, excluded_list, total_minutes in results:
-                out_path = out_folder_for_group / merged_fname
-                
-                try:
-                    out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
-                    print(f"WROTE: {out_path}")
-                    all_written_paths.append(out_path)
-                except Exception as e:
-                    print(f"ERROR writing {out_path}: {e}", file=sys.stderr)
+            out_path = out_folder_for_group / merged_fname
+            
+            try:
+                out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
+                print(f"  ✓ Version {v}: {merged_fname}")
+                all_written_paths.append(out_path)
+            except Exception as e:
+                print(f"  ✗ ERROR writing {out_path}: {e}", file=sys.stderr)
     
     zip_path = output_parent / f"{output_base_name}.zip"
     with ZipFile(zip_path, "w") as zf:
@@ -1056,7 +837,7 @@ def main():
                 arcname = f"{output_base_name}/{fpath.name}"
             zf.write(fpath, arcname=arcname)
     
-    print(f"DONE. Created: {zip_path}")
+    print(f"\n✅ DONE. Created: {zip_path} ({len(all_written_paths)} files)")
 
 if __name__ == "__main__":
     main()
