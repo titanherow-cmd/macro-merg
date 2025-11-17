@@ -39,7 +39,7 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours maximum (GitHub's limit)
+    timeout-minutes: 360
     permissions:
       contents: write
     
@@ -140,7 +140,8 @@ jobs:
           WITHIN_MAX_PAUSES="${{ github.event.inputs.within_max_pauses }}"
           BETWEEN_MAX_TIME="${{ github.event.inputs.between_max_time }}"
           EXCLUDE_COUNT="${{ github.event.inputs.exclude_count }}"
-          TARGET_DURATION="${{ github.event.inputs.target_duration }}"
+          TARGET_MINUTES="${{ github.event.inputs.target_minutes }}"
+          MAX_FILES="${{ github.event.inputs.max_files }}"
           
           echo "Inputs:"
           echo "  versions=${VERSIONS}"
@@ -148,7 +149,8 @@ jobs:
           echo "  within_max_pauses=${WITHIN_MAX_PAUSES}"
           echo "  between_max_time='${BETWEEN_MAX_TIME}'"
           echo "  exclude_count=${EXCLUDE_COUNT}"
-          echo "  target_duration=${TARGET_DURATION}"
+          echo "  target_minutes=${TARGET_MINUTES}"
+          echo "  max_files=${MAX_FILES}"
           echo "BUNDLE_SEQ='${BUNDLE_SEQ:-(none)}'"
           
           python3 merge_macros.py \
@@ -159,7 +161,8 @@ jobs:
             --within-max-pauses "${WITHIN_MAX_PAUSES}" \
             --between-max-time "${BETWEEN_MAX_TIME}" \
             --exclude-count "${EXCLUDE_COUNT}" \
-            --target-duration "${TARGET_DURATION}"
+            --target-minutes "${TARGET_MINUTES}" \
+            --max-files "${MAX_FILES}"
       
       - name: Zip merged outputs
         if: always()
@@ -177,7 +180,6 @@ jobs:
           echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
           
           if [ -d "output/${OUTPUT_BASE}" ]; then
-            # Check if directory has content
             if [ "$(ls -A output/${OUTPUT_BASE})" ]; then
               (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
               ls -lh "${OUTPUT_BASE}.zip" || true
