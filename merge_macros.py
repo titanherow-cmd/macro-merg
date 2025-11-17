@@ -157,16 +157,21 @@ def zero_base_events(events):
     return shifted, duration_ms
 
 def preserve_click_integrity(events):
-    """CRITICAL FIX: Mark click events as protected but return ALL events."""
+    """
+    CRITICAL FIX: Mark click events as protected but return ALL events.
+    BUG WAS: Only returning protected events, which deleted all other events!
+    """
     preserved = []
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         event_type = e.get('Type', '')
         
+        # Mark button press/release events as protected
         if any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
             new_e['Time'] = int(e.get('Time', 0))
             new_e['PROTECTED'] = True
         
+        # CRITICAL: Append ALL events, not just protected ones!
         preserved.append(new_e)
     
     return preserved
@@ -642,6 +647,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
             is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
+            # CRITICAL: Preserve click integrity FIRST - this prevents click-to-drag bug
             zb_evs = preserve_click_integrity(zb_evs)
             
             if not is_desktop:
@@ -712,10 +718,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             continue
         
         fname = Path(f).name.lower()
+        # FIXED: Check for special files and use correct lowercase labels
         if fname.startswith("always first"):
-            part_name = "first"
+            part_name = "first"  # lowercase for parts list
         elif fname.startswith("always last"):
-            part_name = "last"
+            part_name = "last"  # lowercase for parts list
         else:
             part_name = part_from_filename(f)
         
@@ -726,10 +733,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     tag = ""
     
     if use_special_file == always_first_file and always_first_file is not None:
-        tag = "FIRST"
+        tag = "FIRST"  # Already uppercase
     elif use_special_file == always_last_file and always_last_file is not None:
-        tag = "LAST"
+        tag = "LAST"  # Already uppercase
     
+    # FIXED: Ensure tag stays uppercase in prefix
     tag_prefix = f"{tag} - " if tag else ""
     
     # Build filename with smart truncation
