@@ -637,8 +637,12 @@ def locate_special_file(folder: Path, input_root: Path):
     return None
 
 def copy_always_files_unmodified(files, out_folder_for_group: Path):
-    """Copy 'always first' and 'always last' files to the same folder as merged files, unmodified."""
-    always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last"))]
+    """
+    Copy 'always first', 'always last', '-always first', '-always last' files 
+    to the same folder as merged files, unmodified.
+    Returns list of copied file paths.
+    """
+    always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
     
     if not always_files:
         return []
@@ -662,8 +666,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     if not files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
-    always_first_file = next((f for f in files if Path(f).name.lower().startswith("always first")), None)
-    always_last_file = next((f for f in files if Path(f).name.lower().startswith("always last")), None)
+    # Exclude files starting with "always first", "always last", "-always first", "-always last"
+    always_first_file = next((f for f in files if Path(f).name.lower().startswith(("always first", "-always first"))), None)
+    always_last_file = next((f for f in files if Path(f).name.lower().startswith(("always last", "-always last"))), None)
     regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
     
     if not regular_files:
