@@ -263,8 +263,50 @@ def add_click_grace_periods(events, rng):
     return result
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
-    """DISABLED AGAIN - Testing if this causes drag bug."""
-    return deepcopy(events)
+    """
+    REWRITTEN: Add small delays ONLY to events that are far from any clicks.
+    
+    CRITICAL: Never modify timing of events within 2000ms of any click event.
+    """
+    result = []
+    
+    # First pass: identify all click event timestamps
+    click_times = []
+    for i, e in enumerate(events):
+        event_type = e.get('Type', '')
+        if any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
+            click_times.append(int(e.get('Time', 0)))
+    
+    # Second pass: only modify events far from clicks
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        
+        if is_protected_event(e):
+            result.append(new_e)
+            continue
+        
+        event_type = e.get('Type', '')
+        current_time = int(e.get('Time', 0))
+        is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
+        
+        # Never modify click events
+        if is_click_event:
+            new_e['Time'] = current_time
+            result.append(new_e)
+            continue
+        
+        # Check if this event is near any click (within 2000ms before or after)
+        near_click = any(abs(current_time - click_time) < 2000 for click_time in click_times)
+        
+        # Only add pauses to events FAR from clicks
+        if not near_click and rng.random() < micropause_chance:
+            new_e['Time'] = current_time + rng.randint(50, 250)
+        else:
+            new_e['Time'] = current_time
+        
+        result.append(new_e)
+    
+    return result
 
 def add_reaction_variance(events, rng):
     """DISABLED - Add human-like delays."""
