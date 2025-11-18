@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):#!/usr/bin/env python3
 """merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness"""
 
 from pathlib import Path
@@ -274,7 +274,50 @@ def add_reaction_variance(events, rng):
     
     return varied
 
-def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
+def add_click_grace_periods(events, rng):
+    """
+    CRITICAL FIX for drag bug: Add mandatory delay after clicks before any mouse movement.
+    
+    THE PROBLEM: Original recording has Click->Release->Move, but processing creates
+    Click->Move (before release), which becomes a drag!
+    
+    THE FIX: After any click event, push all subsequent MouseMove events forward by
+    500-1000ms to ensure the click completes before movement starts.
+    """
+    if not events:
+        return events
+    
+    result = []
+    grace_period_ends_at = 0  # Timestamp when grace period expires
+    
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        event_type = e.get('Type', '')
+        current_time = int(e.get('Time', 0))
+        
+        # Check if this is a click event (any type)
+        is_click = any(t in event_type for t in ['Click', 'LeftClick', 'RightClick', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
+        is_mouse_move = event_type == 'MouseMove'
+        
+        # If this is a click, set a new grace period
+        if is_click:
+            grace_period_ms = rng.randint(500, 1000)
+            grace_period_ends_at = current_time + grace_period_ms
+            new_e['Time'] = current_time
+            result.append(new_e)
+        
+        # If this is a MouseMove and we're in a grace period, delay it
+        elif is_mouse_move and current_time < grace_period_ends_at:
+            # Push this MouseMove to after the grace period
+            new_e['Time'] = grace_period_ends_at
+            result.append(new_e)
+        
+        # All other events pass through unchanged
+        else:
+            new_e['Time'] = current_time
+            result.append(new_e)
+    
+    return result
     """Only modifies X/Y coordinates, never timing."""
     if target_zones is None:
         target_zones = []
@@ -521,9 +564,9 @@ def locate_special_file(folder: Path, input_root: Path):
     
     return None
 
-def copy_always_files_unmodified(files, output_root: Path, rel_folder: Path):
+def copy_always_files_unmodified(files, out_folder_for_group: Path):
     """
-    Copy 'always first' and 'always last' files to a separate folder without modifications.
+    Copy 'always first' and 'always last' files to the same folder as merged files, unmodified.
     Returns list of copied file paths.
     """
     always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last"))]
@@ -531,18 +574,13 @@ def copy_always_files_unmodified(files, output_root: Path, rel_folder: Path):
     if not always_files:
         return []
     
-    # Create separate folder for unmodified files
-    always_folder = output_root / "always_files_unmodified" / rel_folder
-    always_folder.mkdir(parents=True, exist_ok=True)
-    
     copied_paths = []
     for fpath in always_files:
         fpath_obj = Path(fpath)
-        dest_path = always_folder / fpath_obj.name
+        dest_path = out_folder_for_group / fpath_obj.name
         
         try:
             # Copy file as-is without any modifications
-            import shutil
             shutil.copy2(fpath_obj, dest_path)
             copied_paths.append(dest_path)
             print(f"  ✓ Copied unmodified: {fpath_obj.name}")
@@ -613,19 +651,25 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             zb_evs = preserve_click_integrity(zb_evs)
             
             if not is_desktop:
-                # Mobile: only spatial modifications (no mouse paths)
+                # Mobile: spatial modifications + grace periods
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
+                
+                # CRITICAL: Add grace periods to prevent click-to-drag bug
+                zb_evs = add_click_grace_periods(zb_evs, rng)
                 
                 # Time modifications
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
-                # Desktop: spatial modifications first (jitter + mouse paths)
+                # Desktop: spatial modifications + grace periods
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
                 
-                # Time modifications AFTER spatial changes
+                # CRITICAL: Add grace periods to prevent click-to-drag bug
+                zb_evs = add_click_grace_periods(zb_evs, rng)
+                
+                # Time modifications AFTER grace periods
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
@@ -756,16 +800,16 @@ def main():
         except:
             rel_folder = Path(folder.name)
         
-        # Copy 'always first/last' files unmodified to separate folder
-        always_copied = copy_always_files_unmodified(files, output_root, rel_folder)
-        all_written_paths.extend(always_copied)
-        
         out_folder_for_group = output_root / rel_folder
         out_folder_for_group.mkdir(parents=True, exist_ok=True)
         
         selector = NonRepeatingSelector(rng)
         
         print(f"Processing folder: {rel_folder} ({len(files)} files available)")
+        
+        # Copy 'always first/last' files unmodified to SAME folder as merged files
+        always_copied = copy_always_files_unmodified(files, out_folder_for_group)
+        all_written_paths.extend(always_copied)
         
         for v in range(1, max(1, args.versions) + 1):
             merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
