@@ -800,16 +800,16 @@ def main():
         except:
             rel_folder = Path(folder.name)
         
+        # Copy 'always first/last' files unmodified to separate folder
+        always_copied = copy_always_files_unmodified(files, output_root, rel_folder)
+        all_written_paths.extend(always_copied)
+        
         out_folder_for_group = output_root / rel_folder
         out_folder_for_group.mkdir(parents=True, exist_ok=True)
         
         selector = NonRepeatingSelector(rng)
         
         print(f"Processing folder: {rel_folder} ({len(files)} files available)")
-        
-        # Copy 'always first/last' files unmodified to SAME folder as merged files
-        always_copied = copy_always_files_unmodified(files, out_folder_for_group)
-        all_written_paths.extend(always_copied)
         
         for v in range(1, max(1, args.versions) + 1):
             merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
