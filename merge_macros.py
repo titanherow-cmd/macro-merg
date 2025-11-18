@@ -263,9 +263,31 @@ def add_click_grace_periods(events, rng):
     return result
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
-    """DISABLED - Add small delays to non-critical events."""
-    # Return unchanged to isolate drag bug
-    return deepcopy(events)
+    """RE-ENABLED: Add small delays to non-critical events. NEVER modify click timing."""
+    result = []
+    for i, e in enumerate(events):
+        new_e = deepcopy(e)
+        
+        if is_protected_event(e):
+            result.append(new_e)
+            continue
+        
+        event_type = e.get('Type', '')
+        is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
+        
+        if is_click_event:
+            new_e['Time'] = int(e.get('Time', 0))
+            result.append(new_e)
+            continue
+        
+        if rng.random() < micropause_chance:
+            new_e['Time'] = int(e.get('Time', 0)) + rng.randint(50, 250)
+        else:
+            new_e['Time'] = int(e.get('Time', 0))
+        
+        result.append(new_e)
+    
+    return result
 
 def add_reaction_variance(events, rng):
     """DISABLED - Add human-like delays."""
@@ -273,9 +295,40 @@ def add_reaction_variance(events, rng):
     return deepcopy(events)
 
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
-    """DISABLED - Only modifies X/Y coordinates."""
-    # Return unchanged to isolate drag bug
-    return deepcopy(events)
+    """RE-ENABLED: Only modifies X/Y coordinates, never timing."""
+    if target_zones is None:
+        target_zones = []
+    if excluded_zones is None:
+        excluded_zones = []
+    
+    jittered, jitter_range = [], [-1, 0, 1]
+    
+    for e in events:
+        new_e = deepcopy(e)
+        
+        if is_protected_event(e):
+            jittered.append(new_e)
+            continue
+        
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        
+        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+            try:
+                original_x, original_y = int(e['X']), int(e['Y'])
+                
+                in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
+                
+                if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
+                    new_e['X'] = original_x + rng.choice(jitter_range)
+                    new_e['Y'] = original_y + rng.choice(jitter_range)
+                
+                new_e['Time'] = int(e.get('Time', 0))
+            except:
+                pass
+        
+        jittered.append(new_e)
+    
+    return jittered
 
 def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     """DISABLED - fatigue system."""
