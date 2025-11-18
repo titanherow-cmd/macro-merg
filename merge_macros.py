@@ -263,31 +263,8 @@ def add_click_grace_periods(events, rng):
     return result
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
-    """RE-ENABLED: Add small delays to non-critical events. NEVER modify click timing."""
-    result = []
-    for i, e in enumerate(events):
-        new_e = deepcopy(e)
-        
-        if is_protected_event(e):
-            result.append(new_e)
-            continue
-        
-        event_type = e.get('Type', '')
-        is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
-        
-        if is_click_event:
-            new_e['Time'] = int(e.get('Time', 0))
-            result.append(new_e)
-            continue
-        
-        if rng.random() < micropause_chance:
-            new_e['Time'] = int(e.get('Time', 0)) + rng.randint(50, 250)
-        else:
-            new_e['Time'] = int(e.get('Time', 0))
-        
-        result.append(new_e)
-    
-    return result
+    """DISABLED AGAIN - Testing if this causes drag bug."""
+    return deepcopy(events)
 
 def add_reaction_variance(events, rng):
     """DISABLED - Add human-like delays."""
