@@ -197,10 +197,99 @@ def part_from_filename(path: str) -> str:
 
 def add_desktop_mouse_paths(events, rng):
     """
-    TEMPORARILY DISABLED to isolate drag bug.
-    This function is suspected of causing clicks to turn into drags.
+    RE-ENABLED: Adds smooth mouse movement paths before clicks.
+    
+    Creates curved mouse paths leading up to click events for more natural movement.
+    Only inserts paths before simple Click events, never between button press/release pairs.
     """
-    return deepcopy(events)
+    if not events:
+        return events
+    
+    events_copy = deepcopy(events)
+    
+    # First pass: Identify all MouseDown/MouseUp pairs to protect them
+    protected_ranges = []
+    i = 0
+    while i < len(events_copy):
+        event_type = events_copy[i].get('Type', '')
+        
+        if any(t in event_type for t in ['MouseDown', 'LeftDown', 'RightDown']):
+            for j in range(i + 1, len(events_copy)):
+                next_type = events_copy[j].get('Type', '')
+                if any(t in next_type for t in ['MouseUp', 'LeftUp', 'RightUp']):
+                    protected_ranges.append((i, j))
+                    i = j
+                    break
+        i += 1
+    
+    insertions = []
+    last_x, last_y = None, None
+    
+    for idx, e in enumerate(events_copy):
+        event_type = e.get('Type', '')
+        is_click = event_type in ['Click', 'LeftClick', 'RightClick']
+        is_drag = any(t in event_type for t in ['Drag', 'DragStart', 'DragEnd', 'MouseDrag'])
+        is_mouse_move = event_type == 'MouseMove'
+        is_button_event = any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
+        
+        in_protected_range = any(start <= idx <= end for start, end in protected_ranges)
+        
+        # Only add mouse paths for simple Click events
+        if is_click and not is_drag and not is_button_event and not in_protected_range:
+            if 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    target_x, target_y = int(e['X']), int(e['Y'])
+                    click_time = int(e.get('Time', 0))
+                    
+                    if last_x is not None and last_y is not None:
+                        distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+                        
+                        if distance > 30:
+                            prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
+                            available_time = click_time - prev_time
+                            
+                            num_points = rng.randint(3, 5)
+                            movement_duration = int(100 + distance * 0.25)
+                            movement_duration = min(movement_duration, 400)
+                            
+                            if available_time > movement_duration + 10:
+                                movement_start = click_time - movement_duration
+                                
+                                for i in range(1, num_points + 1):
+                                    t = i / (num_points + 1)
+                                    t_smooth = t * t * (3 - 2 * t)
+                                    
+                                    inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-3, 3))
+                                    inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-3, 3))
+                                    
+                                    point_time = movement_start + int(movement_duration * t_smooth)
+                                    point_time = max(prev_time + 1, min(point_time, click_time - 1))
+                                    
+                                    new_event = {
+                                        'Time': point_time,
+                                        'Type': 'MouseMove',
+                                        'X': inter_x,
+                                        'Y': inter_y
+                                    }
+                                    
+                                    insertions.append((idx, new_event))
+                    
+                    last_x, last_y = target_x, target_y
+                except Exception as ex:
+                    print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
+        
+        # Track cursor position from all movement events
+        if (is_mouse_move or is_click or is_drag) and 'X' in e and 'Y' in e:
+            try:
+                last_x, last_y = int(e['X']), int(e['Y'])
+            except:
+                pass
+    
+    # Insert in REVERSE order so indices don't shift
+    for insert_idx, new_event in reversed(insertions):
+        events_copy.insert(insert_idx, new_event)
+    
+    return events_copy
 
 def add_click_grace_periods(events, rng):
     """
@@ -264,54 +353,47 @@ def add_click_grace_periods(events, rng):
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     """
-    REWRITTEN: Add small delays ONLY to events that are far from any clicks.
+    PERMANENTLY DISABLED - This function causes the drag bug.
     
-    CRITICAL: Never modify timing of events within 2000ms of any click event.
+    Issue: Modifying Time values of MouseMove events causes them to appear
+    between MouseDown/MouseUp pairs after re-sorting, turning clicks into drags.
+    
+    TODO: Rewrite this function to work without breaking click sequences.
     """
-    result = []
+    return deepcopy(events)
+
+def add_reaction_variance(events, rng):
+    """RE-ENABLED: Add human-like delays. NEVER modify click timing."""
+    varied = []
+    prev_event_time = 0
     
-    # First pass: identify all click event timestamps
-    click_times = []
-    for i, e in enumerate(events):
-        event_type = e.get('Type', '')
-        if any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
-            click_times.append(int(e.get('Time', 0)))
-    
-    # Second pass: only modify events far from clicks
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         
         if is_protected_event(e):
-            result.append(new_e)
+            prev_event_time = int(e.get('Time', 0))
+            varied.append(new_e)
             continue
         
         event_type = e.get('Type', '')
-        current_time = int(e.get('Time', 0))
         is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
         
-        # Never modify click events
         if is_click_event:
-            new_e['Time'] = current_time
-            result.append(new_e)
+            new_e['Time'] = int(e.get('Time', 0))
+            prev_event_time = int(new_e.get('Time', 0))
+            varied.append(new_e)
             continue
         
-        # Check if this event is near any click (within 2000ms before or after)
-        near_click = any(abs(current_time - click_time) < 2000 for click_time in click_times)
+        current_time = int(e.get('Time', 0))
+        gap_since_last = current_time - prev_event_time
         
-        # Only add pauses to events FAR from clicks
-        if not near_click and rng.random() < micropause_chance:
-            new_e['Time'] = current_time + rng.randint(50, 250)
-        else:
-            new_e['Time'] = current_time
+        if i > 0 and rng.random() < 0.3 and gap_since_last >= 500:
+            new_e['Time'] = current_time + rng.randint(200, 600)
         
-        result.append(new_e)
+        prev_event_time = int(new_e.get('Time', 0))
+        varied.append(new_e)
     
-    return result
-
-def add_reaction_variance(events, rng):
-    """DISABLED - Add human-like delays."""
-    # Return unchanged to isolate drag bug
-    return deepcopy(events)
+    return varied
 
 def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
     """RE-ENABLED: Only modifies X/Y coordinates, never timing."""
@@ -350,9 +432,58 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     return jittered
 
 def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
-    """DISABLED - fatigue system."""
-    # Return unchanged to isolate drag bug
-    return deepcopy(events), 0.0
+    """RE-ENABLED: Fatigue system."""
+    if not events:
+        return events, 0.0
+    
+    if is_exempted:
+        return deepcopy(events), 0.0
+    
+    if rng.random() < 0.20:
+        return deepcopy(events), 0.0
+    
+    evs = deepcopy(events)
+    n = len(evs)
+    
+    if n < 2:
+        return evs, 0.0
+    
+    num_pauses = rng.randint(0, 3)
+    if num_pauses == 0:
+        return evs, 0.0
+    
+    click_times = []
+    for i, e in enumerate(evs):
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+        if is_click:
+            click_time = int(e.get('Time', 0))
+            click_times.append((i, click_time))
+    
+    safe_locations = []
+    for gap_idx in range(n - 1):
+        event_time = int(evs[gap_idx].get('Time', 0))
+        
+        is_safe = True
+        for click_idx, click_time in click_times:
+            if click_idx <= gap_idx and (event_time - click_time) < 1000:
+                is_safe = False
+                break
+        
+        if is_safe:
+            safe_locations.append(gap_idx)
+    
+    if not safe_locations:
+        return evs, 0.0
+    
+    num_pauses = min(num_pauses, len(safe_locations))
+    pause_locations = rng.sample(safe_locations, num_pauses)
+    
+    for gap_idx in sorted(pause_locations, reverse=True):
+        pause_ms = rng.randint(0, 72000)
+        for j in range(gap_idx + 1, n):
+            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
+    
+    return evs, 0.0
 
 def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
     if not events:
