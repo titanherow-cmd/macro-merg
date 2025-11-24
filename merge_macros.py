@@ -197,15 +197,94 @@ def part_from_filename(path: str) -> str:
 
 def add_desktop_mouse_paths(events, rng):
     """
-    DISABLED AGAIN - Causes drag bug even with grace periods.
+    ULTRA-SAFE VERSION: Only adds mouse paths in long click-free periods.
     
-    Issue: Inserting MouseMove events breaks click sequences despite protections.
-    The grace period helps but doesn't fully solve the underlying timing issue.
-    
-    TODO: Complete rewrite needed - possibly pre-calculate all paths before any 
-    time modifications, or use a different approach entirely.
+    NEW RULES:
+    - Only operates in periods with NO clicks for 2+ minutes (120,000ms)
+    - Must have 2 minutes before AND 2 minutes after the path insertion point
+    - Never inserts near any MouseDown/MouseUp events
+    - Extremely conservative to prevent any drag bugs
     """
-    return deepcopy(events)
+    if not events:
+        return events
+    
+    events_copy = deepcopy(events)
+    
+    # First pass: Find ALL click events and their timestamps
+    click_times = []
+    for i, e in enumerate(events_copy):
+        event_type = e.get('Type', '')
+        if any(t in event_type for t in ['Click', 'LeftClick', 'RightClick', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
+            click_times.append(int(e.get('Time', 0)))
+    
+    if not click_times:
+        # No clicks at all - safe to add paths anywhere
+        return events_copy
+    
+    SAFE_DISTANCE_MS = 120000  # 2 minutes = 120,000ms
+    
+    insertions = []
+    last_x, last_y = None, None
+    
+    for idx, e in enumerate(events_copy):
+        event_type = e.get('Type', '')
+        current_time = int(e.get('Time', 0))
+        
+        is_mouse_move = event_type == 'MouseMove'
+        
+        # Only process MouseMove events
+        if is_mouse_move and 'X' in e and 'Y' in e:
+            try:
+                target_x, target_y = int(e['X']), int(e['Y'])
+                
+                if last_x is not None and last_y is not None:
+                    distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
+                    
+                    if distance > 30:
+                        # CRITICAL CHECK: Is this MouseMove in a safe zone?
+                        # Must be 2+ minutes away from ANY click
+                        min_distance_to_click = min(abs(current_time - ct) for ct in click_times)
+                        
+                        if min_distance_to_click >= SAFE_DISTANCE_MS:
+                            # Safe zone detected - add path
+                            prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
+                            available_time = current_time - prev_time
+                            
+                            num_points = rng.randint(2, 3)  # Fewer points for safety
+                            movement_duration = int(100 + distance * 0.2)
+                            movement_duration = min(movement_duration, 300)
+                            
+                            if available_time > movement_duration + 50:
+                                movement_start = current_time - movement_duration
+                                
+                                for i in range(1, num_points + 1):
+                                    t = i / (num_points + 1)
+                                    t_smooth = t * t * (3 - 2 * t)
+                                    
+                                    inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-2, 2))
+                                    inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-2, 2))
+                                    
+                                    point_time = movement_start + int(movement_duration * t_smooth)
+                                    point_time = max(prev_time + 1, min(point_time, current_time - 1))
+                                    
+                                    new_event = {
+                                        'Time': point_time,
+                                        'Type': 'MouseMove',
+                                        'X': inter_x,
+                                        'Y': inter_y
+                                    }
+                                    
+                                    insertions.append((idx, new_event))
+                
+                last_x, last_y = target_x, target_y
+            except Exception as ex:
+                print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
+    
+    # Insert in REVERSE order so indices don't shift
+    for insert_idx, new_event in reversed(insertions):
+        events_copy.insert(insert_idx, new_event)
+    
+    return events_copy
 
 def add_click_grace_periods(events, rng):
     """
