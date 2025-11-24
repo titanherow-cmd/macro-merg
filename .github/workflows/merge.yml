@@ -3,10 +3,14 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)
 on:
   workflow_dispatch:
     inputs:
+      exempted_folders:
+        description: 'Folders to exempt from pause/AFK rules (comma-separated folder paths, or leave empty for none)'
+        required: false
+        default: ''
       versions:
         description: 'How many versions per group'
         required: true
-        default: '26'
+        default: '6'
       within_max_time:
         description: 'Intra-file max pause time (seconds) - Used for EXEMPTED folders only'
         required: true
@@ -31,10 +35,6 @@ on:
         description: 'Maximum files to merge per version'
         required: true
         default: '4'
-      exempted_folders:
-        description: 'Folders to exempt from pause/AFK rules (comma-separated folder paths, or leave empty for none)'
-        required: false
-        default: ''
 
 jobs:
   merge:
