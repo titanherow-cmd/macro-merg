@@ -3,16 +3,12 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)
 on:
   workflow_dispatch:
     inputs:
-      exempted_folders:
-        description: 'Folders to exempt from pause/AFK rules (comma-separated folder paths, or leave empty for none)'
-        required: false
-        default: ''
       versions:
         description: 'How many versions per group'
         required: true
         default: '6'
       within_max_time:
-        description: 'Intra-file max pause time (seconds) - Used for EXEMPTED folders only'
+        description: 'Intra-file max pause time (seconds) - Used for TIME SENSITIVE folders only'
         required: true
         default: '33'
       within_max_pauses:
@@ -28,13 +24,18 @@ on:
         required: true
         default: '10'
       target_minutes:
-        description: 'Target duration per merged file in minutes'
+        description: 'Target duration per merged file in minutes (will reuse files if needed)'
         required: true
         default: '25'
       max_files:
         description: 'Maximum files to merge per version'
         required: true
         default: '4'
+      disable_time_sensitive_pauses:
+        description: 'Disable intra/inter pauses for TIME SENSITIVE folders (only disables short pauses, long AFK always disabled)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   merge:
@@ -105,13 +106,14 @@ jobs:
           python3 << 'PYTHON_EOF'
           import json
           
-          exempted_input = "${{ github.event.inputs.exempted_folders }}"
-          folders = [f.strip() for f in exempted_input.split(',') if f.strip()]
+          # New system: Auto-detect "time sensitive" folders
+          # Instead of manual folder list, use checkbox for pause behavior
+          disable_pauses = "${{ github.event.inputs.disable_time_sensitive_pauses }}" == "true"
           
           config = {
-              "exempted_folders": folders,
-              "disable_intra_pauses": len(folders) > 0,
-              "disable_afk": len(folders) > 0
+              "auto_detect_time_sensitive": True,
+              "disable_intra_pauses": disable_pauses,
+              "disable_inter_pauses": disable_pauses
           }
           
           with open("exemption_config.json", "w") as f:
