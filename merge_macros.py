@@ -48,14 +48,28 @@ def write_counter_file(n: int):
 
 def load_exemption_config():
     config_file = Path.cwd() / "exemption_config.json"
+    default_config = {
+        "auto_detect_time_sensitive": True,
+        "disable_intra_pauses": False,
+        "disable_inter_pauses": False,
+        "exempted_folders": set(),
+        "disable_afk": False,
+    }
+
     if config_file.exists():
         try:
             data = json.loads(config_file.read_text(encoding="utf-8"))
-            return {
+            default_config.update({
                 "auto_detect_time_sensitive": data.get("auto_detect_time_sensitive", True),
                 "disable_intra_pauses": data.get("disable_intra_pauses", False),
-                "disable_inter_pauses": data.get("disable_inter_pauses", False)
-            }
+                "disable_inter_pauses": data.get("disable_inter_pauses", False),
+                "disable_afk": data.get("disable_afk", False),
+                "exempted_folders": set(data.get("exempted_folders", []))
+            })
+        except Exception as e:
+            print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
+
+    return default_config
         except Exception as e:
             print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
     return {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
@@ -892,3 +906,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
