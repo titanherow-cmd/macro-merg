@@ -1,0 +1,29 @@
+{
+  "target_zones": [
+    {
+      "x1": 464,
+      "y1": 44,
+      "x2": 486,
+      "y2": 235,
+      "type": "green",
+      "name": "green_1"
+    },
+    {
+      "x1": 928,
+      "y1": 273,
+      "x2": 955,
+      "y2": 302,
+      "type": "green",
+      "name": "green_2"
+    },
+    {
+      "x1": 501,
+      "y1": 309,
+      "x2": 572,
+      "y2": 376,
+      "type": "green",
+      "name": "green_3"
+    }
+  ],
+  "excluded_zones": []
+}
