@@ -64,7 +64,7 @@ def load_exemption_config():
                 "disable_intra_pauses": data.get("disable_intra_pauses", False),
                 "disable_inter_pauses": data.get("disable_inter_pauses", False),
                 "disable_afk": data.get("disable_afk", False),
-                "exempted_folders": set(data.get("exempted_folders", []))
+                "exempted_folders": set(data.get("exempted_folders", [])),
             })
         except Exception as e:
             print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
