@@ -52,20 +52,18 @@ def load_exemption_config():
         try:
             data = json.loads(config_file.read_text(encoding="utf-8"))
             return {
-                "exempted_folders": set(data.get("exempted_folders", [])),
-                "disable_intra_pauses": data.get("disable_intra_pauses", True),
-                "disable_afk": data.get("disable_afk", True)
+                "auto_detect_time_sensitive": data.get("auto_detect_time_sensitive", True),
+                "disable_intra_pauses": data.get("disable_intra_pauses", False),
+                "disable_inter_pauses": data.get("disable_inter_pauses", False)
             }
         except Exception as e:
             print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
-    return {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
+    return {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
 
-def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
-    folder_str = str(folder_path).lower().replace("\\", "/")
-    for exempted in exempted_folders:
-        if exempted.lower().replace("\\", "/") in folder_str:
-            return True
-    return False
+def is_time_sensitive_folder(folder_path: Path) -> bool:
+    """Check if folder name contains 'time sensitive' (case insensitive)"""
+    folder_str = str(folder_path).lower()
+    return "time sensitive" in folder_str
 
 def load_click_zones(folder_path: Path):
     search_paths = [folder_path / "click_zones.json", folder_path.parent / "click_zones.json", Path.cwd() / "click_zones.json"]
@@ -752,10 +750,13 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         
         if idx < len(final_files) - 1:
-            exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
-            is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
+            exemption_config = exemption_config or {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
+            is_time_sensitive = is_time_sensitive_folder(folder_path)
             
-            if is_exempted:
+            # Time sensitive: optionally skip inter-file pauses based on checkbox
+            if is_time_sensitive and exemption_config.get("disable_inter_pauses", False):
+                pause_ms = rng.randint(100, 500)  # Very short pause
+            elif is_time_sensitive:
                 pause_ms = rng.randint(0, int(between_max_s * 1000))
             else:
                 pause_ms = rng.randint(1000, 12000)
