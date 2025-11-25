@@ -70,9 +70,6 @@ def load_exemption_config():
             print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
 
     return default_config
-        except Exception as e:
-            print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
-    return {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
 
 def is_time_sensitive_folder(folder_path: Path) -> bool:
     """Check if folder name contains 'time sensitive' (case insensitive)"""
@@ -492,6 +489,10 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     
     return evs, 0.0
 
+def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
+    """Helper function to check if a folder is in the exempted set."""
+    return str(folder_path.name).lower() in {f.lower() for f in exempted_folders}
+
 def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
     if not events:
         return deepcopy(events), []
@@ -721,7 +722,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             is_desktop = "deskt" in str(folder_path).lower()
             
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
-            is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
+            # NOTE: is_folder_exempted function was missing, adding a mock or a proper one might be needed
+            # Assuming you want to use folder name for exemption check
+            is_exempted = is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
             zb_evs = preserve_click_integrity(zb_evs)
             
@@ -906,4 +909,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
