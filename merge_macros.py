@@ -48,28 +48,17 @@ def write_counter_file(n: int):
 
 def load_exemption_config():
     config_file = Path.cwd() / "exemption_config.json"
-    default_config = {
-        "auto_detect_time_sensitive": True,
-        "disable_intra_pauses": False,
-        "disable_inter_pauses": False,
-        "exempted_folders": set(),
-        "disable_afk": False,
-    }
-
     if config_file.exists():
         try:
             data = json.loads(config_file.read_text(encoding="utf-8"))
-            default_config.update({
+            return {
                 "auto_detect_time_sensitive": data.get("auto_detect_time_sensitive", True),
                 "disable_intra_pauses": data.get("disable_intra_pauses", False),
-                "disable_inter_pauses": data.get("disable_inter_pauses", False),
-                "disable_afk": data.get("disable_afk", False),
-                "exempted_folders": set(data.get("exempted_folders", [])),
-            })
+                "disable_inter_pauses": data.get("disable_inter_pauses", False)
+            }
         except Exception as e:
             print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
-
-    return default_config
+    return {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
 
 def is_time_sensitive_folder(folder_path: Path) -> bool:
     """Check if folder name contains 'time sensitive' (case insensitive)"""
@@ -489,10 +478,6 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     
     return evs, 0.0
 
-def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
-    """Helper function to check if a folder is in the exempted set."""
-    return str(folder_path.name).lower() in {f.lower() for f in exempted_folders}
-
 def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
     if not events:
         return deepcopy(events), []
@@ -722,9 +707,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             is_desktop = "deskt" in str(folder_path).lower()
             
             exemption_config = exemption_config or {"exempted_folders": set(), "disable_intra_pauses": False, "disable_afk": False}
-            # NOTE: is_folder_exempted function was missing, adding a mock or a proper one might be needed
-            # Assuming you want to use folder name for exemption check
-            is_exempted = is_folder_exempted(folder_path, exemption_config["exempted_folders"])
+            is_exempted = exemption_config["exempted_folders"] and is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
             zb_evs = preserve_click_integrity(zb_evs)
             
@@ -872,7 +855,17 @@ def main():
         
         selector = NonRepeatingSelector(rng)
         
-        print(f"Processing folder: {rel_folder} ({len(files)} files available)")
+        print(f"\nProcessing folder: {rel_folder} ({len(files)} files available)")
+        
+        # Show file durations
+        print(f"  File durations (estimated):")
+        for f in files[:5]:  # Show first 5
+            try:
+                evs = load_json_events(Path(f))
+                _, dur = zero_base_events(evs)
+                print(f"    - {Path(f).name}: ~{dur/60000:.1f}m")
+            except:
+                pass
         
         always_copied = copy_always_files_unmodified(files, out_folder_for_group)
         all_written_paths.extend(always_copied)
