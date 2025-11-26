@@ -424,12 +424,12 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     
     return jittered
 
-def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
+def add_time_of_day_fatigue(events, rng, is_time_sensitive=False, max_pause_ms=0):
     """RE-ENABLED: Fatigue system."""
     if not events:
         return events, 0.0
     
-    if is_exempted:
+    if is_time_sensitive:
         return deepcopy(events), 0.0
     
     if rng.random() < 0.20:
@@ -478,7 +478,7 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     
     return evs, 0.0
 
-def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_pauses=3):
+def insert_intra_pauses(events, rng, is_time_sensitive=False, max_pause_s=33, max_num_pauses=3):
     if not events:
         return deepcopy(events), []
     
@@ -488,7 +488,7 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     if n < 2:
         return evs, []
     
-    if not is_exempted:
+    if not is_time_sensitive:
         return evs, []
     
     num_pauses = rng.randint(0, max_num_pauses)
