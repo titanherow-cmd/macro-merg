@@ -358,11 +358,6 @@ def add_click_grace_periods(events, rng):
 def add_micro_pauses(events, rng, micropause_chance=0.15):
     """
     PERMANENTLY DISABLED - This function causes the drag bug.
-    
-    Issue: Modifying Time values of MouseMove events causes them to appear
-    between MouseDown/MouseUp pairs after re-sorting, turning clicks into drags.
-    
-    TODO: Rewrite this function to work without breaking click sequences.
     """
     return deepcopy(events)
 
@@ -500,7 +495,7 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     evs = deepcopy(events)
     n = len(evs)
     
-    # **FIX 1: Syntax Error fix (Removed walrus operator and ensures n < 2 is checked)**
+    # **FIX 1: Resolved SyntaxError from walrus operator**
     if n < 2 or not is_exempted:
         return evs, []
     
@@ -578,7 +573,7 @@ class NonRepeatingSelector:
         self.used_combos = set()
         self.used_files = set()
     
-    # **FIX 2: Removed max_files from signature and logic**
+    # **FIX 2: Removed max_files from signature**
     def select_unique_files(self, files, target_minutes):
         """Select files until target_minutes duration is reached."""
         if not files or target_minutes <= 0:
@@ -590,24 +585,26 @@ class NonRepeatingSelector:
                 evs = load_json_events(Path(f))
                 # Estimate file duration slightly generously
                 _, base_dur = zero_base_events(evs)
-                file_durations[f] = int(base_dur * 1.3 / 60000)
+                # Durations are in minutes
+                file_durations[f] = int(base_dur * 1.3 / 60000) or 1 
             except:
-                file_durations[f] = 5
+                file_durations[f] = 1
         
         available = [f for f in files if f not in self.used_files]
         
         if not available:
+            # Loop through files again if all have been used
             self.used_files.clear()
             available = files.copy()
         
         selected = []
         total_minutes = 0
         
-        # **FIX 5: Changed while loop condition to only use target_minutes**
+        # **FIX 5: Logic uses ONLY target_minutes**
         while available and total_minutes < target_minutes:
             chosen = self.rng.choice(available)
             selected.append(chosen)
-            total_minutes += file_durations.get(chosen, 5)
+            total_minutes += file_durations.get(chosen, 1)
             available.remove(chosen)
             self.used_files.add(chosen)
         
@@ -664,7 +661,7 @@ def copy_always_files_unmodified(files, out_folder_for_group: Path):
         try:
             shutil.copy2(fpath_obj, dest_path)
             copied_paths.append(dest_path)
-            print(f"  ✓ Copied unmodified: {fpath_obj.name}")
+            # print(f"  ✓ Copied unmodified: {fpath_obj.name}")
         except Exception as e:
             print(f"  ✗ ERROR copying {fpath_obj.name}: {e}", file=sys.stderr)
     
@@ -732,8 +729,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             
-            # NOTE: is_folder_exempted function was missing, adding a mock or a proper one might be needed
-            # Assuming you want to use folder name for exemption check
             is_exempted = is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             
             zb_evs = preserve_click_integrity(zb_evs)
@@ -834,7 +829,7 @@ def main():
     parser.add_argument("--within-max-pauses", type=int, default=2)
     parser.add_argument("--between-max-time", default="18")
     parser.add_argument("--target-minutes", type=int, default=25, help="Target duration per merged file in minutes")
-    # **FIX 4: Removed parser.add_argument("--max-files")**
+    # **FIX 4: Removed argument parsing for --max-files**
     
     args = parser.parse_args()
     
@@ -887,7 +882,6 @@ def main():
         all_written_paths.extend(always_copied)
         
         for v in range(1, max(1, args.versions) + 1):
-            # **FIX 4: Removed max_files_per_version=args.max_files from function call**
             merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
                 files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
                 between_max_s, folder, input_root, selector, exemption_config, 
