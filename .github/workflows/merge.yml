@@ -27,10 +27,6 @@ on:
         description: 'Target duration per merged file in minutes (will reuse files if needed)'
         required: true
         default: '25'
-      # max_files: <--- THIS INPUT IS REMOVED
-      #   description: 'Maximum files to merge per version'
-      #   required: true
-      #   default: '4'
       disable_time_sensitive_pauses:
         description: 'Disable intra/inter pauses for TIME SENSITIVE folders (only disables short pauses, long AFK always disabled)'
         required: false
@@ -58,7 +54,7 @@ jobs:
             ${{ runner.os }}-pip-
             
       - name: Install dependencies
-        run: pip install -r requirements.txt || true # Use || true to ignore if requirements.txt is missing
+        run: pip install -r requirements.txt || true
         
       - name: Get current BUNDLE_SEQ
         id: bundle_seq_read
@@ -79,7 +75,6 @@ jobs:
             --between-max-time '${{ github.event.inputs.between_max_time }}' \
             --exclude-count ${{ github.event.inputs.exclude_count }} \
             --target-minutes ${{ github.event.inputs.target_minutes }}
-            # --max-files ${{ github.event.inputs.max_files }} <--- THIS ARGUMENT IS REMOVED
             
       - name: Create ZIP artifact
         run: |
@@ -116,7 +111,7 @@ jobs:
           
       - name: Upload merged ZIP artifact
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4 # <-- **CRITICAL FIX: Updated to v4**
         with:
           name: merged_macros_${{ env.BUNDLE_SEQ }}
           path: ${{ env.ZIP_NAME }}
