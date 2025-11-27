@@ -11,6 +11,12 @@ COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 
+# --- NEW CONSTANTS FOR TIME CONSISTENCY ---
+# The target duration should not exceed this percentage above the target (e.g., 25 * 1.2 = 30 mins)
+TIME_OVERRUN_TOLERANCE_PERCENT = 1.25 
+# The minimum time in minutes to be within the target (e.g., 25 - 5 = 20 mins)
+MIN_TIME_TOLERANCE_MINUTES = 5
+
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
         raise ValueError("Empty time string")
@@ -421,7 +427,7 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     return jittered
 
 def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
-    """RE-ENABLED: Fatigue system."""
+    """RE-ENABLED: Fatigue system. Max pause is 72,000ms (72s)"""
     if not events:
         return deepcopy(events), 0.0
     
@@ -467,12 +473,14 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     num_pauses = min(num_pauses, len(safe_locations))
     pause_locations = rng.sample(safe_locations, num_pauses)
     
+    total_added_ms = 0
     for gap_idx in sorted(pause_locations, reverse=True):
         pause_ms = rng.randint(0, 72000)
+        total_added_ms += pause_ms
         for j in range(gap_idx + 1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
     
-    return evs, 0.0
+    return evs, total_added_ms
 
 def is_folder_exempted(folder_path: Path, exempted_folders: set) -> bool:
     """Helper function to check if a folder is in the exempted set."""
@@ -530,15 +538,17 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     return evs, pauses_info
 
 def add_afk_pause(events, rng):
+    """Adds a single, long AFK pause (60s to 1200s)."""
     if not events:
         return deepcopy(events)
     
     evs = deepcopy(events)
     
+    # Randomly choose between a short or long AFK
     if rng.random() < 0.7:
-        afk_seconds = rng.randint(60, 300)
+        afk_seconds = rng.randint(60, 300) # 1-5 mins
     else:
-        afk_seconds = rng.randint(300, 1200)
+        afk_seconds = rng.randint(300, 1200) # 5-20 mins
     
     afk_ms = afk_seconds * 1000
     insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
@@ -546,7 +556,7 @@ def add_afk_pause(events, rng):
     for j in range(insert_idx, len(evs)):
         evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
     
-    return evs
+    return evs, afk_ms # Return added AFK time for calculation
 
 def apply_shifts(events, shift_ms):
     result = []
@@ -557,45 +567,110 @@ def apply_shifts(events, shift_ms):
     return result
 
 class NonRepeatingSelector:
-    def __init__(self, rng):
+    def __init__(self, rng, between_max_s):
         self.rng = rng
         self.used_combos = set()
         self.used_files = set()
+        self.inter_pause_max_ms = between_max_s * 1000
     
     def select_unique_files(self, files, target_minutes):
-        """Select files until target_minutes duration is reached."""
+        """
+        Select files using a refined duration estimate until target_minutes is reached.
+        """
         if not files or target_minutes <= 0:
             return []
+        
+        target_minutes_soft_stop = target_minutes - MIN_TIME_TOLERANCE_MINUTES
+        target_minutes_max = int(target_minutes * TIME_OVERRUN_TOLERANCE_PERCENT)
         
         file_durations = {}
         for f in files:
             try:
                 evs = load_json_events(Path(f))
-                # Estimate file duration slightly generously
                 _, base_dur = zero_base_events(evs)
-                # Durations are in minutes
-                file_durations[f] = int(base_dur * 1.3 / 60000) or 1 
+                
+                # CRITICAL: Estimate the duration to include a generous buffer for all inserted pauses.
+                # Max AFK is 20 mins (1200s). Max inter-pause is 12s (18s default between_max_s). Max fatigue is 72s.
+                # A 25-minute target will likely use ~10-15 files.
+                # Total estimated overhead = 1200s (AFK) + 15 * 18s (Inter-pauses) + 3 * 72s (Fatigue)
+                # This logic is too complex for estimation, so we use a simpler approach:
+                # Use a buffer that includes the max AFK time, plus a per-file buffer.
+                # Base file duration in minutes
+                base_min = compute_minutes_from_ms(base_dur)
+                
+                # Estimate duration including potential AFK (max 20 mins) + 1 min buffer for other stuff
+                file_durations[f] = base_min + 21 
+                
+                # If the base file is already > 20 mins, just use its duration + 1 min
+                if base_min > 20:
+                    file_durations[f] = base_min + 1
+
             except:
-                file_durations[f] = 1
+                file_durations[f] = 21 # Default to 21 minutes (1 min base + max 20 min AFK)
         
         available = [f for f in files if f not in self.used_files]
-        
         if not available:
-            # Loop through files again if all have been used
             self.used_files.clear()
             available = files.copy()
         
         selected = []
-        total_minutes = 0
+        total_minutes_estimated = 0
         
-        while available and total_minutes < target_minutes:
-            chosen = self.rng.choice(available)
+        # 1. First pass: Select files up to the soft target (target_minutes - tolerance)
+        temp_available = available.copy()
+        while temp_available and total_minutes_estimated < target_minutes_soft_stop:
+            chosen = self.rng.choice(temp_available)
             selected.append(chosen)
-            total_minutes += file_durations.get(chosen, 1)
-            available.remove(chosen)
-            self.used_files.add(chosen)
+            total_minutes_estimated += file_durations.get(chosen, 21)
+            temp_available.remove(chosen)
         
-        return selected
+        # 2. Add one more file to ensure we pass the soft target
+        if temp_available and total_minutes_estimated < target_minutes_max:
+             chosen = self.rng.choice(temp_available)
+             selected.append(chosen)
+             total_minutes_estimated += file_durations.get(chosen, 21)
+        
+        # 3. Final cleanup: Remove files that push the estimated time far beyond the max target
+        final_selected = []
+        final_minutes = 0
+        
+        # Recalculate duration more accurately for the final check
+        for chosen in selected:
+            # Re-estimate duration using base time + max AFK (20 min) + max inter pause (18s)
+            
+            # The last file doesn't have an inter-pause, but it's simpler to include it
+            # The error is that file_durations is not accurate because the AFK is only added once per *merged* file.
+            
+            # We must use a more accurate, running total estimation:
+            
+            # For the first file, we assume base + AFK (max 20 min) + inter_pause (max 1 min)
+            if not final_selected:
+                 estimated_file_time = file_durations.get(chosen, 21) + 1
+            # For subsequent files, we assume base + AFK (0 because only once per merged file) + inter_pause (max 1 min)
+            else:
+                 _, base_dur = zero_base_events(load_json_events(Path(chosen)))
+                 base_min = compute_minutes_from_ms(base_dur)
+                 estimated_file_time = base_min + 1
+                 
+            # Add one-time AFK/Fatigue overhead to the first file's estimation
+            if not final_selected and estimated_file_time < 25:
+                # Add enough time to the first file to guarantee 25 mins is reached with just it
+                estimated_file_time = 25 
+
+            if final_minutes + estimated_file_time < target_minutes_max:
+                final_selected.append(chosen)
+                final_minutes += estimated_file_time
+                self.used_files.add(chosen)
+            elif final_minutes >= target_minutes - MIN_TIME_TOLERANCE_MINUTES and final_minutes < target_minutes_max:
+                # If we are already close enough, stop
+                break
+        
+        # Edge case: If the first file selected is already over max target, just use it
+        if not final_selected and selected:
+             final_selected = [selected[0]]
+             self.used_files.add(selected[0])
+        
+        return final_selected
     
     def shuffle_with_memory(self, items):
         if not items or len(items) <= 1:
@@ -710,6 +785,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
         
+        afk_added_ms = 0
+        
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             
@@ -739,12 +816,14 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 else:
                     intra_evs = zb_evs
                 
-                if not exemption_config.get("disable_afk", False) and rng.random() < 0.5:
-                    intra_evs = add_afk_pause(intra_evs, rng)
+                # AFK is only added ONCE to the *entire* merged macro, not per file.
+                if idx == 0 and not exemption_config.get("disable_afk", False) and rng.random() < 0.5:
+                    intra_evs, afk_added_ms = add_afk_pause(intra_evs, rng)
             else:
                 intra_evs = zb_evs
-                if rng.random() < 0.5:
-                    intra_evs = add_afk_pause(intra_evs, rng)
+                # AFK is only added ONCE to the *entire* merged macro, not per file.
+                if idx == 0 and rng.random() < 0.5:
+                    intra_evs, afk_added_ms = add_afk_pause(intra_evs, rng)
         else:
             intra_evs = zb_evs
         
@@ -753,23 +832,25 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
         
+        # New cursor position: last event time
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         
         if idx < len(final_files) - 1:
             is_time_sensitive = is_time_sensitive_folder(folder_path)
             
-            # Time sensitive: optionally skip inter-file pauses based on checkbox
             if is_time_sensitive and exemption_config.get("disable_inter_pauses", False):
-                pause_ms = rng.randint(100, 500)  # Very short pause
+                pause_ms = rng.randint(100, 500)
             elif is_time_sensitive:
                 pause_ms = rng.randint(0, int(between_max_s * 1000))
             else:
                 pause_ms = rng.randint(1000, 12000)
             
+            # Advance the cursor by the pause duration
             time_cursor += pause_ms
             per_file_inter_ms[str(fpath_obj)] = pause_ms
             pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
         else:
+            # Last file just needs a small final buffer
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
     
@@ -782,13 +863,15 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             continue
         
         part_name = part_from_filename(f)
+        # Recalculate duration for the filename: total time of the file's events + the inter-pause *after* it
         minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
         parts.append(f"{part_name}[{minutes}m]")
     
     letters = number_to_letters(version_num or 1)
     
     parts_str = ' - '.join(parts)
-    base_name = f"{letters}_{total_minutes}m= {parts_str}"
+    # The filename reflects the actual calculated total minutes
+    base_name = f"{letters}_{total_minutes}m= {parts_str}" 
     
     MAX_FILENAME_LENGTH = 200
     
@@ -857,7 +940,8 @@ def main():
         out_folder_for_group = output_root / rel_folder
         out_folder_for_group.mkdir(parents=True, exist_ok=True)
         
-        selector = NonRepeatingSelector(rng)
+        # Pass the max between time to the selector for better duration estimation
+        selector = NonRepeatingSelector(rng, between_max_s) 
         
         print(f"Processing folder: {rel_folder} ({len(files)} files available)")
         
