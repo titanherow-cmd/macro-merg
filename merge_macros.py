@@ -372,8 +372,14 @@ def add_reaction_variance(events, rng):
     
     return varied
 
-def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
-    """RE-ENABLED: Only modifies X/Y coordinates, never timing."""
+def add_mouse_jitter(events, rng, is_mobile_group=False, target_zones=None, excluded_zones=None):
+    """
+    Applies 1-pixel mouse jitter to clicks.
+    CRITICAL FIX: Skips ALL jitter if the group is marked as mobile.
+    """
+    if is_mobile_group:
+        return deepcopy(events) # <--- CRITICAL GUARD: No coordinate change for mobile.
+        
     if target_zones is None:
         target_zones = []
     if excluded_zones is None:
@@ -622,7 +628,7 @@ class NonRepeatingSelector:
         return list(chosen)
 
 def locate_special_file(folder: Path, input_root: Path):
-    for cand in [folder / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
+    for cand in [folder / SPECIAL_FILENAME, folder.parent / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
         if cand.exists():
             return cand.resolve()
     keyword = SPECIAL_KEYWORD.lower()
@@ -673,7 +679,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     final_files = selector.shuffle_with_memory(selected_files)
     
     special_path = locate_special_file(folder_path, input_root)
-    is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
+    is_mobile_group = "mobile" in str(folder_path).lower() # <--- Determine mobile group
     
     if is_mobile_group and special_path is not None:
         final_files = [f for f in final_files if f is not None and Path(f).resolve() != special_path.resolve()]
@@ -701,28 +707,31 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         afk_added_ms = 0
         
         if not is_special:
-            is_desktop = "deskt" in str(folder_path).lower()
+            is_desktop_group = "deskt" in str(folder_path).lower()
             is_exempted = is_folder_exempted(folder_path, exemption_config["exempted_folders"])
             zb_evs = preserve_click_integrity(zb_evs)
             
-            # --- FIX: Mobile folders skip jitter ---
-            if not is_desktop:
-                # Mobile logic: NO jitter, NO desktop mouse paths
+            # --- Anti-Detection Logic ---
+            if not is_desktop_group:
+                # MOBILE AND NON-DESKTOP LOGIC: STRICT PIXEL INTEGRITY
+                # Jitter is disabled via the is_mobile_group guard in add_mouse_jitter
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_mobile_group=True, target_zones=target_zones, excluded_zones=excluded_zones) 
+                
                 zb_evs = add_click_grace_periods(zb_evs, rng)
-                zb_evs = add_micro_pauses(zb_evs, rng)
+                # Removed add_micro_pauses for safety
                 zb_evs = add_reaction_variance(zb_evs, rng)
-                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
-                # Desktop logic: Apply jitter and desktop mouse paths
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
+                # DESKTOP LOGIC: FULL ANTI-DETECTION SUITE
+                zb_evs = add_mouse_jitter(zb_evs, rng, is_mobile_group=False, target_zones=target_zones, excluded_zones=excluded_zones)
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
                 zb_evs = add_click_grace_periods(zb_evs, rng)
-                zb_evs = add_micro_pauses(zb_evs, rng)
+                # Removed add_micro_pauses for safety
                 zb_evs = add_reaction_variance(zb_evs, rng)
-                zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             
+            # Re-zero base events after time/coordinate manipulation
             zb_evs, file_duration_ms = zero_base_events(zb_evs)
             
+            # --- AFK/Pauses (applies to both desktop and mobile if not exempted) ---
             if is_exempted:
                 if not exemption_config.get("disable_intra_pauses", False):
                     intra_evs, _ = insert_intra_pauses(zb_evs, rng, is_exempted=True, max_pause_s=within_max_s, max_num_pauses=within_max_pauses)
@@ -859,6 +868,7 @@ def main():
             except Exception as e:
                 print(f"  ✗ ERROR writing {out_path}: {e}", file=sys.stderr)
     
+    output_base_name = f"merged_bundle_{counter}" # Re-determine name after loop
     zip_path = output_parent / f"{output_base_name}.zip"
     with ZipFile(zip_path, "w") as zf:
         for fpath in all_written_paths:
