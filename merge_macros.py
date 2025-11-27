@@ -207,12 +207,6 @@ def part_from_filename(path: str) -> str:
 def add_desktop_mouse_paths(events, rng):
     """
     ULTRA-SAFE VERSION: Only adds mouse paths in long click-free periods.
-    
-    NEW RULES:
-    - Only operates in periods with NO clicks for 2+ minutes (120,000ms)
-    - Must have 2 minutes before AND 2 minutes after the path insertion point
-    - Never inserts near any MouseDown/MouseUp events
-    - Extremely conservative to prevent any drag bugs
     """
     if not events:
         return events
@@ -298,10 +292,6 @@ def add_desktop_mouse_paths(events, rng):
 def add_click_grace_periods(events, rng):
     """
     CRITICAL FIX v2: More aggressive grace period that also accounts for MouseDown/Up pairs.
-    
-    THE PROBLEM: Click->Move before MouseUp = drag
-    
-    THE FIX: Track when we're in a button press state and delay ALL MouseMove until after release.
     """
     if not events:
         return events
@@ -495,7 +485,6 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     evs = deepcopy(events)
     n = len(evs)
     
-    # **FIX 1: Resolved SyntaxError from walrus operator**
     if n < 2 or not is_exempted:
         return evs, []
     
@@ -573,7 +562,6 @@ class NonRepeatingSelector:
         self.used_combos = set()
         self.used_files = set()
     
-    # **FIX 2: Removed max_files from signature**
     def select_unique_files(self, files, target_minutes):
         """Select files until target_minutes duration is reached."""
         if not files or target_minutes <= 0:
@@ -600,7 +588,6 @@ class NonRepeatingSelector:
         selected = []
         total_minutes = 0
         
-        # **FIX 5: Logic uses ONLY target_minutes**
         while available and total_minutes < target_minutes:
             chosen = self.rng.choice(available)
             selected.append(chosen)
@@ -661,13 +648,11 @@ def copy_always_files_unmodified(files, out_folder_for_group: Path):
         try:
             shutil.copy2(fpath_obj, dest_path)
             copied_paths.append(dest_path)
-            # print(f"  ✓ Copied unmodified: {fpath_obj.name}")
         except Exception as e:
             print(f"  ✗ ERROR copying {fpath_obj.name}: {e}", file=sys.stderr)
     
     return copied_paths
 
-# **FIX 3: Removed max_files_per_version from signature**
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25):
     """Generate a merged version with smart file selection and FIXED mouse path timing."""
     if exemption_config is None:
@@ -689,7 +674,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     if not regular_files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
-    # **FIX 3: Removed max_files_per_version from selector call**
     selected_files = selector.select_unique_files(regular_files, target_minutes)
     
     if not selected_files:
@@ -829,7 +813,6 @@ def main():
     parser.add_argument("--within-max-pauses", type=int, default=2)
     parser.add_argument("--between-max-time", default="18")
     parser.add_argument("--target-minutes", type=int, default=25, help="Target duration per merged file in minutes")
-    # **FIX 4: Removed argument parsing for --max-files**
     
     args = parser.parse_args()
     
