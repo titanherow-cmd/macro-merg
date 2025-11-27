@@ -11,11 +11,13 @@ COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 
-# --- NEW CONSTANTS FOR TIME CONSISTENCY ---
-# The target duration should not exceed this percentage above the target (e.g., 25 * 1.2 = 30 mins)
-TIME_OVERRUN_TOLERANCE_PERCENT = 1.25 
-# The minimum time in minutes to be within the target (e.g., 25 - 5 = 20 mins)
-MIN_TIME_TOLERANCE_MINUTES = 5
+# --- TIME CONSISTENCY CONFIG ---
+# Max tolerance above target (e.g. 25 * 1.3 = 32.5 mins max)
+TIME_OVERRUN_TOLERANCE_PERCENT = 1.3 
+# Min tolerance below target (e.g. 25 - 5 = 20 mins min)
+MIN_TIME_TOLERANCE_MINUTES = 5 
+# Estimated overhead for one-time AFK + fatigue per merged file
+MAX_ONE_TIME_OVERHEAD = 22 
 
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
@@ -227,7 +229,6 @@ def add_desktop_mouse_paths(events, rng):
             click_times.append(int(e.get('Time', 0)))
     
     if not click_times:
-        # No clicks at all - safe to add paths anywhere
         return events_copy
     
     SAFE_DISTANCE_MS = 120000  # 2 minutes = 120,000ms
@@ -250,16 +251,13 @@ def add_desktop_mouse_paths(events, rng):
                     distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
                     
                     if distance > 30:
-                        # CRITICAL CHECK: Is this MouseMove in a safe zone?
-                        # Must be 2+ minutes away from ANY click
                         min_distance_to_click = min(abs(current_time - ct) for ct in click_times)
                         
                         if min_distance_to_click >= SAFE_DISTANCE_MS:
-                            # Safe zone detected - add path
                             prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
                             available_time = current_time - prev_time
                             
-                            num_points = rng.randint(2, 3)  # Fewer points for safety
+                            num_points = rng.randint(2, 3) 
                             movement_duration = int(100 + distance * 0.2)
                             movement_duration = min(movement_duration, 300)
                             
@@ -289,22 +287,18 @@ def add_desktop_mouse_paths(events, rng):
             except Exception as ex:
                 print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
     
-    # Insert in REVERSE order so indices don't shift
     for insert_idx, new_event in reversed(insertions):
         events_copy.insert(insert_idx, new_event)
     
     return events_copy
 
 def add_click_grace_periods(events, rng):
-    """
-    CRITICAL FIX v2: More aggressive grace period that also accounts for MouseDown/Up pairs.
-    """
     if not events:
         return events
     
     result = []
     grace_period_ends_at = 0
-    button_pressed = False  # Track if mouse button is currently held
+    button_pressed = False 
     
     for i, e in enumerate(events):
         new_e = deepcopy(e)
@@ -316,35 +310,26 @@ def add_click_grace_periods(events, rng):
         is_simple_click = event_type in ['Click', 'LeftClick', 'RightClick']
         is_mouse_move = event_type == 'MouseMove'
         
-        # Track button state
         if is_button_down:
             button_pressed = True
             grace_period_ms = rng.randint(500, 1000)
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
-        
         elif is_button_up:
             button_pressed = False
-            # Extend grace period AFTER button release
             grace_period_ms = rng.randint(500, 1000)
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
-        
         elif is_simple_click:
-            # Simple clicks also need grace period
             grace_period_ms = rng.randint(500, 1000)
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
-        
-        # CRITICAL: Delay MouseMove if button is pressed OR in grace period
         elif is_mouse_move and (button_pressed or current_time < grace_period_ends_at):
             new_e['Time'] = max(current_time, grace_period_ends_at)
             result.append(new_e)
-        
-        # All other events pass through
         else:
             new_e['Time'] = current_time
             result.append(new_e)
@@ -352,9 +337,7 @@ def add_click_grace_periods(events, rng):
     return result
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
-    """
-    PERMANENTLY DISABLED - This function causes the drag bug.
-    """
+    """PERMANENTLY DISABLED - This function causes the drag bug."""
     return deepcopy(events)
 
 def add_reaction_variance(events, rng):
@@ -364,7 +347,6 @@ def add_reaction_variance(events, rng):
     
     for i, e in enumerate(events):
         new_e = deepcopy(e)
-        
         if is_protected_event(e):
             prev_event_time = int(e.get('Time', 0))
             varied.append(new_e)
@@ -401,7 +383,6 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     
     for e in events:
         new_e = deepcopy(e)
-        
         if is_protected_event(e):
             jittered.append(new_e)
             continue
@@ -411,13 +392,10 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x, original_y = int(e['X']), int(e['Y'])
-                
                 in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
-                
                 if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
                     new_e['X'] = original_x + rng.choice(jitter_range)
                     new_e['Y'] = original_y + rng.choice(jitter_range)
-                
                 new_e['Time'] = int(e.get('Time', 0))
             except:
                 pass
@@ -428,10 +406,7 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
 
 def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     """RE-ENABLED: Fatigue system. Max pause is 72,000ms (72s)"""
-    if not events:
-        return deepcopy(events), 0.0
-    
-    if is_exempted:
+    if not events or is_exempted:
         return deepcopy(events), 0.0
     
     if rng.random() < 0.20:
@@ -439,7 +414,6 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     
     evs = deepcopy(events)
     n = len(evs)
-    
     if n < 2:
         return evs, 0.0
     
@@ -457,13 +431,11 @@ def add_time_of_day_fatigue(events, rng, is_exempted=False, max_pause_ms=0):
     safe_locations = []
     for gap_idx in range(n - 1):
         event_time = int(evs[gap_idx].get('Time', 0))
-        
         is_safe = True
         for click_idx, click_time in click_times:
             if click_idx <= gap_idx and (event_time - click_time) < 1000:
                 is_safe = False
                 break
-        
         if is_safe:
             safe_locations.append(gap_idx)
     
@@ -510,13 +482,11 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     safe_locations = []
     for gap_idx in range(n - 1):
         event_time = int(evs[gap_idx].get('Time', 0))
-        
         is_safe = True
         for click_idx, click_time in click_times:
             if click_idx <= gap_idx and (event_time - click_time) < 1000:
                 is_safe = False
                 break
-        
         if is_safe:
             safe_locations.append(gap_idx)
     
@@ -529,10 +499,8 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
     pauses_info = []
     for gap_idx in sorted(chosen):
         pause_ms = rng.randint(0, int(max_pause_s * 1000))
-        
         for j in range(gap_idx+1, n):
             evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        
         pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
     
     return evs, pauses_info
@@ -540,23 +508,17 @@ def insert_intra_pauses(events, rng, is_exempted=False, max_pause_s=33, max_num_
 def add_afk_pause(events, rng):
     """Adds a single, long AFK pause (60s to 1200s)."""
     if not events:
-        return deepcopy(events)
-    
+        return deepcopy(events), 0
     evs = deepcopy(events)
-    
-    # Randomly choose between a short or long AFK
     if rng.random() < 0.7:
-        afk_seconds = rng.randint(60, 300) # 1-5 mins
+        afk_seconds = rng.randint(60, 300)
     else:
-        afk_seconds = rng.randint(300, 1200) # 5-20 mins
-    
+        afk_seconds = rng.randint(300, 1200)
     afk_ms = afk_seconds * 1000
     insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
-    
     for j in range(insert_idx, len(evs)):
         evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
-    
-    return evs, afk_ms # Return added AFK time for calculation
+    return evs, afk_ms
 
 def apply_shifts(events, shift_ms):
     result = []
@@ -571,42 +533,25 @@ class NonRepeatingSelector:
         self.rng = rng
         self.used_combos = set()
         self.used_files = set()
-        self.inter_pause_max_ms = between_max_s * 1000
+        self.inter_pause_max_s = between_max_s 
     
     def select_unique_files(self, files, target_minutes):
-        """
-        Select files using a refined duration estimate until target_minutes is reached.
-        """
+        """Select files using a refined duration estimate until target_minutes is reached."""
         if not files or target_minutes <= 0:
             return []
         
-        target_minutes_soft_stop = target_minutes - MIN_TIME_TOLERANCE_MINUTES
-        target_minutes_max = int(target_minutes * TIME_OVERRUN_TOLERANCE_PERCENT)
+        target_max_minutes = int(target_minutes * TIME_OVERRUN_TOLERANCE_PERCENT)
+        target_min_minutes = target_minutes - MIN_TIME_TOLERANCE_MINUTES
         
-        file_durations = {}
+        file_costs = {}
         for f in files:
             try:
                 evs = load_json_events(Path(f))
                 _, base_dur = zero_base_events(evs)
-                
-                # CRITICAL: Estimate the duration to include a generous buffer for all inserted pauses.
-                # Max AFK is 20 mins (1200s). Max inter-pause is 12s (18s default between_max_s). Max fatigue is 72s.
-                # A 25-minute target will likely use ~10-15 files.
-                # Total estimated overhead = 1200s (AFK) + 15 * 18s (Inter-pauses) + 3 * 72s (Fatigue)
-                # This logic is too complex for estimation, so we use a simpler approach:
-                # Use a buffer that includes the max AFK time, plus a per-file buffer.
-                # Base file duration in minutes
-                base_min = compute_minutes_from_ms(base_dur)
-                
-                # Estimate duration including potential AFK (max 20 mins) + 1 min buffer for other stuff
-                file_durations[f] = base_min + 21 
-                
-                # If the base file is already > 20 mins, just use its duration + 1 min
-                if base_min > 20:
-                    file_durations[f] = base_min + 1
-
+                base_min = compute_minutes_from_ms(base_dur) or 1
+                file_costs[f] = base_min + 2
             except:
-                file_durations[f] = 21 # Default to 21 minutes (1 min base + max 20 min AFK)
+                file_costs[f] = 3
         
         available = [f for f in files if f not in self.used_files]
         if not available:
@@ -614,80 +559,46 @@ class NonRepeatingSelector:
             available = files.copy()
         
         selected = []
-        total_minutes_estimated = 0
+        total_file_cost = 0
         
-        # 1. First pass: Select files up to the soft target (target_minutes - tolerance)
-        temp_available = available.copy()
-        while temp_available and total_minutes_estimated < target_minutes_soft_stop:
-            chosen = self.rng.choice(temp_available)
+        while available:
+            current_estimated_total_min = total_file_cost + MAX_ONE_TIME_OVERHEAD
+            if current_estimated_total_min >= target_minutes:
+                if current_estimated_total_min <= target_max_minutes:
+                    break 
+            
+            chosen = self.rng.choice(available)
+            chosen_cost = file_costs.get(chosen, 3)
+            
+            next_estimated_total_min = total_file_cost + chosen_cost + MAX_ONE_TIME_OVERHEAD
+            
+            if next_estimated_total_min > target_max_minutes and len(selected) > 0:
+                break 
+                
             selected.append(chosen)
-            total_minutes_estimated += file_durations.get(chosen, 21)
-            temp_available.remove(chosen)
+            total_file_cost += chosen_cost
+            available.remove(chosen)
+            self.used_files.add(chosen)
         
-        # 2. Add one more file to ensure we pass the soft target
-        if temp_available and total_minutes_estimated < target_minutes_max:
-             chosen = self.rng.choice(temp_available)
-             selected.append(chosen)
-             total_minutes_estimated += file_durations.get(chosen, 21)
-        
-        # 3. Final cleanup: Remove files that push the estimated time far beyond the max target
-        final_selected = []
-        final_minutes = 0
-        
-        # Recalculate duration more accurately for the final check
-        for chosen in selected:
-            # Re-estimate duration using base time + max AFK (20 min) + max inter pause (18s)
-            
-            # The last file doesn't have an inter-pause, but it's simpler to include it
-            # The error is that file_durations is not accurate because the AFK is only added once per *merged* file.
-            
-            # We must use a more accurate, running total estimation:
-            
-            # For the first file, we assume base + AFK (max 20 min) + inter_pause (max 1 min)
-            if not final_selected:
-                 estimated_file_time = file_durations.get(chosen, 21) + 1
-            # For subsequent files, we assume base + AFK (0 because only once per merged file) + inter_pause (max 1 min)
-            else:
-                 _, base_dur = zero_base_events(load_json_events(Path(chosen)))
-                 base_min = compute_minutes_from_ms(base_dur)
-                 estimated_file_time = base_min + 1
-                 
-            # Add one-time AFK/Fatigue overhead to the first file's estimation
-            if not final_selected and estimated_file_time < 25:
-                # Add enough time to the first file to guarantee 25 mins is reached with just it
-                estimated_file_time = 25 
+        if not selected and files and target_minutes > 0:
+            cheapest_file = min(files, key=lambda f: file_costs.get(f, 3))
+            selected = [cheapest_file]
+            self.used_files.add(cheapest_file)
 
-            if final_minutes + estimated_file_time < target_minutes_max:
-                final_selected.append(chosen)
-                final_minutes += estimated_file_time
-                self.used_files.add(chosen)
-            elif final_minutes >= target_minutes - MIN_TIME_TOLERANCE_MINUTES and final_minutes < target_minutes_max:
-                # If we are already close enough, stop
-                break
-        
-        # Edge case: If the first file selected is already over max target, just use it
-        if not final_selected and selected:
-             final_selected = [selected[0]]
-             self.used_files.add(selected[0])
-        
-        return final_selected
+        return selected
     
     def shuffle_with_memory(self, items):
         if not items or len(items) <= 1:
             return items
-        
         if len(items) > 8:
             shuffled = items.copy()
             self.rng.shuffle(shuffled)
             return shuffled
-        
         all_perms = list(permutations(items))
         available = [p for p in all_perms if p not in self.used_combos]
-        
         if not available:
             self.used_combos.clear()
             available = all_perms
-        
         chosen = self.rng.choice(available)
         self.used_combos.add(chosen)
         return list(chosen)
@@ -696,40 +607,28 @@ def locate_special_file(folder: Path, input_root: Path):
     for cand in [folder / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
         if cand.exists():
             return cand.resolve()
-    
     keyword = SPECIAL_KEYWORD.lower()
     for p in Path.cwd().rglob("*"):
         if p.is_file() and keyword in p.name.lower():
             return p.resolve()
-    
     return None
 
 def copy_always_files_unmodified(files, out_folder_for_group: Path):
-    """
-    Copy 'always first', 'always last', '-always first', '-always last' files 
-    to the same folder as merged files, unmodified.
-    Returns list of copied file paths.
-    """
     always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
-    
     if not always_files:
         return []
-    
     copied_paths = []
     for fpath in always_files:
         fpath_obj = Path(fpath)
         dest_path = out_folder_for_group / fpath_obj.name
-        
         try:
             shutil.copy2(fpath_obj, dest_path)
             copied_paths.append(dest_path)
         except Exception as e:
             print(f"  ✗ ERROR copying {fpath_obj.name}: {e}", file=sys.stderr)
-    
     return copied_paths
 
 def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25):
-    """Generate a merged version with smart file selection and FIXED mouse path timing."""
     if exemption_config is None:
         exemption_config = {
             "auto_detect_time_sensitive": True,
@@ -741,7 +640,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     if not files:
         return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
     
-    # Exclude files starting with "always first", "always last", "-always first", "-always last"
     always_first_file = next((f for f in files if Path(f).name.lower().startswith(("always first", "-always first"))), None)
     always_last_file = next((f for f in files if Path(f).name.lower().startswith(("always last", "-always last"))), None)
     regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
@@ -769,7 +667,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             final_files.append(str(special_path))
     
     final_files = [f for f in final_files if f is not None]
-    
     target_zones, excluded_zones = load_click_zones(folder_path)
     
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
@@ -781,26 +678,24 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-        
         evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = zero_base_events(evs)
-        
         afk_added_ms = 0
         
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
-            
             is_exempted = is_folder_exempted(folder_path, exemption_config["exempted_folders"])
-            
             zb_evs = preserve_click_integrity(zb_evs)
             
+            # --- FIX: Mobile folders skip jitter ---
             if not is_desktop:
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
+                # Mobile logic: NO jitter, NO desktop mouse paths
                 zb_evs = add_click_grace_periods(zb_evs, rng)
                 zb_evs = add_micro_pauses(zb_evs, rng)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_exempted=is_exempted, max_pause_ms=0)
             else:
+                # Desktop logic: Apply jitter and desktop mouse paths
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
                 zb_evs = add_click_grace_periods(zb_evs, rng)
@@ -815,29 +710,22 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                     intra_evs, _ = insert_intra_pauses(zb_evs, rng, is_exempted=True, max_pause_s=within_max_s, max_num_pauses=within_max_pauses)
                 else:
                     intra_evs = zb_evs
-                
-                # AFK is only added ONCE to the *entire* merged macro, not per file.
                 if idx == 0 and not exemption_config.get("disable_afk", False) and rng.random() < 0.5:
                     intra_evs, afk_added_ms = add_afk_pause(intra_evs, rng)
             else:
                 intra_evs = zb_evs
-                # AFK is only added ONCE to the *entire* merged macro, not per file.
                 if idx == 0 and rng.random() < 0.5:
                     intra_evs, afk_added_ms = add_afk_pause(intra_evs, rng)
         else:
             intra_evs = zb_evs
         
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
-        
         shifted = apply_shifts(intra_evs, time_cursor)
         merged.extend(shifted)
-        
-        # New cursor position: last event time
         time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         
         if idx < len(final_files) - 1:
             is_time_sensitive = is_time_sensitive_folder(folder_path)
-            
             if is_time_sensitive and exemption_config.get("disable_inter_pauses", False):
                 pause_ms = rng.randint(100, 500)
             elif is_time_sensitive:
@@ -845,12 +733,10 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             else:
                 pause_ms = rng.randint(1000, 12000)
             
-            # Advance the cursor by the pause duration
             time_cursor += pause_ms
             per_file_inter_ms[str(fpath_obj)] = pause_ms
             pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
         else:
-            # Last file just needs a small final buffer
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
     
@@ -861,28 +747,20 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     for f in final_files:
         if f is None:
             continue
-        
         part_name = part_from_filename(f)
-        # Recalculate duration for the filename: total time of the file's events + the inter-pause *after* it
         minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
         parts.append(f"{part_name}[{minutes}m]")
     
     letters = number_to_letters(version_num or 1)
-    
     parts_str = ' - '.join(parts)
-    # The filename reflects the actual calculated total minutes
     base_name = f"{letters}_{total_minutes}m= {parts_str}" 
-    
     MAX_FILENAME_LENGTH = 200
-    
     if len(base_name) > MAX_FILENAME_LENGTH:
         file_count = len(final_files)
         base_name = f"{letters}_{total_minutes}m_{file_count}files"
     
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
-    
     excluded = [f for f in regular_files if f not in selected_files]
-    
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
 
 def main():
@@ -898,15 +776,14 @@ def main():
     parser.add_argument("--target-minutes", type=int, default=25, help="Target duration per merged file in minutes")
     
     args = parser.parse_args()
-    
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
     
     input_root, output_parent = Path(args.input_dir), Path(args.output_dir)
     output_parent.mkdir(parents=True, exist_ok=True)
     
+    # --- FIX: Force update counter locally ---
     counter = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter_file() or 1)
-    if not os.environ.get("BUNDLE_SEQ"):
-        write_counter_file(counter + 1)
+    write_counter_file(counter + 1)
     
     output_base_name, output_root = f"merged_bundle_{counter}", output_parent / f"merged_bundle_{counter}"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -931,7 +808,6 @@ def main():
         files = find_json_files_in_dir(folder)
         if not files:
             continue
-        
         try:
             rel_folder = folder.relative_to(input_root)
         except:
@@ -939,8 +815,6 @@ def main():
         
         out_folder_for_group = output_root / rel_folder
         out_folder_for_group.mkdir(parents=True, exist_ok=True)
-        
-        # Pass the max between time to the selector for better duration estimation
         selector = NonRepeatingSelector(rng, between_max_s) 
         
         print(f"Processing folder: {rel_folder} ({len(files)} files available)")
