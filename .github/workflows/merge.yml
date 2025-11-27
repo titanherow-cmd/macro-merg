@@ -80,7 +80,6 @@ jobs:
         run: |
           BUNDLE="${BUNDLE_SEQ:-1}"
           
-          # Check if the counter file exists and read the updated counter (post-script execution)
           if [ -f .github/merge_bundle_counter.txt ]; then
             BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
             BUNDLE=${BUNDLE:-1}
@@ -111,7 +110,7 @@ jobs:
           
       - name: Upload merged ZIP artifact
         if: always()
-        uses: actions/upload-artifact@v4 # <-- **CRITICAL FIX: Updated to v4**
+        uses: actions/upload-artifact@v4 # <-- Using the latest version
         with:
           name: merged_macros_${{ env.BUNDLE_SEQ }}
           path: ${{ env.ZIP_NAME }}
