@@ -33,6 +33,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 jobs:
   merge:
     runs-on: ubuntu-latest
@@ -76,13 +79,28 @@ jobs:
             --exclude-count ${{ github.event.inputs.exclude_count }} \
             --target-minutes ${{ github.event.inputs.target_minutes }}
             
+      - name: Commit and Push Counter Update
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .github/merge_bundle_counter.txt
+          if git diff --staged --quiet; then
+            echo "No changes to counter."
+          else
+            git commit -m "Increment bundle counter to $(cat .github/merge_bundle_counter.txt)"
+            git push
+          fi
+            
       - name: Create ZIP artifact
         run: |
           BUNDLE="${BUNDLE_SEQ:-1}"
           
           if [ -f .github/merge_bundle_counter.txt ]; then
             BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
-            BUNDLE=${BUNDLE:-1}
+            # We want the bundle number we STARTED with for the zip name, or maybe the incremented one?
+            # Standard practice: use the ENV var captured at start to name the zip, but save the NEW number for next time.
+            # Using the ENV var for consistency with the log start.
+            BUNDLE=${BUNDLE_SEQ}
           fi
           
           OUTPUT_BASE="merged_bundle_${BUNDLE}"
@@ -94,7 +112,6 @@ jobs:
               (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
               ls -lh "${OUTPUT_BASE}.zip" || true
               echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
-              echo "✅ Successfully created zip with $(find output/${OUTPUT_BASE} -type f | wc -l) files"
             else
               echo "⚠️ Output directory is empty"
               touch empty_placeholder.txt
@@ -110,7 +127,7 @@ jobs:
           
       - name: Upload merged ZIP artifact
         if: always()
-        uses: actions/upload-artifact@v4 # <-- Using the latest version
+        uses: actions/upload-artifact@v4
         with:
           name: merged_macros_${{ env.BUNDLE_SEQ }}
           path: ${{ env.ZIP_NAME }}
