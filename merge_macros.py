@@ -12,12 +12,12 @@ SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 
 # --- TIME CONSISTENCY CONFIG ---
-# Max tolerance above target (e.g. 25 * 1.3 = 32.5 mins max)
-TIME_OVERRUN_TOLERANCE_PERCENT = 1.3 
-# Min tolerance below target (e.g. 25 - 5 = 20 mins min)
-MIN_TIME_TOLERANCE_MINUTES = 5 
-# Estimated overhead for one-time AFK + fatigue per merged file
-MAX_ONE_TIME_OVERHEAD = 22 
+# How much we allow the estimated duration to go OVER the target (e.g. 1.5 = 50% over is okay)
+# We allow play-time to go over because we prioritize having enough content.
+TIME_OVERRUN_TOLERANCE_PERCENT = 1.5
+# We treat the AFK overhead lightly (2 mins) during selection so we don't stop selecting files too early.
+# This ensures we get multiple files mixed together.
+ESTIMATED_AFK_OVERHEAD = 2 
 
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
@@ -536,12 +536,14 @@ class NonRepeatingSelector:
         self.inter_pause_max_s = between_max_s 
     
     def select_unique_files(self, files, target_minutes):
-        """Select files using a refined duration estimate until target_minutes is reached."""
+        """
+        Select files using precise logic to hit the target_minutes.
+        If unique files run out, REFILL the available list to allow mixing within the same merged file.
+        """
         if not files or target_minutes <= 0:
             return []
         
         target_max_minutes = int(target_minutes * TIME_OVERRUN_TOLERANCE_PERCENT)
-        target_min_minutes = target_minutes - MIN_TIME_TOLERANCE_MINUTES
         
         file_costs = {}
         for f in files:
@@ -549,10 +551,12 @@ class NonRepeatingSelector:
                 evs = load_json_events(Path(f))
                 _, base_dur = zero_base_events(evs)
                 base_min = compute_minutes_from_ms(base_dur) or 1
-                file_costs[f] = base_min + 2
+                # Cost is base duration + 1 min buffer for inter-pauses
+                file_costs[f] = base_min + 1
             except:
-                file_costs[f] = 3
+                file_costs[f] = 2
         
+        # Initial pool of available files
         available = [f for f in files if f not in self.used_files]
         if not available:
             self.used_files.clear()
@@ -561,27 +565,41 @@ class NonRepeatingSelector:
         selected = []
         total_file_cost = 0
         
-        while available:
-            current_estimated_total_min = total_file_cost + MAX_ONE_TIME_OVERHEAD
-            if current_estimated_total_min >= target_minutes:
-                if current_estimated_total_min <= target_max_minutes:
-                    break 
+        # Loop until we reach the target duration
+        # We check total_file_cost + ESTIMATED_AFK_OVERHEAD (2 mins) to avoid under-filling
+        while (total_file_cost + ESTIMATED_AFK_OVERHEAD) < target_minutes:
+            
+            # --- CRITICAL FIX: REFILL IF EMPTY ---
+            # If we run out of unique files but haven't hit the time target yet,
+            # allow re-using files immediately for this merge.
+            if not available:
+                available = files.copy()
             
             chosen = self.rng.choice(available)
-            chosen_cost = file_costs.get(chosen, 3)
+            chosen_cost = file_costs.get(chosen, 2)
             
-            next_estimated_total_min = total_file_cost + chosen_cost + MAX_ONE_TIME_OVERHEAD
+            # Check if adding this file pushes us way over the max limit
+            # Only apply this check if we already have at least one file selected
+            estimated_with_next = total_file_cost + chosen_cost + ESTIMATED_AFK_OVERHEAD
             
-            if next_estimated_total_min > target_max_minutes and len(selected) > 0:
+            if len(selected) > 0 and estimated_with_next > target_max_minutes:
+                # If adding this file makes it too long, stop here.
                 break 
                 
             selected.append(chosen)
             total_file_cost += chosen_cost
             available.remove(chosen)
-            self.used_files.add(chosen)
+            
+            # Note: We don't add to self.used_files here yet because we might be re-using locally.
+            # We track global usage at the end of the batch.
         
-        if not selected and files and target_minutes > 0:
-            cheapest_file = min(files, key=lambda f: file_costs.get(f, 3))
+        # Mark all selected files as used globally
+        for f in selected:
+            self.used_files.add(f)
+
+        # Fallback: Must select at least one file
+        if not selected and files:
+            cheapest_file = min(files, key=lambda f: file_costs.get(f, 2))
             selected = [cheapest_file]
             self.used_files.add(cheapest_file)
 
