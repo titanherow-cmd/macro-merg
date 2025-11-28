@@ -183,16 +183,20 @@ def process_macro_file(events: list[dict]) -> tuple[list[dict], int]:
 
 def preserve_click_integrity(events):
     """
-    Mark click events as protected but return ALL events.
-    CRITICAL MOBILE FIX: Added DragStart/DragEnd protection.
+    Mark click events as protected to prevent time-shifting by variance logic.
+    CRITICAL FIX: Includes all possible click event types (Click, DragStart, ButtonDown, etc.).
     """
     preserved = []
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         event_type = e.get('Type', '')
         
-        # --- PATCH: Include DragStart/DragEnd for protection ---
-        is_protected_type = any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp', 'DragStart', 'DragEnd']) 
+        # --- PATCH: Ensure ALL click/tap types are explicitly protected against time modification ---
+        is_protected_type = any(t in event_type for t in [
+            'Click', 'LeftClick', 'RightClick', 'MouseDown', 'MouseUp', 
+            'LeftDown', 'LeftUp', 'RightDown', 'RightUp', 
+            'DragStart', 'DragEnd', 'ButtonDown', 'ButtonUp'
+        ])
         
         if is_protected_type:
             new_e['Time'] = int(e.get('Time', 0))
@@ -297,9 +301,9 @@ def add_desktop_mouse_paths(events, rng):
     
     events_copy = deepcopy(events)
     click_times = []
+    # Use the protected events check to find all click times accurately
     for i, e in enumerate(events_copy):
-        event_type = e.get('Type', '')
-        if any(t in event_type for t in ['Click', 'LeftClick', 'RightClick', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
+        if is_protected_event(preserve_click_integrity([e])[0]):
             click_times.append(int(e.get('Time', 0)))
     
     if not click_times:
@@ -347,10 +351,7 @@ def add_desktop_mouse_paths(events, rng):
     return events_copy
 
 def add_click_grace_periods(events, rng):
-    """
-    Function retained for compatibility but calls are disabled in the main logic.
-    This was causing click integrity issues.
-    """
+    """Function retained for compatibility but calls are disabled in the main logic."""
     if not events:
         return events
     result = []
@@ -399,22 +400,13 @@ def add_reaction_variance(events, rng):
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         
-        # Check for protected event (including DragStart/DragEnd now)
+        # Check for protected event (This includes all click components now)
         if is_protected_event(e):
             prev_event_time = int(e.get('Time', 0))
             varied.append(new_e)
             continue
         
-        event_type = e.get('Type', '')
-        
-        # Explicit check for non-protected click types
-        is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
-        if is_click_event:
-            new_e['Time'] = int(e.get('Time', 0))
-            prev_event_time = int(new_e.get('Time', 0))
-            varied.append(new_e)
-            continue
-            
+        # If not protected, proceed with variance logic
         current_time = int(e.get('Time', 0))
         gap_since_last = current_time - prev_event_time
         if i > 0 and rng.random() < 0.3 and gap_since_last >= 500:
@@ -432,22 +424,24 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     jittered, jitter_range = [], [-1, 0, 1]
     for e in events:
         new_e = deepcopy(e)
-        # Check for protected event (including DragStart/DragEnd now)
+        # Check for protected event (including all click components now)
         if is_protected_event(e):
+            # If protected, apply coordinate jitter only if X/Y exist and the event is a click type
+            event_type = e.get('Type')
+            is_click = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'DragStart', 'DragEnd']) 
+
+            if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
+                try:
+                    original_x, original_y = int(e['X']), int(e['Y'])
+                    in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
+                    if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
+                        new_e['X'] = original_x + rng.choice(jitter_range)
+                        new_e['Y'] = original_y + rng.choice(jitter_range)
+                except:
+                    pass
             jittered.append(new_e)
             continue
             
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick', 'DragStart', 'DragEnd'] or 'button' in e or 'Button' in e
-        if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
-            try:
-                original_x, original_y = int(e['X']), int(e['Y'])
-                in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
-                if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
-                    new_e['X'] = original_x + rng.choice(jitter_range)
-                    new_e['Y'] = original_y + rng.choice(jitter_range)
-                new_e['Time'] = int(e.get('Time', 0))
-            except:
-                pass
         jittered.append(new_e)
     return jittered
 
@@ -464,8 +458,8 @@ def add_time_of_day_fatigue(events, rng, is_time_sensitive=False, max_pause_ms=0
         return evs, 0.0
     click_times = []
     for i, e in enumerate(evs):
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
-        if is_click:
+        # Use protected check for accurate click identification
+        if is_protected_event(preserve_click_integrity([e])[0]):
             click_time = int(e.get('Time', 0))
             click_times.append((i, click_time))
     safe_locations = []
@@ -498,8 +492,8 @@ def insert_intra_pauses(events, rng, is_time_sensitive=False, max_pause_s=33, ma
         return evs, []
     click_times = []
     for i, e in enumerate(evs):
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
-        if is_click:
+        # Use protected check for accurate click identification
+        if is_protected_event(preserve_click_integrity([e])[0]):
             click_time = int(e.get('Time', 0))
             click_times.append((i, click_time))
     safe_locations = []
@@ -662,7 +656,7 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             
-            # CRITICAL FIX HERE: Preserve DragStart/DragEnd events
+            # CRITICAL FIX HERE: Preserve all click events from time modification
             zb_evs = preserve_click_integrity(zb_evs)
             
             # --- Anti-Detection Logic ---
