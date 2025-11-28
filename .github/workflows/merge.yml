@@ -83,11 +83,17 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Add the counter file updated by the Python script
           git add .github/merge_bundle_counter.txt
+          
           if git diff --staged --quiet; then
             echo "No changes to counter."
           else
+            # Commit using the new counter value written by Python
             git commit -m "Increment bundle counter to $(cat .github/merge_bundle_counter.txt)"
+            
+            # Push the update
             git push
           fi
             
@@ -95,13 +101,8 @@ jobs:
         run: |
           BUNDLE="${BUNDLE_SEQ:-1}"
           
-          if [ -f .github/merge_bundle_counter.txt ]; then
-            BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
-            # We want the bundle number we STARTED with for the zip name, but save the NEW number for next time.
-            # Standard practice: use the ENV var captured at start to name the zip, but save the NEW number for next time.
-            # Using the ENV var for consistency with the log start.
-            BUNDLE=${BUNDLE_SEQ}
-          fi
+          # Use the environment variable for the zip name, which is the starting counter for the run
+          BUNDLE=${BUNDLE_SEQ}
           
           OUTPUT_BASE="merged_bundle_${BUNDLE}"
           
