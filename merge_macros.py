@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - PART 1 of 2 (FIXED VERSION)
+merge_macros.py - PART 1 of 2 (MOBILE CLICK FIX)
 Copy this and PART 2 together into one file
 
 FIXES APPLIED:
-1. Line 430: Fixed walrus operator syntax error  
-2. Removed max_files constraint completely
-3. System now uses as many files as needed to reach target_minutes
+1. Line 430: Fixed walrus operator syntax error
+2. Removed max_files constraint - only uses target_minutes
+3. MOBILE FIX: Grace periods now preserve MouseMove→Click synchronization
 """
 
 from pathlib import Path
@@ -292,8 +292,31 @@ def add_desktop_mouse_paths(events, rng):
     return events_copy
 
 def add_click_grace_periods(events, rng):
+    """
+    ✅ MOBILE FIX: Preserves MouseMove→Click synchronization
+    Only delays MouseMoves that occur BETWEEN clicks, never before clicks
+    """
     if not events:
         return events
+    
+    # First pass: Identify all click events and their preceding MouseMoves
+    click_indices = []
+    click_prep_moves = set()  # MouseMoves that prepare for clicks
+    
+    for i, e in enumerate(events):
+        event_type = e.get('Type', '')
+        is_click = any(t in event_type for t in ['Click', 'LeftClick', 'RightClick', 
+                                                   'MouseDown', 'MouseUp', 'LeftDown', 
+                                                   'LeftUp', 'RightDown', 'RightUp'])
+        if is_click:
+            click_indices.append(i)
+            # Mark the MouseMove immediately before this click as protected
+            for j in range(i - 1, max(0, i - 5), -1):  # Look back up to 5 events
+                if events[j].get('Type') == 'MouseMove':
+                    click_prep_moves.add(j)
+                    break
+    
+    # Second pass: Apply grace periods only to safe MouseMoves
     result = []
     grace_period_ends_at = 0
     button_pressed = False
@@ -302,10 +325,12 @@ def add_click_grace_periods(events, rng):
         new_e = deepcopy(e)
         event_type = e.get('Type', '')
         current_time = int(e.get('Time', 0))
+        
         is_button_down = any(t in event_type for t in ['MouseDown', 'LeftDown', 'RightDown'])
         is_button_up = any(t in event_type for t in ['MouseUp', 'LeftUp', 'RightUp'])
         is_simple_click = event_type in ['Click', 'LeftClick', 'RightClick']
         is_mouse_move = event_type == 'MouseMove'
+        is_protected_move = i in click_prep_moves
         
         if is_button_down:
             button_pressed = True
@@ -313,23 +338,36 @@ def add_click_grace_periods(events, rng):
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
+            
         elif is_button_up:
             button_pressed = False
             grace_period_ms = rng.randint(500, 1000)
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
+            
         elif is_simple_click:
             grace_period_ms = rng.randint(500, 1000)
             grace_period_ends_at = current_time + grace_period_ms
             new_e['Time'] = current_time
             result.append(new_e)
-        elif is_mouse_move and (button_pressed or current_time < grace_period_ends_at):
-            new_e['Time'] = max(current_time, grace_period_ends_at)
-            result.append(new_e)
+            
+        elif is_mouse_move:
+            # CRITICAL: Never delay MouseMoves that prepare for clicks
+            if is_protected_move:
+                new_e['Time'] = current_time
+                result.append(new_e)
+            # Only delay MouseMoves during button press or grace period
+            elif button_pressed or current_time < grace_period_ends_at:
+                new_e['Time'] = max(current_time, grace_period_ends_at)
+                result.append(new_e)
+            else:
+                new_e['Time'] = current_time
+                result.append(new_e)
         else:
             new_e['Time'] = current_time
             result.append(new_e)
+    
     return result
 
 def add_micro_pauses(events, rng, micropause_chance=0.15):
@@ -607,14 +645,14 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             
             if not is_desktop:
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
-                zb_evs = add_click_grace_periods(zb_evs, rng)
+                zb_evs = add_click_grace_periods(zb_evs, rng)  # ✅ Now mobile-safe
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 if not is_time_sensitive:
                     zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
             else:
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
                 zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                zb_evs = add_click_grace_periods(zb_evs, rng)
+                zb_evs = add_click_grace_periods(zb_evs, rng)  # ✅ Now mobile-safe
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 if not is_time_sensitive:
                     zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
