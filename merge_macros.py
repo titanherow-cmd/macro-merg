@@ -182,13 +182,19 @@ def process_macro_file(events: list[dict]) -> tuple[list[dict], int]:
     return cleaned_events, duration_ms
 
 def preserve_click_integrity(events):
-    """Mark click events as protected but return ALL events."""
+    """
+    Mark click events as protected but return ALL events.
+    CRITICAL MOBILE FIX: Added DragStart/DragEnd protection.
+    """
     preserved = []
     for i, e in enumerate(events):
         new_e = deepcopy(e)
         event_type = e.get('Type', '')
         
-        if any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp']):
+        # --- PATCH: Include DragStart/DragEnd for protection ---
+        is_protected_type = any(t in event_type for t in ['MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp', 'DragStart', 'DragEnd']) 
+        
+        if is_protected_type:
             new_e['Time'] = int(e.get('Time', 0))
             new_e['PROTECTED'] = True
         
@@ -392,18 +398,23 @@ def add_reaction_variance(events, rng):
     prev_event_time = 0
     for i, e in enumerate(events):
         new_e = deepcopy(e)
+        
+        # Check for protected event (including DragStart/DragEnd now)
         if is_protected_event(e):
             prev_event_time = int(e.get('Time', 0))
             varied.append(new_e)
             continue
+        
         event_type = e.get('Type', '')
         
+        # Explicit check for non-protected click types
         is_click_event = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'LeftDown', 'LeftUp', 'RightDown', 'RightUp'])
         if is_click_event:
             new_e['Time'] = int(e.get('Time', 0))
             prev_event_time = int(new_e.get('Time', 0))
             varied.append(new_e)
             continue
+            
         current_time = int(e.get('Time', 0))
         gap_since_last = current_time - prev_event_time
         if i > 0 and rng.random() < 0.3 and gap_since_last >= 500:
@@ -421,10 +432,12 @@ def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_
     jittered, jitter_range = [], [-1, 0, 1]
     for e in events:
         new_e = deepcopy(e)
+        # Check for protected event (including DragStart/DragEnd now)
         if is_protected_event(e):
             jittered.append(new_e)
             continue
-        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick'] or 'button' in e or 'Button' in e
+            
+        is_click = e.get('Type') in ['Click', 'LeftClick', 'RightClick', 'DragStart', 'DragEnd'] or 'button' in e or 'Button' in e
         if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
             try:
                 original_x, original_y = int(e['X']), int(e['Y'])
@@ -648,6 +661,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
+            
+            # CRITICAL FIX HERE: Preserve DragStart/DragEnd events
             zb_evs = preserve_click_integrity(zb_evs)
             
             # --- Anti-Detection Logic ---
@@ -667,7 +682,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                 if not is_time_sensitive:
                     zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
             
-            # Re-zero base after all variance, to get the true duration and sort
             # Re-process the time/duration after applying variance
             zb_evs, file_duration_ms = process_macro_file(zb_evs) 
             
@@ -749,6 +763,7 @@ def main():
     output_parent.mkdir(parents=True, exist_ok=True)
     
     # --- CRITICAL COUNTER PATCH ---
+    # Read the current bundle sequence number (either from env or file)
     current_bundle_seq = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter(COUNTER_PATH) or 1)
     output_base_name, output_root = f"merged_bundle_{current_bundle_seq}", output_parent / f"merged_bundle_{current_bundle_seq}"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -819,8 +834,7 @@ def main():
             zf.write(fpath, arcname=arcname)
             
     # --- CRITICAL COUNTER PATCH: Write incremented value at the end ---
-    if not os.environ.get("BUNDLE_SEQ"):
-        write_counter(COUNTER_PATH, current_bundle_seq + 1)
+    write_counter(COUNTER_PATH, current_bundle_seq + 1)
         
     print(f"\n✅ DONE. Created: {zip_path} ({len(all_written_paths)} files)")
 
