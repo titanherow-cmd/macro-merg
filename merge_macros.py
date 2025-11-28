@@ -11,6 +11,10 @@ COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 
+# ==============================================================================
+# CORE HELPERS & COUNTER PATCHES
+# ==============================================================================
+
 def parse_time_to_seconds(s: str) -> int:
     if s is None or not str(s).strip():
         raise ValueError("Empty time string")
@@ -22,7 +26,8 @@ def parse_time_to_seconds(s: str) -> int:
         return int(m.group(1)) * 60 + int(m.group(2))
     m = re.match(r'^(\d+)\.(\d{1,2})$', s)
     if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
+        # Minor patch for robustness when parsing fractional minutes
+        return int(m.group(1)) * 60 + int(m.group(2).ljust(2, '0')) 
     m = re.match(r'^(?:(\d+)m)?(?:(\d+)s)?$', s)
     if m and (m.group(1) or m.group(2)):
         minutes = int(m.group(1)) if m.group(1) else 0
@@ -30,21 +35,23 @@ def parse_time_to_seconds(s: str) -> int:
         return minutes * 60 + seconds
     raise ValueError(f"Cannot parse time: {s!r}")
 
-def read_counter_file():
+def read_counter(path: Path) -> int:
+    """Reads the current bundle counter value from file (Fixes 'stuck at 254')."""
     try:
-        if COUNTER_PATH.exists():
-            txt = COUNTER_PATH.read_text(encoding="utf-8").strip()
-            return int(txt) if txt else 0
-    except:
-        pass
-    return 0
+        if path.exists():
+            txt = path.read_text(encoding="utf-8").strip()
+            return int(txt) if txt else 1
+        return 1
+    except Exception:
+        return 1
 
-def write_counter_file(n: int):
+def write_counter(path: Path, n: int):
+    """Writes the incremented bundle counter value back to file."""
     try:
-        COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-        COUNTER_PATH.write_text(str(n), encoding="utf-8")
-    except:
-        pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(n), encoding="utf-8")
+    except Exception as e:
+        print(f"Error writing bundle counter to {path}: {e}", file=sys.stderr)
 
 def load_exemption_config():
     config_file = Path.cwd() / "exemption_config.json"
@@ -120,8 +127,11 @@ def load_json_events(path: Path):
     
     return deepcopy(data) if isinstance(data, list) else []
 
-def zero_base_events(events):
-    """CRITICAL: Normalizes timestamps, stable sort by (time, index)."""
+def process_macro_file(events: list[dict]) -> tuple[list[dict], int]:
+    """
+    CRITICAL FIX: Normalizes timestamps, removes only redundant key events at start.
+    This preserves DragStart/MouseDown events, fixing the "no click" issue.
+    """
     if not events:
         return [], 0
     
@@ -136,6 +146,7 @@ def zero_base_events(events):
                 t = 0
         events_with_time.append((e, t, idx))
     
+    # Stable sort by (time, original index)
     try:
         events_with_time.sort(key=lambda x: (x[1], x[2]))
     except Exception as ex:
@@ -144,15 +155,31 @@ def zero_base_events(events):
     if not events_with_time:
         return [], 0
     
+    # 1. Zero-Base Time
     min_t = events_with_time[0][1]
     shifted = []
     for (e, t, _) in events_with_time:
         ne = deepcopy(e)
         ne["Time"] = t - min_t
         shifted.append(ne)
+
+    # 2. Initial Event Cleanup (Non-Aggressive Patch)
+    first_significant_index = 0
+    for i, e in enumerate(shifted):
+        event_type = e.get('Type')
+        # Only skip initial KeyUp or KeyDown events.
+        if event_type in ["KeyUp", "KeyDown"]:
+            first_significant_index = i + 1
+            continue
+        
+        # Stop at the first non-key event (the true start of the macro)
+        first_significant_index = i
+        break
     
-    duration_ms = shifted[-1]["Time"] if shifted else 0
-    return shifted, duration_ms
+    cleaned_events = shifted[first_significant_index:]
+    
+    duration_ms = cleaned_events[-1]["Time"] if cleaned_events else 0
+    return cleaned_events, duration_ms
 
 def preserve_click_integrity(events):
     """Mark click events as protected but return ALL events."""
@@ -201,6 +228,25 @@ def apply_shifts(events, shift_ms):
         result.append(new_e)
     return result
 
+def merge_events_with_pauses(base_events: list[dict], new_events: list[dict], pause_ms: int) -> list[dict]:
+    """Merges new events into base events with a time offset/pause."""
+    if not new_events:
+        return base_events
+
+    last_time = base_events[-1]['Time'] if base_events else 0
+    new_macro_start_time = new_events[0].get('Time', 0)
+
+    # Calculate the total time shift: (End time of base) + (Pause) - (Start time of new)
+    time_shift = last_time + pause_ms - new_macro_start_time
+
+    # Apply the shift to all new events
+    shifted_events = deepcopy(new_events)
+    for event in shifted_events:
+        event['Time'] = event['Time'] + time_shift
+
+    return base_events + shifted_events
+
+
 def locate_special_file(folder: Path, input_root: Path):
     for cand in [folder / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
         if cand.exists():
@@ -234,7 +280,9 @@ def copy_always_files_unmodified(files, out_folder_for_group: Path):
     
     return copied_paths
 
-# PART 2 - Anti-Detection Functions and Main Logic
+# ==============================================================================
+# ANTI-DETECTION FUNCTIONS
+# ==============================================================================
 
 def add_desktop_mouse_paths(events, rng):
     """ULTRA-SAFE VERSION: Only adds mouse paths in long click-free periods."""
@@ -293,10 +341,9 @@ def add_desktop_mouse_paths(events, rng):
     return events_copy
 
 def add_click_grace_periods(events, rng):
-    """CRITICAL FIX: Track button state and delay MouseMove during/after clicks.
-    
-    NOTE: This function is DISABLED in the main logic (generate_version_for_folder)
-    because it was causing click integrity issues. Retained here for context.
+    """
+    Function retained for compatibility but calls are disabled in the main logic.
+    This was causing click integrity issues.
     """
     if not events:
         return events
@@ -331,17 +378,13 @@ def add_click_grace_periods(events, rng):
             new_e['Time'] = current_time
             result.append(new_e)
         elif is_mouse_move and (button_pressed or current_time < grace_period_ends_at):
-            # This is the line that causes issues by shifting MouseMove events
+            # This is the aggressive line that can cause issues by shifting MouseMove events
             new_e['Time'] = max(current_time, grace_period_ends_at)
             result.append(new_e)
         else:
             new_e['Time'] = current_time
             result.append(new_e)
     return result
-
-def add_micro_pauses(events, rng, micropause_chance=0.15):
-    """PERMANENTLY DISABLED - Causes drag bug."""
-    return deepcopy(events)
 
 def add_reaction_variance(events, rng):
     """Add human-like delays. NEVER modify click timing."""
@@ -482,7 +525,9 @@ def add_afk_pause(events, rng):
         evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
     return evs
     
-# PART 3 - Selector Class and Main Logic
+# ==============================================================================
+# SELECTOR & MAIN LOGIC
+# ==============================================================================
 
 class NonRepeatingSelector:
     def __init__(self, rng):
@@ -498,7 +543,8 @@ class NonRepeatingSelector:
         for f in files:
             try:
                 evs = load_json_events(Path(f))
-                _, base_dur = zero_base_events(evs)
+                # Use patched process function for robust duration
+                _, base_dur = process_macro_file(evs) 
                 file_durations[f] = base_dur / 60000
             except:
                 file_durations[f] = 2.0
@@ -595,8 +641,11 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             continue
         fpath_obj = Path(fpath)
         is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
-        evs = load_json_events(fpath_obj)
-        zb_evs, file_duration_ms = zero_base_events(evs)
+        
+        # --- CRITICAL PATCH: Use robust process function ---
+        raw_evs = load_json_events(fpath_obj)
+        zb_evs, file_duration_ms = process_macro_file(raw_evs)
+        
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             zb_evs = preserve_click_integrity(zb_evs)
@@ -619,7 +668,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                     zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
             
             # Re-zero base after all variance, to get the true duration and sort
-            zb_evs, file_duration_ms = zero_base_events(zb_evs)
+            # Re-process the time/duration after applying variance
+            zb_evs, file_duration_ms = process_macro_file(zb_evs) 
             
             # Intra-Pauses and AFK
             if is_time_sensitive:
@@ -638,19 +688,22 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             
         # Continue merging
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
-        shifted = apply_shifts(intra_evs, time_cursor)
-        merged.extend(shifted)
-        time_cursor = shifted[-1]["Time"] if shifted else time_cursor
         
-        # Inter-file pause logic
-        if idx < len(final_files) - 1:
+        # --- CRITICAL PATCH: Use robust merge function ---
+        pause_ms = 0
+        if idx > 0:
             if is_time_sensitive and exemption_config.get("disable_inter_pauses", False):
                 pause_ms = rng.randint(100, 500)
             elif is_time_sensitive:
                 pause_ms = rng.randint(0, int(between_max_s * 1000))
             else:
                 pause_ms = rng.randint(1000, 12000)
-            time_cursor += pause_ms
+        
+        merged = merge_events_with_pauses(merged, intra_evs, pause_ms)
+        time_cursor = merged[-1]["Time"] if merged else time_cursor
+        
+        # Inter-file pause logic (used only for tracking/reporting)
+        if idx < len(final_files) - 1:
             per_file_inter_ms[str(fpath_obj)] = pause_ms
             pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
         else:
@@ -694,21 +747,28 @@ def main():
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
     input_root, output_parent = Path(args.input_dir), Path(args.output_dir)
     output_parent.mkdir(parents=True, exist_ok=True)
-    counter = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter_file() or 1)
-    if not os.environ.get("BUNDLE_SEQ"):
-        write_counter_file(counter + 1)
-    output_base_name, output_root = f"merged_bundle_{counter}", output_parent / f"merged_bundle_{counter}"
+    
+    # --- CRITICAL COUNTER PATCH ---
+    current_bundle_seq = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter(COUNTER_PATH) or 1)
+    output_base_name, output_root = f"merged_bundle_{current_bundle_seq}", output_parent / f"merged_bundle_{current_bundle_seq}"
     output_root.mkdir(parents=True, exist_ok=True)
+    
     folder_dirs = find_all_dirs_with_json(input_root)
     if not folder_dirs:
         print(f"No JSON files found in {input_root}", file=sys.stderr)
+        # --- CRITICAL COUNTER PATCH: Write incremented value even if no files found ---
+        write_counter(COUNTER_PATH, current_bundle_seq + 1)
         return
+        
     try:
         within_max_s = parse_time_to_seconds(args.within_max_time)
         between_max_s = parse_time_to_seconds(args.between_max_time)
     except Exception as e:
         print(f"ERROR parsing time: {e}", file=sys.stderr)
+        # --- CRITICAL COUNTER PATCH: Write incremented value on error ---
+        write_counter(COUNTER_PATH, current_bundle_seq + 1)
         return
+        
     all_written_paths = []
     exemption_config = load_exemption_config()
     for folder in folder_dirs:
@@ -727,7 +787,7 @@ def main():
         for f in files[:5]:
             try:
                 evs = load_json_events(Path(f))
-                _, dur = zero_base_events(evs)
+                _, dur = process_macro_file(evs)
                 print(f"    - {Path(f).name}: ~{dur/60000:.1f}m")
             except:
                 pass
@@ -748,6 +808,7 @@ def main():
                 all_written_paths.append(out_path)
             except Exception as e:
                 print(f"  ✗ ERROR writing {out_path}: {e}", file=sys.stderr)
+                
     zip_path = output_parent / f"{output_base_name}.zip"
     with ZipFile(zip_path, "w") as zf:
         for fpath in all_written_paths:
@@ -756,6 +817,11 @@ def main():
             except:
                 arcname = f"{output_base_name}/{fpath.name}"
             zf.write(fpath, arcname=arcname)
+            
+    # --- CRITICAL COUNTER PATCH: Write incremented value at the end ---
+    if not os.environ.get("BUNDLE_SEQ"):
+        write_counter(COUNTER_PATH, current_bundle_seq + 1)
+        
     print(f"\n✅ DONE. Created: {zip_path} ({len(all_written_paths)} files)")
 
 if __name__ == "__main__":
