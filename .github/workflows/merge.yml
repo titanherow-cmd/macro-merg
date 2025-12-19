@@ -7,31 +7,14 @@ on:
         description: 'How many versions per group'
         required: true
         default: '6'
-      within_max_time:
-        description: 'Intra-file max pause time (seconds) - Used for TIME SENSITIVE folders only'
-        required: true
-        default: '33'
-      within_max_pauses:
-        description: 'Max intra-file pauses (0-3 randomly chosen)'
-        required: true
-        default: '3'
       between_max_time:
         description: 'Inter-file max pause time (seconds)'
         required: true
         default: '18'
-      exclude_count:
-        description: 'Max files to randomly exclude per version'
-        required: true
-        default: '10'
       target_minutes:
-        description: 'Target duration per merged file in minutes (will reuse files if needed)'
+        description: 'Target duration per merged file (uses round-robin queue)'
         required: true
         default: '25'
-      disable_time_sensitive_pauses:
-        description: 'Disable intra/inter pauses for TIME SENSITIVE folders (only disables short pauses, long AFK always disabled)'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -43,95 +26,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # CRITICAL FIX for stuck counter: Fetch full history for robust pushing
-          fetch-depth: 0 
+          fetch-depth: 0
       
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
           
-      - name: Cache Python dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-            
-      - name: Install dependencies
-        run: pip install -r requirements.txt || true
-        
       - name: Get current BUNDLE_SEQ
-        id: bundle_seq_read
+        id: seq
         run: |
           if [ -f .github/merge_bundle_counter.txt ]; then
-            BUNDLE_SEQ=$(cat .github/merge_bundle_counter.txt)
-            echo "BUNDLE_SEQ=$BUNDLE_SEQ" >> "$GITHUB_ENV"
+            VAL=$(cat .github/merge_bundle_counter.txt)
           else
-            echo "BUNDLE_SEQ=1" >> "$GITHUB_ENV"
+            VAL=1
           fi
-          
+          echo "BUNDLE_SEQ=$VAL" >> "$GITHUB_ENV"
+        
       - name: Execute macro merge script
         run: |
+          mkdir -p output
           python merge_macros.py \
             --versions ${{ github.event.inputs.versions }} \
-            --within-max-time '${{ github.event.inputs.within_max_time }}' \
-            --within-max-pauses ${{ github.event.inputs.within_max_pauses }} \
             --between-max-time '${{ github.event.inputs.between_max_time }}' \
-            --exclude-count ${{ github.event.inputs.exclude_count }} \
-            --target-minutes ${{ github.event.inputs.target_minutes }}
+            --target-minutes ${{ github.event.inputs.target_minutes }} \
+            originals output
             
       - name: Commit and Push Counter Update
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          
-          # Add the counter file updated by the Python script
-          git add .github/merge_bundle_counter.txt
-          
-          if git diff --staged --quiet; then
-            echo "No changes to counter."
-          else
-            # Commit using the new counter value written by Python
-            git commit -m "Increment bundle counter to $(cat .github/merge_bundle_counter.txt)"
-            
-            # Push the update
-            git push
-          fi
+          git add .github/merge_bundle_counter.txt || true
+          git commit -m "Increment bundle counter" || echo "No changes"
+          git push || echo "Push failed"
             
       - name: Create ZIP artifact
+        id: zip_step
         run: |
-          BUNDLE="${BUNDLE_SEQ:-1}"
-          
-          # Use the environment variable for the zip name, which is the starting counter for the run
-          BUNDLE=${BUNDLE_SEQ}
-          
-          OUTPUT_BASE="merged_bundle_${BUNDLE}"
-          
-          echo "Creating zip: ${OUTPUT_BASE}.zip from output/${OUTPUT_BASE}"
-          
-          if [ -d "output/${OUTPUT_BASE}" ]; then
-            if [ "$(ls -A output/${OUTPUT_BASE})" ]; then
-              (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
-              ls -lh "${OUTPUT_BASE}.zip" || true
-              echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
-            else
-              echo "⚠️ Output directory is empty"
-              touch empty_placeholder.txt
-              zip "${OUTPUT_BASE}.zip" empty_placeholder.txt || true
-              echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
-            fi
+          BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
+          ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
+          if [ -d "output/$BUNDLE_NAME" ]; then
+            (cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME")
           else
-            echo "❌ No 'output/${OUTPUT_BASE}' found; creating empty zip fallback"
-            touch empty_placeholder.txt
-            zip "${OUTPUT_BASE}.zip" empty_placeholder.txt || true
-            echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
+            echo "No output found" > empty.txt && zip "$ZIP_FILE" empty.txt
           fi
-          
+          echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
+
       - name: Upload merged ZIP artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: merged_macros_${{ env.BUNDLE_SEQ }}
-          path: ${{ env.ZIP_NAME }}
+          name: merged_macros_bundle_${{ env.BUNDLE_SEQ }}
+          path: ${{ env.FINAL_ZIP }}
