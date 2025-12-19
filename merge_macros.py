@@ -1,836 +1,325 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness - PART 1"""
+"""merge_macros.py - Advanced Pause Logic (Updated Probability Table & Fixed Inter-file)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
 from copy import deepcopy
-from zipfile import ZipFile
-from itertools import combinations, permutations
 
 COUNTER_PATH = Path(".github/merge_bundle_counter.txt")
 SPECIAL_FILENAME = "close reopen mobile screensharelink.json"
 SPECIAL_KEYWORD = "screensharelink"
 
 # ==============================================================================
-# CORE HELPERS & COUNTER PATCHES
+# CORE HELPERS
 # ==============================================================================
-
-def parse_time_to_seconds(s: str) -> int:
-    if s is None or not str(s).strip():
-        raise ValueError("Empty time string")
-    s = str(s).strip()
-    if re.match(r'^\d+$', s):
-        return int(s)
-    m = re.match(r'^(\d+):(\d{1,2})$', s)
-    if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
-    m = re.match(r'^(\d+)\.(\d{1,2})$', s)
-    if m:
-        # Minor patch for robustness when parsing fractional minutes
-        return int(m.group(1)) * 60 + int(m.group(2).ljust(2, '0')) 
-    m = re.match(r'^(?:(\d+)m)?(?:(\d+)s)?$', s)
-    if m and (m.group(1) or m.group(2)):
-        minutes = int(m.group(1)) if m.group(1) else 0
-        seconds = int(m.group(2)) if m.group(2) else 0
-        return minutes * 60 + seconds
-    raise ValueError(f"Cannot parse time: {s!r}")
 
 def read_counter(path: Path) -> int:
-    """Reads the current bundle counter value from file (Fixes 'stuck at 254')."""
     try:
-        if path.exists():
-            txt = path.read_text(encoding="utf-8").strip()
-            return int(txt) if txt else 1
-        return 1
-    except Exception:
-        return 1
+        return int(path.read_text(encoding="utf-8").strip()) if path.exists() else 1
+    except: return 1
 
 def write_counter(path: Path, n: int):
-    """Writes the incremented bundle counter value back to file."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(n), encoding="utf-8")
-    except Exception as e:
-        print(f"Error writing bundle counter to {path}: {e}", file=sys.stderr)
-
-def load_exemption_config():
-    config_file = Path.cwd() / "exemption_config.json"
-    if config_file.exists():
-        try:
-            data = json.loads(config_file.read_text(encoding="utf-8"))
-            return {
-                "auto_detect_time_sensitive": data.get("auto_detect_time_sensitive", True),
-                "disable_intra_pauses": data.get("disable_intra_pauses", False),
-                "disable_inter_pauses": data.get("disable_inter_pauses", False)
-            }
-        except Exception as e:
-            print(f"WARNING: Failed to load exemptions: {e}", file=sys.stderr)
-    return {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
-
-def is_time_sensitive_folder(folder_path: Path) -> bool:
-    """Check if folder name contains 'time sensitive' (case insensitive)"""
-    folder_str = str(folder_path).lower()
-    return "time sensitive" in folder_str
-
-def load_click_zones(folder_path: Path):
-    search_paths = [folder_path / "click_zones.json", folder_path.parent / "click_zones.json", Path.cwd() / "click_zones.json"]
-    for zone_file in search_paths:
-        if zone_file.exists():
-            try:
-                data = json.loads(zone_file.read_text(encoding="utf-8"))
-                return data.get("target_zones", []), data.get("excluded_zones", [])
-            except Exception as e:
-                print(f"WARNING: Failed to load {zone_file}: {e}", file=sys.stderr)
-    return [], []
-
-def is_click_in_zone(x: int, y: int, zone: dict) -> bool:
-    try:
-        return zone['x1'] <= x <= zone['x2'] and zone['y1'] <= y <= zone['y2']
-    except:
-        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(n), encoding="utf-8")
 
 def find_all_dirs_with_json(input_root: Path):
-    if not input_root.exists() or not input_root.is_dir():
-        return []
-    found = set()
+    found = []
+    if not input_root.exists(): return found
     for p in sorted(input_root.rglob("*")):
         if p.is_dir():
-            try:
-                has = any(child.is_file() and child.suffix.lower() == ".json" for child in p.iterdir())
-                if has:
-                    found.add(p)
-            except:
-                pass
-    return sorted(found)
+            if any(child.suffix.lower() == ".json" for child in p.iterdir() if child.is_file()):
+                found.append(p)
+    return found
 
 def find_json_files_in_dir(dirpath: Path):
-    try:
-        return sorted([p for p in dirpath.glob("*.json") if p.is_file() and not p.name.startswith("click_zones")])
-    except:
-        return []
+    return sorted([p for p in dirpath.glob("*.json") if p.is_file() and "click_zones" not in p.name])
 
 def load_json_events(path: Path):
-    """CRITICAL: Load events WITHOUT any modifications."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"WARNING: Failed to read {path}: {e}", file=sys.stderr)
-        return []
-    
-    if isinstance(data, dict):
-        for k in ("events", "items", "entries", "records", "actions"):
-            if k in data and isinstance(data[k], list):
-                return deepcopy(data[k])
-        if "Time" in data:
-            return [deepcopy(data)]
-        return []
-    
-    return deepcopy(data) if isinstance(data, list) else []
+        if isinstance(data, dict):
+            for k in ("events", "items", "entries", "records"):
+                if k in data and isinstance(data[k], list): return deepcopy(data[k])
+            return [data] if "Time" in data else []
+        return deepcopy(data) if isinstance(data, list) else []
+    except: return []
+
+def get_file_duration_ms(path: Path) -> int:
+    events = load_json_events(path)
+    if not events: return 0
+    try:
+        times = [int(e.get("Time", 0)) for e in events]
+        return max(times) - min(times)
+    except: return 0
+
+def format_ms_precise(ms: int) -> str:
+    total_seconds = int(ms / 1000)
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f"{minutes}.Min {seconds}.Sec"
 
 def process_macro_file(events: list[dict]) -> tuple[list[dict], int]:
-    """
-    CRITICAL FIX: Normalizes timestamps, removes only redundant key events at start.
-    This preserves DragStart/MouseDown events, fixing the "no click" issue.
-    """
-    if not events:
-        return [], 0
-    
-    events_with_time = []
-    for idx, e in enumerate(events):
-        try:
-            t = int(e.get("Time", 0))
-        except:
-            try:
-                t = int(float(e.get("Time", 0)))
-            except:
-                t = 0
-        events_with_time.append((e, t, idx))
-    
-    # Stable sort by (time, original index)
+    if not events: return [], 0
     try:
-        events_with_time.sort(key=lambda x: (x[1], x[2]))
-    except Exception as ex:
-        print(f"WARNING: Could not sort events: {ex}", file=sys.stderr)
-    
-    if not events_with_time:
-        return [], 0
-    
-    # 1. Zero-Base Time
-    min_t = events_with_time[0][1]
-    shifted = []
-    for (e, t, _) in events_with_time:
-        ne = deepcopy(e)
-        ne["Time"] = t - min_t
-        shifted.append(ne)
-
-    # 2. Initial Event Cleanup (Non-Aggressive Patch)
-    first_significant_index = 0
-    for i, e in enumerate(shifted):
-        event_type = e.get('Type')
-        # Only skip initial KeyUp or KeyDown events.
-        if event_type in ["KeyUp", "KeyDown"]:
-            first_significant_index = i + 1
-            continue
-        
-        # Stop at the first non-key event (the true start of the macro)
-        first_significant_index = i
-        break
-    
-    cleaned_events = shifted[first_significant_index:]
-    
-    duration_ms = cleaned_events[-1]["Time"] if cleaned_events else 0
-    return cleaned_events, duration_ms
+        times = [int(e.get("Time", 0)) for e in events]
+        min_t = min(times)
+        shifted = []
+        for e in events:
+            ne = deepcopy(e)
+            ne["Time"] = int(e.get("Time", 0)) - min_t
+            shifted.append(ne)
+        duration = shifted[-1]["Time"] if shifted else 0
+        return shifted, duration
+    except: return [], 0
 
 def preserve_click_integrity(events):
-    """
-    Mark click events as protected to prevent time-shifting by variance logic.
-    CRITICAL FIX: Includes all possible click event types (Click, DragStart, ButtonDown, etc.).
-    """
     preserved = []
-    for i, e in enumerate(events):
-        new_e = deepcopy(e)
-        event_type = e.get('Type', '')
-        
-        # --- PATCH: Ensure ALL click/tap types are explicitly protected against time modification ---
-        is_protected_type = any(t in event_type for t in [
-            'Click', 'LeftClick', 'RightClick', 'MouseDown', 'MouseUp', 
-            'LeftDown', 'LeftUp', 'RightDown', 'RightUp', 
-            'DragStart', 'DragEnd', 'ButtonDown', 'ButtonUp'
-        ])
-        
-        if is_protected_type:
-            new_e['Time'] = int(e.get('Time', 0))
-            new_e['PROTECTED'] = True
-        
-        preserved.append(new_e)
-    
+    for e in events:
+        ne = deepcopy(e)
+        if any(t in str(e.get('Type', '')) for t in ['Down', 'Up', 'Click', 'Button', 'Drag']):
+            ne['PROTECTED'] = True
+        preserved.append(ne)
     return preserved
 
-def is_protected_event(event):
-    """Check if event is marked as protected"""
-    return event.get('PROTECTED', False)
-
-def compute_minutes_from_ms(ms: int):
-    return math.ceil(ms / 60000) if ms > 0 else 0
-
 def number_to_letters(n: int) -> str:
-    if n <= 0:
-        return ""
-    letters = ""
+    res = ""
     while n > 0:
-        n -= 1
-        letters = chr(ord('A') + (n % 26)) + letters
-        n //= 26
-    return letters
-
-def part_from_filename(path: str) -> str:
-    """Extract filename stem"""
-    try:
-        return Path(str(path)).stem
-    except:
-        return str(path)
-
-def apply_shifts(events, shift_ms):
-    result = []
-    for e in events:
-        new_e = deepcopy(e)
-        new_e['Time'] = int(e.get('Time', 0)) + int(shift_ms)
-        result.append(new_e)
-    return result
-
-def merge_events_with_pauses(base_events: list[dict], new_events: list[dict], pause_ms: int) -> list[dict]:
-    """Merges new events into base events with a time offset/pause."""
-    if not new_events:
-        return base_events
-
-    last_time = base_events[-1]['Time'] if base_events else 0
-    new_macro_start_time = new_events[0].get('Time', 0)
-
-    # Calculate the total time shift: (End time of base) + (Pause) - (Start time of new)
-    time_shift = last_time + pause_ms - new_macro_start_time
-
-    # Apply the shift to all new events
-    shifted_events = deepcopy(new_events)
-    for event in shifted_events:
-        event['Time'] = event['Time'] + time_shift
-
-    return base_events + shifted_events
-
-
-def locate_special_file(folder: Path, input_root: Path):
-    for cand in [folder / SPECIAL_FILENAME, input_root / SPECIAL_FILENAME]:
-        if cand.exists():
-            return cand.resolve()
-    
-    keyword = SPECIAL_KEYWORD.lower()
-    for p in Path.cwd().rglob("*"):
-        if p.is_file() and keyword in p.name.lower():
-            return p.resolve()
-    
-    return None
-
-def copy_always_files_unmodified(files, out_folder_for_group: Path):
-    """Copy 'always first', 'always last', '-always first', '-always last' files to the same folder as merged files, unmodified."""
-    always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
-    
-    if not always_files:
-        return []
-    
-    copied_paths = []
-    for fpath in always_files:
-        fpath_obj = Path(fpath)
-        dest_path = out_folder_for_group / fpath_obj.name
-        
-        try:
-            shutil.copy2(fpath_obj, dest_path)
-            copied_paths.append(dest_path)
-            print(f"  ✓ Copied unmodified: {fpath_obj.name}")
-        except Exception as e:
-            print(f"  ✗ ERROR copying {fpath_obj.name}: {e}", file=sys.stderr)
-    
-    return copied_paths
+        n, rem = divmod(n - 1, 26)
+        res = chr(65 + rem) + res
+    return res or "A"
 
 # ==============================================================================
-# ANTI-DETECTION FUNCTIONS
+# PAUSE & ANTI-DETECTION LOGIC
 # ==============================================================================
 
-def add_desktop_mouse_paths(events, rng):
-    """ULTRA-SAFE VERSION: Only adds mouse paths in long click-free periods."""
-    if not events:
+def apply_intra_file_pauses(events, rng):
+    """
+    Implements internal pauses based on updated probability weights:
+    0% (40% chance), 8% (20%), 15% (15%), 21% (10%), 25.5% (10%), 29% (5%)
+    """
+    if not events: return events
+    
+    # Updated Probability Table
+    choices = [0, 8, 15, 21, 25.5, 29]
+    weights = [40, 20, 15, 10, 10, 5]
+    pct = rng.choices(choices, weights=weights, k=1)[0]
+    
+    if pct == 0:
         return events
-    
-    events_copy = deepcopy(events)
-    click_times = []
-    # Use the protected events check to find all click times accurately
-    for i, e in enumerate(events_copy):
-        if is_protected_event(preserve_click_integrity([e])[0]):
-            click_times.append(int(e.get('Time', 0)))
-    
-    if not click_times:
-        return events_copy
-    
-    SAFE_DISTANCE_MS = 120000
-    insertions = []
-    last_x, last_y = None, None
-    
-    for idx, e in enumerate(events_copy):
-        event_type = e.get('Type', '')
-        current_time = int(e.get('Time', 0))
-        is_mouse_move = event_type == 'MouseMove'
-        
-        if is_mouse_move and 'X' in e and 'Y' in e:
-            try:
-                target_x, target_y = int(e['X']), int(e['Y'])
-                if last_x is not None and last_y is not None:
-                    distance = ((target_x - last_x)**2 + (target_y - last_y)**2)**0.5
-                    if distance > 30:
-                        min_distance_to_click = min(abs(current_time - ct) for ct in click_times)
-                        if min_distance_to_click >= SAFE_DISTANCE_MS:
-                            prev_time = int(events_copy[idx - 1].get('Time', 0)) if idx > 0 else 0
-                            available_time = current_time - prev_time
-                            num_points = rng.randint(2, 3)
-                            movement_duration = int(100 + distance * 0.2)
-                            movement_duration = min(movement_duration, 300)
-                            if available_time > movement_duration + 50:
-                                movement_start = current_time - movement_duration
-                                for i in range(1, num_points + 1):
-                                    t = i / (num_points + 1)
-                                    t_smooth = t * t * (3 - 2 * t)
-                                    inter_x = int(last_x + (target_x - last_x) * t_smooth + rng.randint(-2, 2))
-                                    inter_y = int(last_y + (target_y - last_y) * t_smooth + rng.randint(-2, 2))
-                                    point_time = movement_start + int(movement_duration * t_smooth)
-                                    point_time = max(prev_time + 1, min(point_time, current_time - 1))
-                                    new_event = {'Time': point_time, 'Type': 'MouseMove', 'X': inter_x, 'Y': inter_y}
-                                    insertions.append((idx, new_event))
-                last_x, last_y = target_x, target_y
-            except Exception as ex:
-                print(f"Warning: Mouse path error: {ex}", file=sys.stderr)
-    
-    for insert_idx, new_event in reversed(insertions):
-        events_copy.insert(insert_idx, new_event)
-    return events_copy
 
-def add_click_grace_periods(events, rng):
-    """Function retained for compatibility but calls are disabled in the main logic."""
-    if not events:
+    original_duration = events[-1]['Time'] - events[0]['Time']
+    total_pause_needed = int(original_duration * (pct / 100))
+    
+    if total_pause_needed <= 0:
         return events
-    result = []
-    grace_period_ends_at = 0
-    button_pressed = False
-    
-    for i, e in enumerate(events):
-        new_e = deepcopy(e)
-        event_type = e.get('Type', '')
-        current_time = int(e.get('Time', 0))
-        is_button_down = any(t in event_type for t in ['MouseDown', 'LeftDown', 'RightDown'])
-        is_button_up = any(t in event_type for t in ['MouseUp', 'LeftUp', 'RightUp'])
-        is_simple_click = event_type in ['Click', 'LeftClick', 'RightClick']
-        is_mouse_move = event_type == 'MouseMove'
-        
-        if is_button_down:
-            button_pressed = True
-            grace_period_ms = rng.randint(500, 1000)
-            grace_period_ends_at = current_time + grace_period_ms
-            new_e['Time'] = current_time
-            result.append(new_e)
-        elif is_button_up:
-            button_pressed = False
-            grace_period_ms = rng.randint(500, 1000)
-            grace_period_ends_at = current_time + grace_period_ms
-            new_e['Time'] = current_time
-            result.append(new_e)
-        elif is_simple_click:
-            grace_period_ms = rng.randint(500, 1000)
-            grace_period_ends_at = current_time + grace_period_ms
-            new_e['Time'] = current_time
-            result.append(new_e)
-        elif is_mouse_move and (button_pressed or current_time < grace_period_ends_at):
-            # This is the aggressive line that can cause issues by shifting MouseMove events
-            new_e['Time'] = max(current_time, grace_period_ends_at)
-            result.append(new_e)
-        else:
-            new_e['Time'] = current_time
-            result.append(new_e)
-    return result
 
-def add_reaction_variance(events, rng):
-    """Add human-like delays. NEVER modify click timing."""
-    varied = []
-    prev_event_time = 0
-    for i, e in enumerate(events):
-        new_e = deepcopy(e)
-        
-        # Check for protected event (This includes all click components now)
-        if is_protected_event(e):
-            prev_event_time = int(e.get('Time', 0))
-            varied.append(new_e)
-            continue
-        
-        # If not protected, proceed with variance logic
-        current_time = int(e.get('Time', 0))
-        gap_since_last = current_time - prev_event_time
-        if i > 0 and rng.random() < 0.3 and gap_since_last >= 500:
-            new_e['Time'] = current_time + rng.randint(200, 600)
-        prev_event_time = int(new_e.get('Time', 0))
-        varied.append(new_e)
-    return varied
+    # Divide total pause into 3-6 random chunks
+    num_chunks = rng.randint(3, 6)
+    chunk_sizes = []
+    remaining = total_pause_needed
+    for i in range(num_chunks - 1):
+        c = rng.randint(1, remaining // 2) if remaining > 2 else 1
+        chunk_sizes.append(c)
+        remaining -= c
+    chunk_sizes.append(remaining)
 
-def add_mouse_jitter(events, rng, is_desktop=False, target_zones=None, excluded_zones=None):
-    """Only modifies X/Y coordinates, never timing."""
-    if target_zones is None:
-        target_zones = []
-    if excluded_zones is None:
-        excluded_zones = []
-    jittered, jitter_range = [], [-1, 0, 1]
-    for e in events:
-        new_e = deepcopy(e)
-        # Check for protected event (including all click components now)
-        if is_protected_event(e):
-            # If protected, apply coordinate jitter only if X/Y exist and the event is a click type
-            event_type = e.get('Type')
-            is_click = any(t in event_type for t in ['Click', 'MouseDown', 'MouseUp', 'DragStart', 'DragEnd']) 
-
-            if is_click and 'X' in e and 'Y' in e and e['X'] is not None and e['Y'] is not None:
-                try:
-                    original_x, original_y = int(e['X']), int(e['Y'])
-                    in_excluded = any(is_click_in_zone(original_x, original_y, zone) for zone in excluded_zones)
-                    if not in_excluded and (any(is_click_in_zone(original_x, original_y, zone) for zone in target_zones) or not target_zones):
-                        new_e['X'] = original_x + rng.choice(jitter_range)
-                        new_e['Y'] = original_y + rng.choice(jitter_range)
-                except:
-                    pass
-            jittered.append(new_e)
-            continue
+    # Intersperse chunks into the event list (avoiding Protected click sequences)
+    modified_events = deepcopy(events)
+    for pause_amt in chunk_sizes:
+        # Pick a random injection point (not at the very start/end)
+        idx = rng.randint(1, len(modified_events) - 2)
+        
+        # Add the pause_amt + a random MS jitter to ensure it's NEVER a whole number
+        jitter = rng.randint(1, 49) 
+        actual_pause = pause_amt + jitter
+        
+        for i in range(idx, len(modified_events)):
+            modified_events[i]['Time'] += actual_pause
             
-        jittered.append(new_e)
+    return modified_events
+
+def add_mouse_jitter(events, rng):
+    jittered = []
+    for e in events:
+        ne = deepcopy(e)
+        if not e.get('PROTECTED') and 'X' in e and 'Y' in e:
+            try:
+                ne['X'] = int(e['X']) + rng.randint(-1, 1)
+                ne['Y'] = int(e['Y']) + rng.randint(-1, 1)
+            except: pass
+        jittered.append(ne)
     return jittered
 
-def add_time_of_day_fatigue(events, rng, is_time_sensitive=False, max_pause_ms=0):
-    """Fatigue system."""
-    if not events or is_time_sensitive or rng.random() < 0.20:
-        return deepcopy(events), 0.0
-    evs = deepcopy(events)
-    n = len(evs)
-    if n < 2:
-        return evs, 0.0
-    num_pauses = rng.randint(0, 3)
-    if num_pauses == 0:
-        return evs, 0.0
-    click_times = []
-    for i, e in enumerate(evs):
-        # Use protected check for accurate click identification
-        if is_protected_event(preserve_click_integrity([e])[0]):
-            click_time = int(e.get('Time', 0))
-            click_times.append((i, click_time))
-    safe_locations = []
-    for gap_idx in range(n - 1):
-        event_time = int(evs[gap_idx].get('Time', 0))
-        is_safe = True
-        for click_idx, click_time in click_times:
-            if click_idx <= gap_idx and (event_time - click_time) < 1000:
-                is_safe = False
-                break
-        if is_safe:
-            safe_locations.append(gap_idx)
-    if not safe_locations:
-        return evs, 0.0
-    num_pauses = min(num_pauses, len(safe_locations))
-    pause_locations = rng.sample(safe_locations, num_pauses)
-    for gap_idx in sorted(pause_locations, reverse=True):
-        pause_ms = rng.randint(0, 72000)
-        for j in range(gap_idx + 1, n):
-            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-    return evs, 0.0
+def add_reaction_variance(events, rng):
+    varied = []
+    offset = 0
+    for e in events:
+        ne = deepcopy(e)
+        if not e.get('PROTECTED') and rng.random() < 0.15:
+            # Add random MS offset, ensuring it's not a round number
+            offset += rng.randint(-30, 30) + (rng.random() * 2 - 1)
+        ne['Time'] = max(0, int(e.get('Time', 0)) + int(offset))
+        varied.append(ne)
+    return varied
 
-def insert_intra_pauses(events, rng, is_time_sensitive=False, max_pause_s=33, max_num_pauses=3):
-    if not events or len(events) < 2 or not is_time_sensitive:
-        return deepcopy(events), []
-    evs = deepcopy(events)
-    n = len(evs)
-    num_pauses = rng.randint(0, max_num_pauses)
-    if num_pauses == 0:
-        return evs, []
-    click_times = []
-    for i, e in enumerate(evs):
-        # Use protected check for accurate click identification
-        if is_protected_event(preserve_click_integrity([e])[0]):
-            click_time = int(e.get('Time', 0))
-            click_times.append((i, click_time))
-    safe_locations = []
-    for gap_idx in range(n - 1):
-        event_time = int(evs[gap_idx].get('Time', 0))
-        is_safe = True
-        for click_idx, click_time in click_times:
-            if click_idx <= gap_idx and (event_time - click_time) < 1000:
-                is_safe = False
-                break
-        if is_safe:
-            safe_locations.append(gap_idx)
-    if not safe_locations:
-        return evs, []
-    num_pauses = min(num_pauses, len(safe_locations))
-    chosen = rng.sample(safe_locations, num_pauses)
-    pauses_info = []
-    for gap_idx in sorted(chosen):
-        pause_ms = rng.randint(0, int(max_pause_s * 1000))
-        for j in range(gap_idx+1, n):
-            evs[j]["Time"] = int(evs[j].get("Time", 0)) + pause_ms
-        pauses_info.append({"after_event_index": gap_idx, "pause_ms": pause_ms})
-    return evs, pauses_info
+def merge_events_with_pauses(base: list[dict], new: list[dict], pause_ms: int) -> list[dict]:
+    if not new: return base
+    last_t = base[-1]['Time'] if base else 0
+    shift = last_t + pause_ms
+    shifted = deepcopy(new)
+    for e in shifted: e['Time'] = int(e.get('Time', 0)) + shift
+    return base + shifted
 
-def add_afk_pause(events, rng):
-    if not events:
-        return deepcopy(events)
-    evs = deepcopy(events)
-    if rng.random() < 0.7:
-        afk_seconds = rng.randint(60, 300)
-    else:
-        afk_seconds = rng.randint(300, 1200)
-    afk_ms = afk_seconds * 1000
-    insert_idx = rng.randint(len(evs) // 4, 3 * len(evs) // 4) if len(evs) > 1 else 0
-    for j in range(insert_idx, len(evs)):
-        evs[j]["Time"] = int(evs[j].get("Time", 0)) + afk_ms
-    return evs
-    
 # ==============================================================================
-# SELECTOR & MAIN LOGIC
+# ROUND-ROBIN SELECTOR
 # ==============================================================================
 
-class NonRepeatingSelector:
-    def __init__(self, rng):
+class QueueFileSelector:
+    def __init__(self, rng, all_files):
         self.rng = rng
-        self.used_combos = set()
-        self.used_files = set()
-    
-    def select_unique_files(self, files, target_minutes, max_files):
-        """Select files to reach target duration, reusing if needed."""
-        if not files or max_files <= 0:
-            return []
-        file_durations = {}
-        for f in files:
-            try:
-                evs = load_json_events(Path(f))
-                # Use patched process function for robust duration
-                _, base_dur = process_macro_file(evs) 
-                file_durations[f] = base_dur / 60000
-            except:
-                file_durations[f] = 2.0
-        AVG_INTER_FILE_PAUSE_MIN = 0.1
-        available = [f for f in files if f not in self.used_files]
-        if not available:
-            self.used_files.clear()
-            available = files.copy()
+        self.all_files = [str(f.resolve()) for f in all_files]
+        self.pool = list(self.all_files)
+        self.rng.shuffle(self.pool)
+        
+    def get_files_for_time(self, target_minutes):
         selected = []
-        estimated_total = 0.0
-        while len(selected) < max_files:
-            if not available:
-                self.used_files.clear()
-                available = [f for f in files if f not in selected]
-            if not available:
-                break
-            chosen = self.rng.choice(available)
-            file_duration = file_durations.get(chosen, 2.0)
-            potential_total = estimated_total + file_duration
-            if len(selected) > 0:
-                potential_total += AVG_INTER_FILE_PAUSE_MIN
-            if potential_total <= target_minutes or estimated_total < (target_minutes * 0.7):
-                selected.append(chosen)
-                estimated_total = potential_total
-                available.remove(chosen)
-                self.used_files.add(chosen)
-                if estimated_total >= (target_minutes * 0.95):
-                    break
-            else:
-                smaller_files = [f for f in available if file_durations.get(f, 2.0) < file_duration]
-                if smaller_files:
-                    chosen = min(smaller_files, key=lambda f: file_durations.get(f, 2.0))
-                    file_duration = file_durations.get(chosen, 2.0)
-                    potential_total = estimated_total + file_duration + AVG_INTER_FILE_PAUSE_MIN
-                    selected.append(chosen)
-                    estimated_total = potential_total
-                    available.remove(chosen)
-                    self.used_files.add(chosen)
-                    break
-                else:
-                    break
-        print(f"  Selected {len(selected)} files, estimated total: {estimated_total:.1f}m (target: {target_minutes}m)")
-        return selected
-    
-    def shuffle_with_memory(self, items):
-        if not items or len(items) <= 1:
-            return items
-        if len(items) > 8:
-            shuffled = items.copy()
-            self.rng.shuffle(shuffled)
-            return shuffled
-        all_perms = list(permutations(items))
-        available = [p for p in all_perms if p not in self.used_combos]
-        if not available:
-            self.used_combos.clear()
+        current_ms = 0.0
+        target_ms = target_minutes * 60000
         
-        available = all_perms
-        chosen = self.rng.choice(available)
-        self.used_combos.add(chosen)
-        return list(chosen)
+        while current_ms < target_ms:
+            if not self.pool:
+                self.pool = list(self.all_files)
+                self.rng.shuffle(self.pool)
+            
+            pick = None
+            for f in self.pool:
+                if f not in selected:
+                    pick = f
+                    break
+            
+            if not pick: pick = self.pool[0]
+            
+            dur = get_file_duration_ms(Path(pick))
+            if dur <= 0 and len(self.all_files) > 1:
+                if pick in self.pool: self.pool.remove(pick)
+                continue
 
-def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25, max_files_per_version=4):
-    """Generate merged version."""
-    if not files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    always_first_file = next((f for f in files if Path(f).name.lower().startswith(("always first", "-always first"))), None)
-    always_last_file = next((f for f in files if Path(f).name.lower().startswith(("always last", "-always last"))), None)
-    regular_files = [f for f in files if f not in [always_first_file, always_last_file]]
-    if not regular_files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    selected_files = selector.select_unique_files(regular_files, target_minutes, max_files_per_version)
-    if not selected_files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0
-    final_files = selector.shuffle_with_memory(selected_files)
-    special_path = locate_special_file(folder_path, input_root)
-    is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
-    if is_mobile_group and special_path is not None:
-        final_files = [f for f in final_files if f is not None and Path(f).resolve() != special_path.resolve()]
-        if final_files:
-            mid_idx = len(final_files) // 2
-            final_files.insert(min(mid_idx + 1, len(final_files)), str(special_path))
-        else:
-            final_files.insert(0, str(special_path))
-            final_files.append(str(special_path))
-    final_files = [f for f in final_files if f is not None]
-    target_zones, excluded_zones = load_click_zones(folder_path)
-    merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
-    per_file_event_ms, per_file_inter_ms = {}, {}
-    exemption_config = exemption_config or {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
-    is_time_sensitive = is_time_sensitive_folder(folder_path)
+            selected.append(pick)
+            if pick in self.pool: self.pool.remove(pick)
+            
+            # Use 15% as a conservative average internal pause + 300ms inter-file pause for target calculation
+            current_ms += (dur * 1.15) + 300
+            if len(selected) > 100: break 
+            
+        return selected
+
+# ==============================================================================
+# MAIN LOGIC
+# ==============================================================================
+
+def generate_version_for_folder(rng, v_num, folder, selector, target_min):
+    selected_paths = selector.get_files_for_time(target_min)
+    if not selected_paths: return None, None, None
     
-    for idx, fpath in enumerate(final_files):
-        if fpath is None:
-            continue
-        fpath_obj = Path(fpath)
-        is_special = special_path is not None and fpath_obj.resolve() == special_path.resolve()
+    selected_paths.sort(key=lambda x: (
+        0 if "always first" in Path(x).name.lower() else 
+        2 if "always last" in Path(x).name.lower() else 1
+    ))
+
+    all_evs = []
+    manifest_lines = []
+    total_pause_ms = 0
+    
+    for i, path_str in enumerate(selected_paths):
+        p = Path(path_str)
+        is_special = SPECIAL_KEYWORD in p.name.lower() or p.name.lower() == SPECIAL_FILENAME
         
-        # --- CRITICAL PATCH: Use robust process function ---
-        raw_evs = load_json_events(fpath_obj)
-        zb_evs, file_duration_ms = process_macro_file(raw_evs)
+        raw_evs, _ = process_macro_file(load_json_events(p))
+        if not raw_evs: continue
         
+        # 1. Preserve Clicks
+        evs = preserve_click_integrity(raw_evs)
+        
+        # 2. Apply Intra-file Internal Pauses (Updated Probability Rule)
         if not is_special:
-            is_desktop = "deskt" in str(folder_path).lower()
-            
-            # CRITICAL FIX HERE: Preserve all click events from time modification
-            zb_evs = preserve_click_integrity(zb_evs)
-            
-            # --- Anti-Detection Logic ---
-            if not is_desktop:
-                # Mobile/Non-Desktop Logic
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
-                # zb_evs = add_click_grace_periods(zb_evs, rng) # <-- DISABLED: Caused click integrity issues
-                zb_evs = add_reaction_variance(zb_evs, rng)
-                if not is_time_sensitive:
-                    zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
-            else:
-                # Desktop Logic
-                zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=True, target_zones=target_zones, excluded_zones=excluded_zones)
-                zb_evs = add_desktop_mouse_paths(zb_evs, rng)
-                # zb_evs = add_click_grace_periods(zb_evs, rng) # <-- DISABLED: Caused click integrity issues
-                zb_evs = add_reaction_variance(zb_evs, rng)
-                if not is_time_sensitive:
-                    zb_evs, _ = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=0)
-            
-            # Re-process the time/duration after applying variance
-            zb_evs, file_duration_ms = process_macro_file(zb_evs) 
-            
-            # Intra-Pauses and AFK
-            if is_time_sensitive:
-                if not exemption_config.get("disable_intra_pauses", False):
-                    intra_evs, _ = insert_intra_pauses(zb_evs, rng, is_time_sensitive=True, max_pause_s=within_max_s, max_num_pauses=within_max_pauses)
-                else:
-                    intra_evs = zb_evs
-            else:
-                intra_evs = zb_evs
-            
-            if rng.random() < 0.5:
-                intra_evs = add_afk_pause(intra_evs, rng)
-        else:
-            # Special file logic
-            intra_evs = zb_evs
-            
-        # Continue merging
-        per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
+            evs = apply_intra_file_pauses(evs, rng)
+            evs = add_mouse_jitter(evs, rng)
+            evs = add_reaction_variance(evs, rng)
         
-        # --- CRITICAL PATCH: Use robust merge function ---
-        pause_ms = 0
-        if idx > 0:
-            if is_time_sensitive and exemption_config.get("disable_inter_pauses", False):
-                pause_ms = rng.randint(100, 500)
-            elif is_time_sensitive:
-                pause_ms = rng.randint(0, int(between_max_s * 1000))
-            else:
-                pause_ms = rng.randint(1000, 12000)
+        # 3. Inter-file Pause (Rule: 100ms - 500ms, non-whole jitter)
+        inter_pause = 0
+        if i > 0:
+            inter_pause = rng.randint(100, 500)
+            inter_pause += rng.randint(1, 9) 
+            total_pause_ms += inter_pause
+                
+        # 4. Merge
+        all_evs = merge_events_with_pauses(all_evs, evs, inter_pause)
         
-        merged = merge_events_with_pauses(merged, intra_evs, pause_ms)
-        time_cursor = merged[-1]["Time"] if merged else time_cursor
-        
-        # Inter-file pause logic (used only for tracking/reporting)
-        if idx < len(final_files) - 1:
-            per_file_inter_ms[str(fpath_obj)] = pause_ms
-            pause_info["inter_file_pauses"].append({"after_file": fpath_obj.name, "pause_ms": pause_ms})
-        else:
-            per_file_inter_ms[str(fpath_obj)] = 1000
-            time_cursor += 1000
+        letter = number_to_letters(i+1)
+        seg_dur = evs[-1]['Time'] - evs[0]['Time']
+        manifest_lines.append(f"  {letter}: {p.name} ({format_ms_precise(seg_dur)})")
     
-    total_ms = time_cursor if merged else 0
-    total_minutes = compute_minutes_from_ms(total_ms)
-    print(f"  → Generated: {total_minutes}m total (target: {target_minutes}m)")
-    parts = []
-    for f in final_files:
-        if f is None:
-            continue
-        part_name = part_from_filename(f)
-        minutes = compute_minutes_from_ms(per_file_event_ms.get(str(f), 0) + per_file_inter_ms.get(str(f), 0))
-        parts.append(f"{part_name}[{minutes}m]")
-    letters = number_to_letters(version_num or 1)
-    parts_str = ' - '.join(parts)
-    base_name = f"{letters}_{total_minutes}m= {parts_str}"
-    MAX_FILENAME_LENGTH = 200
-    if len(base_name) > MAX_FILENAME_LENGTH:
-        file_count = len(final_files)
-        base_name = f"{letters}_{total_minutes}m_{file_count}files"
-    safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
-    excluded = [f for f in regular_files if f not in selected_files]
-    return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes
+    if not all_evs: return None, None, None
+    
+    total_ms = all_evs[-1]['Time'] if all_evs else 0
+    total_dur_str = format_ms_precise(total_ms)
+    afk_dur_str = format_ms_precise(total_pause_ms)
+    
+    v_code = number_to_letters(v_num)
+    final_min_only = int(total_ms / 60000)
+    fname = f"{v_code}_{final_min_only}m.json"
+    
+    manifest_entry = (
+        f"FILENAME: {fname}\n"
+        f"TOTAL DURATION: {total_dur_str}\n"
+        f"TOTAL INTER-FILE AFK: {afk_dur_str}\n"
+        f"COMPONENTS (Includes Internal Random Pauses):\n" + "\n".join(manifest_lines) + "\n" + "-"*30
+    )
+    
+    return fname, all_evs, manifest_entry
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", default="originals")
-    parser.add_argument("--output-dir", default="output")
-    parser.add_argument("--versions", type=int, default=26)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--exclude-count", type=int, default=10)
-    parser.add_argument("--within-max-time", default="33")
-    parser.add_argument("--within-max-pauses", type=int, default=2)
-    parser.add_argument("--between-max-time", default="18")
+    parser.add_argument("input_root", type=Path)
+    parser.add_argument("output_root", type=Path)
+    parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=25)
-    parser.add_argument("--max-files", type=int, default=4)
+    parser.add_argument("--between-max-time", type=int, default=0)
+    parser.add_argument("--exclude-count", type=int, default=0) 
     args = parser.parse_args()
-    rng = random.Random(args.seed) if args.seed is not None else random.Random()
-    input_root, output_parent = Path(args.input_dir), Path(args.output_dir)
-    output_parent.mkdir(parents=True, exist_ok=True)
+
+    rng = random.Random()
+    bundle_n = read_counter(COUNTER_PATH)
+    bundle_dir = args.output_root / f"merged_bundle_{bundle_n}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
     
-    # --- CRITICAL COUNTER PATCH ---
-    # Read the current bundle sequence number (either from env or file)
-    current_bundle_seq = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter(COUNTER_PATH) or 1)
-    output_base_name, output_root = f"merged_bundle_{current_bundle_seq}", output_parent / f"merged_bundle_{current_bundle_seq}"
-    output_root.mkdir(parents=True, exist_ok=True)
+    print(f"Starting merge for bundle {bundle_n}...")
     
-    folder_dirs = find_all_dirs_with_json(input_root)
-    if not folder_dirs:
-        print(f"No JSON files found in {input_root}", file=sys.stderr)
-        # --- CRITICAL COUNTER PATCH: Write incremented value even if no files found ---
-        write_counter(COUNTER_PATH, current_bundle_seq + 1)
-        return
-        
-    try:
-        within_max_s = parse_time_to_seconds(args.within_max_time)
-        between_max_s = parse_time_to_seconds(args.between_max_time)
-    except Exception as e:
-        print(f"ERROR parsing time: {e}", file=sys.stderr)
-        # --- CRITICAL COUNTER PATCH: Write incremented value on error ---
-        write_counter(COUNTER_PATH, current_bundle_seq + 1)
-        return
-        
-    all_written_paths = []
-    exemption_config = load_exemption_config()
-    for folder in folder_dirs:
+    folders = find_all_dirs_with_json(args.input_root)
+    for folder in folders:
         files = find_json_files_in_dir(folder)
-        if not files:
-            continue
-        try:
-            rel_folder = folder.relative_to(input_root)
-        except:
-            rel_folder = Path(folder.name)
-        out_folder_for_group = output_root / rel_folder
-        out_folder_for_group.mkdir(parents=True, exist_ok=True)
-        selector = NonRepeatingSelector(rng)
-        print(f"\nProcessing folder: {rel_folder} ({len(files)} files available)")
-        print(f"  File durations (estimated):")
-        for f in files[:5]:
-            try:
-                evs = load_json_events(Path(f))
-                _, dur = process_macro_file(evs)
-                print(f"    - {Path(f).name}: ~{dur/60000:.1f}m")
-            except:
-                pass
-        always_copied = copy_always_files_unmodified(files, out_folder_for_group)
-        all_written_paths.extend(always_copied)
-        for v in range(1, max(1, args.versions) + 1):
-            merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
-                files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
-                between_max_s, folder, input_root, selector, exemption_config, 
-                target_minutes=args.target_minutes, max_files_per_version=args.max_files
-            )
-            if not merged_fname:
-                continue
-            out_path = out_folder_for_group / merged_fname
-            try:
-                out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
-                print(f"  ✓ Version {v}: {merged_fname}")
-                all_written_paths.append(out_path)
-            except Exception as e:
-                print(f"  ✗ ERROR writing {out_path}: {e}", file=sys.stderr)
-                
-    zip_path = output_parent / f"{output_base_name}.zip"
-    with ZipFile(zip_path, "w") as zf:
-        for fpath in all_written_paths:
-            try:
-                arcname = str(fpath.relative_to(output_parent))
-            except:
-                arcname = f"{output_base_name}/{fpath.name}"
-            zf.write(fpath, arcname=arcname)
-            
-    # --- CRITICAL COUNTER PATCH: Write incremented value at the end ---
-    write_counter(COUNTER_PATH, current_bundle_seq + 1)
+        if not files: continue
         
-    print(f"\n✅ DONE. Created: {zip_path} ({len(all_written_paths)} files)")
+        rel_path = folder.relative_to(args.input_root)
+        out_folder = bundle_dir / rel_path
+        out_folder.mkdir(parents=True, exist_ok=True)
+        
+        selector = QueueFileSelector(rng, files)
+        folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
+        
+        for v in range(1, args.versions + 1):
+            fname, evs, m_entry = generate_version_for_folder(
+                rng, v, folder, selector, args.target_minutes
+            )
+            if fname and evs:
+                (out_folder / fname).write_text(json.dumps(evs, indent=2), encoding="utf-8")
+                folder_manifest.append(m_entry)
+        
+        if len(folder_manifest) > 1:
+            (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest), encoding="utf-8")
+                
+    write_counter(COUNTER_PATH, bundle_n + 1)
 
 if __name__ == "__main__":
     main()
