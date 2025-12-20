@@ -15,6 +15,10 @@ on:
         description: 'Target duration per merged file (uses round-robin queue)'
         required: true
         default: '25'
+      delay_before_action_ms:
+        description: 'Delay Before Action (MS) - Inserts random gaps (0 to disable)'
+        required: true
+        default: '0'
 
 permissions:
   contents: write
@@ -50,6 +54,7 @@ jobs:
             --versions ${{ github.event.inputs.versions }} \
             --between-max-time '${{ github.event.inputs.between_max_time }}' \
             --target-minutes ${{ github.event.inputs.target_minutes }} \
+            --delay-before-action-ms ${{ github.event.inputs.delay_before_action_ms }} \
             originals output
             
       - name: Commit and Push Counter Update
