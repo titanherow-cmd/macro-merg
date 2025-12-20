@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Advanced Pause Logic (Updated Probability Table & Fixed Inter-file)"""
+"""merge_macros.py - Advanced Pause Logic with Jittered Delay-Before-Action (-18/+19ms)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -92,28 +92,56 @@ def number_to_letters(n: int) -> str:
 # PAUSE & ANTI-DETECTION LOGIC
 # ==============================================================================
 
-def apply_intra_file_pauses(events, rng):
+def apply_delay_before_action(events, delay_ms, rng):
     """
-    Implements internal pauses based on updated probability weights:
-    0% (40% chance), 8% (20%), 15% (15%), 21% (10%), 25.5% (10%), 29% (5%)
+    Calculates a pool (20-30% of duration) and inserts delay_ms chunks
+    randomly before actions. Applies -18ms to +19ms jitter to each chunk.
     """
-    if not events: return events
+    if delay_ms <= 0 or not events: return events, 0
     
-    # Updated Probability Table
+    original_duration = events[-1]['Time'] - events[0]['Time']
+    # Choose pool percentage between 20% and 30%
+    pool_pct = rng.uniform(20, 30)
+    total_delay_pool = int(original_duration * (pool_pct / 100))
+    
+    # Estimate insertions based on the base delay_ms
+    num_insertions = total_delay_pool // delay_ms
+    if num_insertions <= 0: return events, 0
+    
+    modified_events = deepcopy(events)
+    total_added = 0
+    
+    for _ in range(num_insertions):
+        idx = rng.randint(1, len(modified_events) - 1)
+        # Apply the specific -18 to +19 jitter logic
+        jitter = rng.randint(-18, 19)
+        actual_chunk = delay_ms + jitter
+        
+        # Ensure we don't accidentally create a negative time shift (safety check)
+        if actual_chunk < 0: actual_chunk = 0
+        
+        for i in range(idx, len(modified_events)):
+            modified_events[i]['Time'] += actual_chunk
+        total_added += actual_chunk
+            
+    return modified_events, total_added
+
+def apply_intra_file_pauses(events, rng):
+    if not events: return events, 0
+    
     choices = [0, 8, 15, 21, 25.5, 29]
     weights = [40, 20, 15, 10, 10, 5]
     pct = rng.choices(choices, weights=weights, k=1)[0]
     
     if pct == 0:
-        return events
+        return events, 0
 
     original_duration = events[-1]['Time'] - events[0]['Time']
     total_pause_needed = int(original_duration * (pct / 100))
     
     if total_pause_needed <= 0:
-        return events
+        return events, 0
 
-    # Divide total pause into 3-6 random chunks
     num_chunks = rng.randint(3, 6)
     chunk_sizes = []
     remaining = total_pause_needed
@@ -123,20 +151,20 @@ def apply_intra_file_pauses(events, rng):
         remaining -= c
     chunk_sizes.append(remaining)
 
-    # Intersperse chunks into the event list (avoiding Protected click sequences)
     modified_events = deepcopy(events)
+    actual_added_ms = 0
+    
     for pause_amt in chunk_sizes:
-        # Pick a random injection point (not at the very start/end)
         idx = rng.randint(1, len(modified_events) - 2)
-        
-        # Add the pause_amt + a random MS jitter to ensure it's NEVER a whole number
+        # Standard jitter for probability pauses
         jitter = rng.randint(1, 49) 
         actual_pause = pause_amt + jitter
+        actual_added_ms += actual_pause
         
         for i in range(idx, len(modified_events)):
             modified_events[i]['Time'] += actual_pause
             
-    return modified_events
+    return modified_events, actual_added_ms
 
 def add_mouse_jitter(events, rng):
     jittered = []
@@ -156,7 +184,6 @@ def add_reaction_variance(events, rng):
     for e in events:
         ne = deepcopy(e)
         if not e.get('PROTECTED') and rng.random() < 0.15:
-            # Add random MS offset, ensuring it's not a round number
             offset += rng.randint(-30, 30) + (rng.random() * 2 - 1)
         ne['Time'] = max(0, int(e.get('Time', 0)) + int(offset))
         varied.append(ne)
@@ -207,8 +234,8 @@ class QueueFileSelector:
             selected.append(pick)
             if pick in self.pool: self.pool.remove(pick)
             
-            # Use 15% as a conservative average internal pause + 300ms inter-file pause for target calculation
-            current_ms += (dur * 1.15) + 300
+            # Use 45% as safe upper bound for target calculation (Inc. new delays)
+            current_ms += (dur * 1.45) + 300
             if len(selected) > 100: break 
             
         return selected
@@ -217,7 +244,7 @@ class QueueFileSelector:
 # MAIN LOGIC
 # ==============================================================================
 
-def generate_version_for_folder(rng, v_num, folder, selector, target_min):
+def generate_version_for_folder(rng, v_num, folder, selector, target_min, delay_before_ms):
     selected_paths = selector.get_files_for_time(target_min)
     if not selected_paths: return None, None, None
     
@@ -228,7 +255,8 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min):
 
     all_evs = []
     manifest_lines = []
-    total_pause_ms = 0
+    total_inter_pause_ms = 0
+    total_internal_pause_ms = 0
     
     for i, path_str in enumerate(selected_paths):
         p = Path(path_str)
@@ -237,34 +265,40 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min):
         raw_evs, _ = process_macro_file(load_json_events(p))
         if not raw_evs: continue
         
-        # 1. Preserve Clicks
         evs = preserve_click_integrity(raw_evs)
+        added_internal_ms = 0
+        added_delay_ms = 0
         
-        # 2. Apply Intra-file Internal Pauses (Updated Probability Rule)
         if not is_special:
-            evs = apply_intra_file_pauses(evs, rng)
+            evs, added_internal_ms = apply_intra_file_pauses(evs, rng)
+            # Use the new jittered delay logic
+            evs, added_delay_ms = apply_delay_before_action(evs, delay_before_ms, rng)
+            
             evs = add_mouse_jitter(evs, rng)
             evs = add_reaction_variance(evs, rng)
         
-        # 3. Inter-file Pause (Rule: 100ms - 500ms, non-whole jitter)
+        total_internal_pause_ms += (added_internal_ms + added_delay_ms)
+        
         inter_pause = 0
         if i > 0:
             inter_pause = rng.randint(100, 500)
             inter_pause += rng.randint(1, 9) 
-            total_pause_ms += inter_pause
+            total_inter_pause_ms += inter_pause
                 
-        # 4. Merge
         all_evs = merge_events_with_pauses(all_evs, evs, inter_pause)
         
         letter = number_to_letters(i+1)
         seg_dur = evs[-1]['Time'] - evs[0]['Time']
-        manifest_lines.append(f"  {letter}: {p.name} ({format_ms_precise(seg_dur)})")
+        running_total_ms = all_evs[-1]['Time']
+        
+        manifest_lines.append(
+            f"  {letter}: {p.name} | Dur: {format_ms_precise(seg_dur)} (Inc. {format_ms_precise(added_internal_ms + added_delay_ms)} Random Gaps) | Total: {format_ms_precise(running_total_ms)}"
+        )
     
     if not all_evs: return None, None, None
     
     total_ms = all_evs[-1]['Time'] if all_evs else 0
     total_dur_str = format_ms_precise(total_ms)
-    afk_dur_str = format_ms_precise(total_pause_ms)
     
     v_code = number_to_letters(v_num)
     final_min_only = int(total_ms / 60000)
@@ -273,8 +307,10 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min):
     manifest_entry = (
         f"FILENAME: {fname}\n"
         f"TOTAL DURATION: {total_dur_str}\n"
-        f"TOTAL INTER-FILE AFK: {afk_dur_str}\n"
-        f"COMPONENTS (Includes Internal Random Pauses):\n" + "\n".join(manifest_lines) + "\n" + "-"*30
+        f"TOTAL COMBINED AFK: {format_ms_precise(total_inter_pause_ms + total_internal_pause_ms)}\n"
+        f"  ├─ Internal delays/pauses: {format_ms_precise(total_internal_pause_ms)}\n"
+        f"  └─ Inter-file gaps: {format_ms_precise(total_inter_pause_ms)}\n"
+        f"COMPONENTS:\n" + "\n".join(manifest_lines) + "\n" + "-"*40
     )
     
     return fname, all_evs, manifest_entry
@@ -285,6 +321,7 @@ def main():
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=25)
+    parser.add_argument("--delay-before-action-ms", type=int, default=0)
     parser.add_argument("--between-max-time", type=int, default=0)
     parser.add_argument("--exclude-count", type=int, default=0) 
     args = parser.parse_args()
@@ -310,7 +347,7 @@ def main():
         
         for v in range(1, args.versions + 1):
             fname, evs, m_entry = generate_version_for_folder(
-                rng, v, folder, selector, args.target_minutes
+                rng, v, folder, selector, args.target_minutes, args.delay_before_action_ms
             )
             if fname and evs:
                 (out_folder / fname).write_text(json.dumps(evs, indent=2), encoding="utf-8")
