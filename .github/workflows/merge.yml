@@ -7,18 +7,14 @@ on:
         description: 'How many versions per group'
         required: true
         default: '6'
-      between_max_time:
-        description: 'Inter-file max pause time (seconds)'
-        required: true
-        default: '18'
       target_minutes:
-        description: 'Target duration per merged file (uses round-robin queue)'
+        description: 'Target duration per merged file'
         required: true
         default: '25'
       delay_before_action_ms:
-        description: 'Delay Before Action (MS) - Inserts random gaps (0 to disable)'
+        description: 'Delay Before Action (MS)'
         required: true
-        default: '0'
+        default: '10'
 
 permissions:
   contents: write
@@ -50,30 +46,39 @@ jobs:
       - name: Execute macro merge script
         run: |
           mkdir -p output
-          python merge_macros.py \
+          python3 merge_macros.py \
+            "input_macros" \
+            "output" \
             --versions ${{ github.event.inputs.versions }} \
-            --between-max-time '${{ github.event.inputs.between_max_time }}' \
             --target-minutes ${{ github.event.inputs.target_minutes }} \
             --delay-before-action-ms ${{ github.event.inputs.delay_before_action_ms }} \
-            originals output
+            --bundle-id ${{ env.BUNDLE_SEQ }}
             
       - name: Commit and Push Counter Update
         run: |
+          NEW_VAL=$((BUNDLE_SEQ + 1))
+          mkdir -p .github
+          echo "$NEW_VAL" > .github/merge_bundle_counter.txt
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .github/merge_bundle_counter.txt || true
-          git commit -m "Increment bundle counter" || echo "No changes"
+          git add .github/merge_bundle_counter.txt
+          git commit -m "Increment bundle counter to $NEW_VAL" || echo "No changes"
           git push || echo "Push failed"
             
       - name: Create ZIP artifact
-        id: zip_step
         run: |
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
+          
+          # Debugging: check if the folder actually exists
+          ls -R output/
+          
           if [ -d "output/$BUNDLE_NAME" ]; then
-            (cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME")
+            # Move into output so ZIP structure is clean
+            cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
           else
-            echo "No output found" > empty.txt && zip "$ZIP_FILE" empty.txt
+            echo "Error: Directory output/$BUNDLE_NAME was not found!"
+            exit 1
           fi
           echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
 
