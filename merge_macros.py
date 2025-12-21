@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Discovery with Accurate Timings, Asset Preservation (including first/last files)"""
+"""merge_macros.py - Discovery with Accurate Timings, Asset Preservation, and Advanced Humanization Rules"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -26,6 +26,8 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
+    if ms < 1000 and ms > 0:
+        return f"{ms}ms"
     total_seconds = int(ms / 1000)
     minutes = total_seconds // 60
     seconds = total_seconds % 60
@@ -61,7 +63,6 @@ class QueueFileSelector:
             
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
-            # Estimate: Duration + 30% buffer + 1.5s gap
             current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
             
             if len(sequence) > 150: break 
@@ -94,18 +95,14 @@ def main():
     folders_with_json = []
     seen_folders = set()
     
-    # 1. Identify which files are "special" and which are for merging
     for p in search_root.rglob("*.json"):
-        # Exclude output or hidden files
         if "output" in p.parts or p.name.startswith('.'):
             continue
             
-        # Define what makes a file "Special" (Excluded from merge)
         is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
         
         if not is_special and p.parent not in seen_folders:
             folder = p.parent
-            # Only JSONs that are NOT special go into the merge pool
             mergeable_jsons = sorted([
                 f for f in folder.glob("*.json") 
                 if not any(x in f.name.lower() for x in ["click_zones", "first", "last"])
@@ -124,11 +121,8 @@ def main():
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        # --- PRESERVE ALL ASSETS ---
-        # Includes .png, click_zones, and now 'first'/'last' files
         for item in folder_path.iterdir():
             if item.is_file():
-                # If it's not in our mergeable list, copy it exactly as is
                 if item not in mergeable_files:
                     shutil.copy2(item, out_folder / item.name)
         
@@ -141,10 +135,12 @@ def main():
             
             merged_events = []
             timeline_ms = 0
-            accumulated_afk = 0
-            total_gaps = 0
-            is_time_sensitive = "time sensitive" in str(folder_path).lower()
             
+            total_delay_before_action = 0
+            total_inter_file_gaps = 0
+            total_afk_pool = 0
+            
+            is_time_sensitive = "time sensitive" in str(folder_path).lower()
             file_segments = []
 
             for i, p_str in enumerate(selected_paths):
@@ -156,42 +152,59 @@ def main():
                 base_t = min(t_vals) if t_vals else 0
                 dur = (max(t_vals) - base_t) if t_vals else 0
                 
+                # Rule 1: Inter-file Gaps (0.5s to 2.5s)
                 gap = rng.randint(500, 2500) if i > 0 else 0
                 timeline_ms += gap
-                total_gaps += gap
+                total_inter_file_gaps += gap
+                
+                # PRE-CALCULATE RULE 2 (Micro-pauses) - Now inside the file
+                # We determine here if it's applied, but apply it during the event loop
+                dba_applied = 0
+                split_event_idx = -1
+                if args.delay_before_action_ms > 0:
+                    if rng.random() < 0.40: # 40% chance
+                        jitter = rng.randint(-118, 119)
+                        dba_applied = max(0, args.delay_before_action_ms + jitter)
+                        if len(raw) > 1:
+                            split_event_idx = rng.randint(1, len(raw) - 1)
+                        else:
+                            split_event_idx = 0
+                
+                total_delay_before_action += dba_applied
                 
                 start_in_merge = len(merged_events)
-                for e in raw:
+                file_segments.append(start_in_merge)
+
+                for event_idx, e in enumerate(raw):
                     ne = deepcopy(e)
-                    ne["Time"] = (int(e.get("Time", 0)) - base_t) + timeline_ms
+                    event_offset = (int(e.get("Time", 0)) - base_t)
+                    
+                    # Rule 2 Placement: If this is the chosen event, push it and all following ones
+                    if event_idx >= split_event_idx and split_event_idx != -1:
+                        event_offset += dba_applied
+                        
+                    ne["Time"] = event_offset + timeline_ms
                     merged_events.append(ne)
-                end_in_merge = len(merged_events) - 1
                 
-                file_segments.append({
-                    "name": p.name,
-                    "start_idx": start_in_merge,
-                    "end_idx": end_in_merge
-                })
-                
+                # Rule 3: AFK Pool calculation
                 if "screensharelink" not in p.name.lower():
-                    pct = rng.choice([0, 0, 0, 0.12, 0.20, 0.28])
-                    accumulated_afk += int(dur * pct)
+                    pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
+                    total_afk_pool += int(dur * pct)
                 
                 timeline_ms = merged_events[-1]["Time"]
 
-            # Apply AFK Pool
-            shift_idx = len(merged_events)
-            if accumulated_afk > 0:
-                if not is_time_sensitive:
-                    shift_idx = rng.randint(1, len(merged_events) - 1)
-                
-                for k in range(shift_idx, len(merged_events)):
-                    merged_events[k]["Time"] += accumulated_afk
-
-            manifest_entry = [f"Version {number_to_letters(v)}:"]
-            for seg in file_segments:
-                actual_end_time = merged_events[seg["end_idx"]]["Time"]
-                manifest_entry.append(f"  - {seg['name']} (Ends at {format_ms_precise(actual_end_time)})")
+            # Apply AFK Pool (the "Big Chunk")
+            if total_afk_pool > 0:
+                if is_time_sensitive:
+                    merged_events[-1]["Time"] += total_afk_pool
+                else:
+                    if len(file_segments) > 1:
+                        target_file_idx = rng.randint(1, len(file_segments) - 1)
+                        event_split_idx = file_segments[target_file_idx]
+                        for k in range(event_split_idx, len(merged_events)):
+                            merged_events[k]["Time"] += total_afk_pool
+                    else:
+                        merged_events[-1]["Time"] += total_afk_pool
 
             final_dur = merged_events[-1]["Time"]
             v_code = number_to_letters(v)
@@ -199,8 +212,15 @@ def main():
             
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
+            all_humanization = total_delay_before_action + total_inter_file_gaps + total_afk_pool
+            
+            manifest_entry = [f"Version {v_code}:"]
             manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
-            manifest_entry.append(f"  HUMANIZATION ADDED (AFK/Gaps): {format_ms_precise(accumulated_afk + total_gaps)}")
+            manifest_entry.append(f"  TOTAL AFK TIME: {format_ms_precise(all_humanization)}")
+            manifest_entry.append(f"  PAUSE BREAKDOWN:")
+            manifest_entry.append(f"    - Micro-pauses (Inside Files): {format_ms_precise(total_delay_before_action)}")
+            manifest_entry.append(f"    - Inter-file Gaps (0.5-2.5s): {format_ms_precise(total_inter_file_gaps)}")
+            manifest_entry.append(f"    - Human AFK Pool (Thinking): {format_ms_precise(total_afk_pool)}")
             manifest_entry.append("-" * 20)
             folder_manifest.append("\n".join(manifest_entry))
 
