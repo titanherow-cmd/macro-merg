@@ -43,7 +43,7 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
       if [ -d "output/$BUNDLE_NAME" ]; then
         cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
       else
-        echo "Error: Directory output/$BUNDLE_NAME not found!"
+        echo "CRITICAL ERROR: Directory output/$BUNDLE_NAME was not created!"
         exit 1
       fi
       echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
