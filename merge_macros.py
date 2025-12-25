@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal x3, Ineff x3, TS x1, ¬¬¬ prefix, and 60m cap"""
+"""merge_macros.py - AFK Priority Logic: Normal (x2 or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -87,9 +87,15 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    search_root = args.input_root
+    # Ensure we search inside the 'originals' folder
+    search_root = args.input_root / "originals"
     if not search_root.exists():
-        search_root = Path(".")
+        # Fallback to current dir if 'originals' doesn't exist, 
+        # but the prompt requirement asks to ensure it is used.
+        search_root = Path("originals")
+        if not search_root.exists():
+            print("Error: 'originals' folder not found.")
+            sys.exit(1)
 
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
@@ -98,6 +104,7 @@ def main():
     folders_with_json = []
     seen_folders = set()
     
+    # Strictly looking inside originals/ subfolders
     for p in search_root.rglob("*.json"):
         if "output" in p.parts or p.name.startswith('.'): continue
         is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
@@ -116,7 +123,6 @@ def main():
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        # Determine if this folder is "Time Sensitive"
         is_ts = "time sensitive" in str(folder_path).lower()
         
         for item in folder_path.iterdir():
@@ -128,21 +134,24 @@ def main():
 
         versions_to_process = []
         for i in range(1, args.versions + 1):
-            versions_to_process.append(False) 
-            if i % 3 == 0:
-                versions_to_process.append(True) 
+            versions_to_process.append(False) # Normal
+            if i % 2 == 0:
+                versions_to_process.append(True) # Extra Inefficient
         
         for idx, is_inefficient in enumerate(versions_to_process):
             v_num = idx + 1
             
             # RULE UPDATES:
-            # 1. Normal files now get x3 multiplier.
-            # 2. Inefficient files stay at x3 multiplier.
-            # 3. Time Sensitive folders get x1 multiplier (no scaling).
+            # 1. Inefficient files stay at x3 multiplier.
+            # 2. Normal files get a 50/50 chance of x2 or x3 multiplier.
+            # 3. Time Sensitive folders stay at x1 multiplier.
             if is_ts:
                 afk_multiplier = 1
-            else:
+            elif is_inefficient:
                 afk_multiplier = 3
+            else:
+                # 50-50 chance for normal files
+                afk_multiplier = rng.choice([2, 3])
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
