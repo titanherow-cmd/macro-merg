@@ -2,6 +2,7 @@
 import argparse
 import json
 import random
+import os
 import sys
 from pathlib import Path
 from copy import deepcopy
@@ -10,20 +11,16 @@ def load_json(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Handle different macro formats
             if isinstance(data, dict):
-                for key in ["events", "items", "entries"]:
-                    if key in data: return data[key]
-                return [data]
-            return data
-    except Exception as e:
-        return []
+                for key in ["events", "items", "entries", "records"]:
+                    if key in data and isinstance(data[key], list): return data[key]
+                return [data] if "Time" in data else []
+            return data if isinstance(data, list) else []
+    except: return []
 
 def format_ms(ms):
     total_seconds = int(ms / 1000)
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    return f"{minutes}m {seconds}s"
+    return f"{total_seconds // 60}m {total_seconds % 60}s"
 
 class MacroEngine:
     def __init__(self, rng, speed_range, delay_ms):
@@ -40,52 +37,45 @@ class MacroEngine:
         if self.rng.random() < 0.40:
             delay = max(0, self.delay_ms + self.rng.randint(-118, 119))
             
-        # Rule: File-specific Speed Multiplier
+        # File-specific Speed Multiplier
         speed = self.rng.uniform(self.speed_range[0], self.speed_range[1])
         
         processed = []
-        t_start = int(events[0].get("Time", 0))
+        t_vals = [int(e.get("Time", 0)) for e in events]
+        t_start = min(t_vals) if t_vals else 0
         
-        # Random split point for the micro-pause
         split_idx = self.rng.randint(0, len(events)-1) if len(events) > 1 else 0
         
         for i, e in enumerate(events):
             ne = deepcopy(e)
-            # Normalize to 0 and apply speed
             rel_t = (int(e.get("Time", 0)) - t_start) * speed
-            # Apply the delay if we are past the split point
-            if i >= split_idx:
-                rel_t += delay
+            if i >= split_idx: rel_t += delay
             ne["Time"] = int(rel_t)
             processed.append(ne)
             
         return processed
 
     def merge_sequence(self, folder, files, target_mins, v_num):
-        # 1 in 4 versions is "Inefficient" (massive AFK)
+        # 1 in 4 versions is "Inefficient"
         is_inefficient = (v_num % 4 == 0)
         is_ts = "time sensitive" in folder.name.lower()
         
-        # Separate special assets
         firsts = sorted([f for f in files if "first" in f.name.lower()])
         lasts = sorted([f for f in files if "last" in f.name.lower()])
         pool = [f for f in files if f not in firsts and f not in lasts]
         
-        # Shuffle middle pool
         self.rng.shuffle(pool)
         
         selected = list(firsts)
         current_ms = 0
         target_ms = target_mins * 60000
         
-        # Build file list
         if pool:
-            while current_ms < target_ms:
+            while current_ms < target_ms and len(selected) < 100:
                 pick = self.rng.choice(pool)
                 selected.append(pick)
-                # Estimate 2 minutes per file for selection logic
-                current_ms += 120000
-                if len(selected) > 60: break
+                # Estimate 2.5 mins per file
+                current_ms += 150000 
         
         selected.extend(lasts)
         
@@ -96,50 +86,45 @@ class MacroEngine:
 
         for i, f in enumerate(selected):
             is_special = "screensharelink" in f.name.lower()
-            raw_events = load_json(f)
-            if not raw_events: continue
+            raw = load_json(f)
+            if not raw: continue
             
-            # Rule 3: Inter-file Gaps (0.5s to 2s)
+            # Inter-file Gap
             gap = self.rng.randint(500, 2000) if i > 0 else 0
             timeline += gap
             
-            # Rule 1: Humanization and Speed
-            processed = self.apply_humanization(raw_events, is_special)
-            
-            # Shift events onto the timeline
+            processed = self.apply_humanization(raw, is_special)
+            if not processed: continue
+
             for e in processed:
                 e["Time"] += timeline
                 merged.append(e)
             
-            # Rule 2: AFK Pool Calculation (Weighted probability)
+            # Rule 2: AFK Pool
             if not is_special:
                 duration = processed[-1]["Time"] - processed[0]["Time"]
-                # 55% None, 20% 12%, 15% 20%, 10% 28%
                 pct = self.rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
                 afk_pool_ms += int(duration * pct)
             
             timeline = merged[-1]["Time"]
             manifest_details.append(f"  - {f.name} (Ends: {format_ms(timeline)})")
 
-        # Inefficient Mode: Add massive 15-27 minute pause
         if is_inefficient:
             afk_pool_ms += self.rng.randint(15, 27) * 60000
             
-        # Injection Logic: Time Sensitive appends to end, otherwise random seam
         if is_ts:
             if merged: merged[-1]["Time"] += afk_pool_ms
         else:
-            # Inject pause at a random point in the second half of the sequence
-            split_point = self.rng.randint(len(merged)//2, len(merged)-1) if len(merged) > 1 else 0
-            for k in range(split_point, len(merged)):
+            split = self.rng.randint(len(merged)//2, len(merged)-1) if len(merged) > 1 else 0
+            for k in range(split, len(merged)):
                 merged[k]["Time"] += afk_pool_ms
 
-        final_duration = merged[-1]["Time"] if merged else 0
-        v_prefix = "¬¬¬" if is_inefficient else ""
+        final_dur = merged[-1]["Time"] if merged else 0
+        v_tag = "¬¬¬" if is_inefficient else ""
         v_letter = chr(64 + v_num) if v_num <= 26 else str(v_num)
-        filename = f"{v_prefix}{v_letter}_{int(final_duration/60000)}m.json"
+        filename = f"{v_tag}{v_letter}_{int(final_dur/60000)}m.json"
         
-        manifest_text = "\n".join(manifest_details) + f"\n  TOTAL AFK/HUMAN PAUSE: {format_ms(afk_pool_ms)}"
+        manifest_text = "\n".join(manifest_details) + f"\n  TOTAL AFK: {format_ms(afk_pool_ms)}"
         return filename, merged, manifest_text
 
 def main():
@@ -153,7 +138,6 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # Parse speed range
     try:
         s_min, s_max = map(float, args.speed_range.split())
     except:
@@ -165,25 +149,19 @@ def main():
     bundle_name = f"merged_bundle_{args.bundle_id}"
     output_base = args.output / bundle_name
     
-    # Scan for folders containing JSON
-    target_folders = [d for d in args.input.rglob("*") if d.is_dir()]
-    if not any(folder.glob("*.json") for folder in target_folders):
-        # If no subfolders, check the root input
+    target_folders = [d for d in args.input.rglob("*") if d.is_dir() and any(d.glob("*.json"))]
+    if not target_folders and any(args.input.glob("*.json")):
         target_folders = [args.input]
 
     for folder in target_folders:
         json_files = sorted(list(folder.glob("*.json")))
         if not json_files: continue
         
-        # Mirror relative path structure
-        try:
-            rel_path = folder.relative_to(args.input)
-        except:
-            rel_path = Path(".")
+        try: rel_path = folder.relative_to(args.input)
+        except: rel_path = Path(".")
             
         out_folder = output_base / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
-        
         folder_manifest = [f"Group: {rel_path}\n" + "="*20]
         
         for v in range(1, args.versions + 1):
