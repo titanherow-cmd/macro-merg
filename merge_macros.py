@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x2 or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio"""
+"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio, Rounded to Seconds"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -26,14 +26,19 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
+    # Since we are rounding to seconds, this helper will now reflect clean intervals
     if ms < 1000 and ms > 0:
         return f"{ms}ms"
-    total_seconds = int(ms / 1000)
+    total_seconds = int(round(ms / 1000))
     minutes = total_seconds // 60
     seconds = total_seconds % 60
     if minutes == 0:
         return f"{seconds}s"
     return f"{minutes}m {seconds}s"
+
+def round_to_sec(ms: int) -> int:
+    """Rounds a millisecond value to the nearest 1000ms increment."""
+    return int(round(ms / 1000.0) * 1000)
 
 def number_to_letters(n: int) -> str:
     res = ""
@@ -87,11 +92,8 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    # Ensure we search inside the 'originals' folder
     search_root = args.input_root / "originals"
     if not search_root.exists():
-        # Fallback to current dir if 'originals' doesn't exist, 
-        # but the prompt requirement asks to ensure it is used.
         search_root = Path("originals")
         if not search_root.exists():
             print("Error: 'originals' folder not found.")
@@ -104,7 +106,6 @@ def main():
     folders_with_json = []
     seen_folders = set()
     
-    # Strictly looking inside originals/ subfolders
     for p in search_root.rglob("*.json"):
         if "output" in p.parts or p.name.startswith('.'): continue
         is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
@@ -141,23 +142,19 @@ def main():
         for idx, is_inefficient in enumerate(versions_to_process):
             v_num = idx + 1
             
-            # RULE UPDATES:
-            # 1. Inefficient files stay at x3 multiplier.
-            # 2. Normal files get a 50/50 chance of x2 or x3 multiplier.
-            # 3. Time Sensitive folders stay at x1 multiplier.
             if is_ts:
                 afk_multiplier = 1
             elif is_inefficient:
                 afk_multiplier = 3
             else:
-                # 50-50 chance for normal files
-                afk_multiplier = rng.choice([2, 3])
+                afk_multiplier = rng.choice([1, 2, 3])
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
             
-            massive_p1 = rng.randint(5 * 60 * 1000, 10 * 60 * 1000) if is_inefficient else 0
-            massive_p2 = rng.randint(10 * 60 * 1000, 17 * 60 * 1000) if is_inefficient else 0
+            # Massive pauses are chosen in MS but rounded to sec for the logic later
+            massive_p1 = round_to_sec(rng.randint(5 * 60 * 1000, 10 * 60 * 1000)) if is_inefficient else 0
+            massive_p2 = round_to_sec(rng.randint(10 * 60 * 1000, 17 * 60 * 1000)) if is_inefficient else 0
             
             MAX_MS = 60 * 60 * 1000
             speed = rng.uniform(s_min, s_max)
@@ -167,12 +164,13 @@ def main():
                 for i, p_str in enumerate(selected_paths):
                     p = Path(p_str)
                     dur = get_file_duration_ms(p) * speed
-                    gap = (rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier
+                    # Gaps/Pauses are calculated with full MS randomness, then rounded
+                    gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                     afk_pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    afk_val = (int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier
+                    afk_val = round_to_sec((int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier)
                     dba_val = 0
                     if rng.random() < 0.40:
-                        dba_val = (max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier
+                        dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
                     temp_total_dur += dur + gap + afk_val + dba_val
 
                 if temp_total_dur <= MAX_MS or len(selected_paths) <= 1:
@@ -196,14 +194,16 @@ def main():
                 base_t = min(t_vals) if t_vals else 0
                 dur = (max(t_vals) - base_t) if t_vals else 0
                 
-                gap = (rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier
+                # Apply rounding to the random gap
+                gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
                 total_gaps += gap
                 
                 dba_val = 0
                 split_idx = -1
                 if rng.random() < 0.40:
-                    dba_val = (max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier
+                    # Apply rounding to the micro-pause
+                    dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
                     if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
                 total_dba += dba_val
                 
@@ -211,6 +211,7 @@ def main():
                 for ev_idx, e in enumerate(raw):
                     ne = deepcopy(e)
                     off = (int(e.get("Time", 0)) - base_t) * speed
+                    # Inner action timing remains natural, only pauses are rounded to sec
                     if ev_idx >= split_idx and split_idx != -1: off += dba_val
                     ne["Time"] = int(off + timeline_ms)
                     merged_events.append(ne)
@@ -219,10 +220,12 @@ def main():
                 
                 if "screensharelink" not in p.name.lower():
                     pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    total_afk_pool += (int(dur * speed * pct)) * afk_multiplier
+                    # Apply rounding to the AFK pool contribution
+                    total_afk_pool += round_to_sec((int(dur * speed * pct)) * afk_multiplier)
                 
                 timeline_ms = merged_events[-1]["Time"]
 
+            # Final injections also use rounded values
             if total_afk_pool > 0:
                 if is_ts: merged_events[-1]["Time"] += total_afk_pool
                 else:
