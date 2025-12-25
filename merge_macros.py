@@ -138,8 +138,11 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
+    # Robust speed-range parsing
     try:
-        s_min, s_max = map(float, args.speed_range.split())
+        parts = args.speed_range.replace(',', ' ').split()
+        s_min = float(parts[0])
+        s_max = float(parts[1]) if len(parts) > 1 else s_min
     except:
         s_min, s_max = 1.0, 1.0
 
@@ -154,7 +157,7 @@ def main():
         target_folders = [args.input]
 
     for folder in target_folders:
-        json_files = sorted(list(folder.glob("*.json")))
+        json_files = sorted([f for f in folder.glob("*.json") if "click_zones" not in f.name])
         if not json_files: continue
         
         try: rel_path = folder.relative_to(args.input)
