@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Extra Inefficient versions (1 per 3 normal), ¬¬¬ prefix, and 60m cap"""
+"""merge_macros.py - AFK Priority Logic: Normal x3, Ineff x3, TS x1, ¬¬¬ prefix, and 60m cap"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -77,11 +77,19 @@ def main():
     parser.add_argument("--target-minutes", type=int, default=25)
     parser.add_argument("--delay-before-action-ms", type=int, default=10)
     parser.add_argument("--bundle-id", type=int, required=True)
+    parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args, unknown = parser.parse_known_args()
+
+    try:
+        parts = args.speed_range.replace(',', ' ').split()
+        s_min = float(parts[0])
+        s_max = float(parts[1]) if len(parts) > 1 else s_min
+    except:
+        s_min, s_max = 1.0, 1.0
 
     search_root = args.input_root
     if not search_root.exists():
-        search_root = Path("originals") if Path("originals").exists() else Path(".")
+        search_root = Path(".")
 
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
@@ -108,8 +116,11 @@ def main():
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
+        # Determine if this folder is "Time Sensitive"
+        is_ts = "time sensitive" in str(folder_path).lower()
+        
         for item in folder_path.iterdir():
-            if item.is_file() and item not in mergeable_files:
+            if item.is_file() and item not in mergeable_files and "click_zones" not in item.name:
                 shutil.copy2(item, out_folder / item.name)
         
         selector = QueueFileSelector(rng, mergeable_files)
@@ -117,13 +128,21 @@ def main():
 
         versions_to_process = []
         for i in range(1, args.versions + 1):
-            versions_to_process.append(False) # Normal
+            versions_to_process.append(False) 
             if i % 3 == 0:
-                versions_to_process.append(True) # Extra Inefficient
+                versions_to_process.append(True) 
         
         for idx, is_inefficient in enumerate(versions_to_process):
             v_num = idx + 1
-            afk_multiplier = 3 if is_inefficient else 1
+            
+            # RULE UPDATES:
+            # 1. Normal files now get x3 multiplier.
+            # 2. Inefficient files stay at x3 multiplier.
+            # 3. Time Sensitive folders get x1 multiplier (no scaling).
+            if is_ts:
+                afk_multiplier = 1
+            else:
+                afk_multiplier = 3
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
@@ -132,12 +151,13 @@ def main():
             massive_p2 = rng.randint(10 * 60 * 1000, 17 * 60 * 1000) if is_inefficient else 0
             
             MAX_MS = 60 * 60 * 1000
+            speed = rng.uniform(s_min, s_max)
             
             while True:
                 temp_total_dur = massive_p1 + massive_p2
                 for i, p_str in enumerate(selected_paths):
                     p = Path(p_str)
-                    dur = get_file_duration_ms(p)
+                    dur = get_file_duration_ms(p) * speed
                     gap = (rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier
                     afk_pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
                     afk_val = (int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier
@@ -181,18 +201,19 @@ def main():
                 start_in_merge = len(merged_events)
                 for ev_idx, e in enumerate(raw):
                     ne = deepcopy(e)
-                    off = (int(e.get("Time", 0)) - base_t)
+                    off = (int(e.get("Time", 0)) - base_t) * speed
                     if ev_idx >= split_idx and split_idx != -1: off += dba_val
-                    ne["Time"] = off + timeline_ms
+                    ne["Time"] = int(off + timeline_ms)
                     merged_events.append(ne)
                 
                 file_segments.append({"name": p.name, "start_idx": start_in_merge, "end_idx": len(merged_events)-1})
+                
                 if "screensharelink" not in p.name.lower():
                     pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    total_afk_pool += (int(dur * pct)) * afk_multiplier
+                    total_afk_pool += (int(dur * speed * pct)) * afk_multiplier
+                
                 timeline_ms = merged_events[-1]["Time"]
 
-            is_ts = "time sensitive" in str(folder_path).lower()
             if total_afk_pool > 0:
                 if is_ts: merged_events[-1]["Time"] += total_afk_pool
                 else:
@@ -216,24 +237,21 @@ def main():
             fname = f"{prefix}{v_code}_{int(final_dur / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
-            # Formatting the Manifest for this version
             total_human_pause = total_dba + total_gaps + total_afk_pool + massive_p1 + massive_p2
-            
-            v_title = f"Version {v_code}{' [EXTRA - INEFFICIENT]' if is_inefficient else ''}:"
+            v_title = f"Version {v_code}{' [EXTRA - INEFFICIENT]' if is_inefficient else ''} (Multiplier: x{afk_multiplier}):"
             manifest_entry = [v_title]
             manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
             manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
             manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
             manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
-            manifest_entry.append(f"    - Normal AFK Pool: {format_ms_precise(total_afk_pool)}")
+            manifest_entry.append(f"    - AFK Pool: {format_ms_precise(total_afk_pool)}")
             if is_inefficient:
                 manifest_entry.append(f"    - Massive P1: {format_ms_precise(massive_p1)}")
                 manifest_entry.append(f"    - Massive P2: {format_ms_precise(massive_p2)}")
             
-            manifest_entry.append("") # Blank line before files
-            
+            manifest_entry.append("")
             for i, seg in enumerate(file_segments):
-                bullet = "*" if i < 11 else "-" # Example showed * then - after 11 items
+                bullet = "*" if i < 11 else "-"
                 end_time_str = format_ms_precise(merged_events[seg['end_idx']]['Time'])
                 manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {end_time_str})")
             
@@ -241,7 +259,6 @@ def main():
             folder_manifest.append("\n".join(manifest_entry))
 
         (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
-        print(f"Processed: {rel_path}")
 
     print(f"--- SUCCESS: Bundle {args.bundle_id} created ---")
 
