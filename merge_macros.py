@@ -30,20 +30,22 @@ class MacroEngine:
 
     def apply_humanization(self, events, is_special):
         if not events or is_special: return events
-        
+
         # Micro-pause (40% chance)
         delay = 0
         if self.rng.random() < 0.40:
             delay = max(0, self.delay_ms + self.rng.randint(-118, 119))
-            
+
+        # File-specific Speed Multiplier
         speed = self.rng.uniform(self.speed_range[0], self.speed_range[1])
-        
+
         processed = []
         t_vals = [int(e.get("Time", 0)) for e in events]
         t_start = min(t_vals) if t_vals else 0
-        
+
+        # Random split point for the micro-pause
         split_idx = self.rng.randint(0, len(events)-1) if len(events) > 1 else 0
-        
+
         for i, e in enumerate(events):
             ne = deepcopy(e)
             rel_t = (int(e.get("Time", 0)) - t_start) * speed
@@ -60,20 +62,21 @@ class MacroEngine:
         firsts = sorted([f for f in files if "first" in f.name.lower()])
         lasts = sorted([f for f in files if "last" in f.name.lower()])
         pool = [f for f in files if f not in firsts and f not in lasts]
-        
+
         self.rng.shuffle(pool)
+
         selected = list(firsts)
         current_ms = 0
         target_ms = target_mins * 60000
-        
+
         if pool:
             while current_ms < target_ms and len(selected) < 100:
                 pick = self.rng.choice(pool)
                 selected.append(pick)
                 current_ms += 150000 
-        
+
         selected.extend(lasts)
-        
+
         merged = []
         timeline = 0
         manifest_details = []
@@ -83,17 +86,17 @@ class MacroEngine:
             is_special = "screensharelink" in f.name.lower()
             raw = load_json_events(f)
             if not raw: continue
-            
+
             gap = self.rng.randint(500, 2000) if i > 0 else 0
             timeline += gap
-            
+
             processed = self.apply_humanization(raw, is_special)
             if not processed: continue
 
             for e in processed:
                 e["Time"] += timeline
                 merged.append(e)
-            
+
             if not is_special:
                 duration = processed[-1]["Time"] - processed[0]["Time"]
                 pct = self.rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
@@ -104,7 +107,7 @@ class MacroEngine:
 
         if is_inefficient:
             afk_pool_ms += self.rng.randint(15, 27) * 60000
-            
+
         if is_ts:
             if merged: merged[-1]["Time"] += afk_pool_ms
         else:
@@ -117,8 +120,7 @@ class MacroEngine:
         v_letter = chr(64 + v_num) if v_num <= 26 else str(v_num)
         filename = f"{v_tag}{v_letter}_{int(final_dur/60000)}m.json"
         
-        manifest_text = "\n".join(manifest_details) + f"\n  TOTAL AFK: {format_ms(afk_pool_ms)}"
-        return filename, merged, manifest_text
+        return filename, merged, "\n".join(manifest_details) + f"\n  TOTAL AFK: {format_ms(afk_pool_ms)}"
 
 def main():
     parser = argparse.ArgumentParser()
@@ -143,7 +145,7 @@ def main():
     
     bundle_name = f"merged_bundle_{args.bundle_id}"
     output_base = args.output_root / bundle_name
-    
+
     target_folders = [d for d in args.input_root.rglob("*") if d.is_dir()]
     valid_folders = []
     for d in target_folders:
