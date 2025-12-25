@@ -16,8 +16,9 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
   - name: Execute macro merge script
     run: |
       mkdir -p output
+      # Note: We use "." to scan the whole repo for JSON folders
       python3 merge_macros.py \
-        "originals" \
+        "." \
         "output" \
         --versions ${{ github.event.inputs.versions }} \
         --target-minutes ${{ github.event.inputs.target_minutes }} \
