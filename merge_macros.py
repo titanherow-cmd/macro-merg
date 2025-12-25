@@ -7,11 +7,12 @@ import sys
 from pathlib import Path
 from copy import deepcopy
 
-def load_json(path):
+def load_json_events(path: Path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if isinstance(data, dict):
+                # Check common macro keys
                 for key in ["events", "items", "entries", "records"]:
                     if key in data and isinstance(data[key], list): return data[key]
                 return [data] if "Time" in data else []
@@ -44,11 +45,14 @@ class MacroEngine:
         t_vals = [int(e.get("Time", 0)) for e in events]
         t_start = min(t_vals) if t_vals else 0
         
+        # Random split point for the micro-pause
         split_idx = self.rng.randint(0, len(events)-1) if len(events) > 1 else 0
         
         for i, e in enumerate(events):
             ne = deepcopy(e)
+            # Normalize and Scale
             rel_t = (int(e.get("Time", 0)) - t_start) * speed
+            # Apply delay past split point
             if i >= split_idx: rel_t += delay
             ne["Time"] = int(rel_t)
             processed.append(ne)
@@ -56,7 +60,6 @@ class MacroEngine:
         return processed
 
     def merge_sequence(self, folder, files, target_mins, v_num):
-        # 1 in 4 versions is "Inefficient"
         is_inefficient = (v_num % 4 == 0)
         is_ts = "time sensitive" in folder.name.lower()
         
@@ -70,12 +73,13 @@ class MacroEngine:
         current_ms = 0
         target_ms = target_mins * 60000
         
+        # Selection logic with safety break
         if pool:
-            while current_ms < target_ms and len(selected) < 100:
+            for _ in range(50): 
+                if current_ms >= target_ms: break
                 pick = self.rng.choice(pool)
                 selected.append(pick)
-                # Estimate 2.5 mins per file
-                current_ms += 150000 
+                current_ms += 150000 # 2.5m avg
         
         selected.extend(lasts)
         
@@ -86,13 +90,14 @@ class MacroEngine:
 
         for i, f in enumerate(selected):
             is_special = "screensharelink" in f.name.lower()
-            raw = load_json(f)
+            raw = load_json_events(f)
             if not raw: continue
             
-            # Inter-file Gap
+            # Rule 3: Inter-file Gaps
             gap = self.rng.randint(500, 2000) if i > 0 else 0
             timeline += gap
             
+            # Apply Rule 1 and Speed
             processed = self.apply_humanization(raw, is_special)
             if not processed: continue
 
@@ -100,7 +105,7 @@ class MacroEngine:
                 e["Time"] += timeline
                 merged.append(e)
             
-            # Rule 2: AFK Pool
+            # Rule 2: AFK Weighting
             if not is_special:
                 duration = processed[-1]["Time"] - processed[0]["Time"]
                 pct = self.rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
@@ -109,9 +114,11 @@ class MacroEngine:
             timeline = merged[-1]["Time"]
             manifest_details.append(f"  - {f.name} (Ends: {format_ms(timeline)})")
 
+        # Inefficient Mode (1:3 ratio logic)
         if is_inefficient:
             afk_pool_ms += self.rng.randint(15, 27) * 60000
             
+        # Injection
         if is_ts:
             if merged: merged[-1]["Time"] += afk_pool_ms
         else:
@@ -124,13 +131,13 @@ class MacroEngine:
         v_letter = chr(64 + v_num) if v_num <= 26 else str(v_num)
         filename = f"{v_tag}{v_letter}_{int(final_dur/60000)}m.json"
         
-        manifest_text = "\n".join(manifest_details) + f"\n  TOTAL AFK: {format_ms(afk_pool_ms)}"
+        manifest_text = "\n".join(manifest_details) + f"\n  TOTAL PAUSE/AFK: {format_ms(afk_pool_ms)}"
         return filename, merged, manifest_text
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("input_root", type=Path)
+    parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=25)
     parser.add_argument("--delay-before-action-ms", type=int, default=10)
@@ -138,7 +145,7 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # Robust speed-range parsing
+    # Parse speed range string
     try:
         parts = args.speed_range.replace(',', ' ').split()
         s_min = float(parts[0])
@@ -150,17 +157,23 @@ def main():
     engine = MacroEngine(rng, (s_min, s_max), args.delay_before_action_ms)
     
     bundle_name = f"merged_bundle_{args.bundle_id}"
-    output_base = args.output / bundle_name
+    output_base = args.output_root / bundle_name
     
-    target_folders = [d for d in args.input.rglob("*") if d.is_dir() and any(d.glob("*.json"))]
-    if not target_folders and any(args.input.glob("*.json")):
-        target_folders = [args.input]
+    # Identify folders containing JSONs (excluding output/meta)
+    all_folders = [d for d in args.input_root.rglob("*") if d.is_dir()]
+    target_folders = []
+    for d in all_folders:
+        if "output" in d.parts or ".github" in d.parts: continue
+        if list(d.glob("*.json")): target_folders.append(d)
+
+    if not target_folders and list(args.input_root.glob("*.json")):
+        target_folders = [args.input_root]
 
     for folder in target_folders:
         json_files = sorted([f for f in folder.glob("*.json") if "click_zones" not in f.name])
         if not json_files: continue
         
-        try: rel_path = folder.relative_to(args.input)
+        try: rel_path = folder.relative_to(args.input_root)
         except: rel_path = Path(".")
             
         out_folder = output_base / rel_path
