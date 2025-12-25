@@ -17,13 +17,13 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
     run: |
       mkdir -p output
       python3 merge_macros.py \
-        "input_macros" \
+        "originals" \
         "output" \
         --versions ${{ github.event.inputs.versions }} \
         --target-minutes ${{ github.event.inputs.target_minutes }} \
         --delay-before-action-ms ${{ github.event.inputs.delay_before_action_ms }} \
         --bundle-id ${{ env.BUNDLE_SEQ }} \
-        --speed-range ${{ github.event.inputs.speed_range }}
+        --speed-range "${{ github.event.inputs.speed_range }}"
         
   - name: Commit and Push Counter Update
     run: |
@@ -43,7 +43,7 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
       if [ -d "output/$BUNDLE_NAME" ]; then
         cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
       else
-        echo "Error: Directory output/$BUNDLE_NAME was not found!"
+        echo "CRITICAL ERROR: Directory output/$BUNDLE_NAME was not created!"
         exit 1
       fi
       echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
