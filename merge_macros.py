@@ -45,13 +45,11 @@ def number_to_letters(n: int) -> str:
         res = chr(65 + rem) + res
     return res or "A"
 
-def clean_folder_name(name: str) -> str:
-    """Removes common suffixes like '- Copy' or '(2)' and standardizes naming."""
-    # Remove " - Copy", " (1)", etc.
+def clean_identity(name: str) -> str:
+    """Standardizes names for matching purposes."""
+    # Remove common suffixes like '- Copy', '(1)', etc.
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
-    # Remove "Z +100" from the name if it's baked into the folder name
-    name = re.sub(r'Z\s*\+\s*100', '', name, flags=re.IGNORECASE).strip()
-    return name
+    return name.lower()
 
 class QueueFileSelector:
     def __init__(self, rng, all_mergeable_files):
@@ -98,7 +96,7 @@ def main():
         base_dir = Path(".")
     
     if not (base_dir / "originals").exists():
-        print(f"CRITICAL ERROR: 'originals' folder not found.")
+        print(f"CRITICAL ERROR: 'originals' folder not found in {base_dir.resolve()}")
         sys.exit(1)
     
     rng = random.Random()
@@ -107,127 +105,101 @@ def main():
     
     unified_pools = {}
     
-    # Define search roots
+    # 1. SCAN ORIGINALS FIRST (These define our output structure)
     originals_root = base_dir / "originals"
-    z_extra_root = base_dir / "Z +100"
-
-    search_targets = [
-        (originals_root, True), 
-        (z_extra_root, False)
-    ]
-
-    for root_path, is_primary in search_targets:
-        if not root_path.exists(): 
-            continue
+    print(f"--- SCANNING ORIGINALS: {originals_root} ---")
+    for p in originals_root.rglob("*.json"):
+        if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
+        if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
         
-        print(f"Scanning Root: {root_path.name}")
-        for p in root_path.rglob("*.json"):
-            if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
-            if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
-            
-            # 1. Identify Super-Parent (Game) and Child (Macro Folder)
-            rel_parts = p.parent.relative_to(root_path).parts
-            
-            if len(rel_parts) >= 2:
-                # E.g. originals / GameName / MacroFolder
-                super_parent_name = clean_folder_name(rel_parts[0])
-                child_name_raw = rel_parts[1]
-            elif len(rel_parts) == 1:
-                # E.g. originals / MacroFolder
-                super_parent_name = "General"
-                child_name_raw = rel_parts[0]
-            else:
-                super_parent_name = "General"
-                child_name_raw = "Root"
-            
-            # Clean names to ensure "Folder" and "Folder - Copy" match
-            child_name_clean = clean_folder_name(child_name_raw)
-            identity_key = (super_parent_name.lower(), child_name_clean.lower())
-            
-            if identity_key not in unified_pools:
-                unified_pools[identity_key] = {
-                    "display_name": (super_parent_name, child_name_clean),
-                    "files": [],
-                    "is_ts": "time sensitive" in child_name_clean.lower(),
-                    "source_folders": [],
-                    "has_primary": False 
-                }
-            
-            if is_primary:
-                unified_pools[identity_key]["has_primary"] = True
-            
-            # Add to files list
-            if p not in unified_pools[identity_key]["files"]:
-                unified_pools[identity_key]["files"].append(p)
-            
-            # Collect folders to find non-json assets (images/clickzones)
-            if p.parent not in unified_pools[identity_key]["source_folders"]:
-                unified_pools[identity_key]["source_folders"].append(p.parent)
+        rel_parts = p.parent.relative_to(originals_root).parts
+        if len(rel_parts) >= 2:
+            game_name = rel_parts[0]
+            macro_folder = rel_parts[1]
+        elif len(rel_parts) == 1:
+            game_name = "General"
+            macro_folder = rel_parts[0]
+        else:
+            game_name = "General"
+            macro_folder = "Root"
 
-    # FILTER: Remove any keys that ONLY exist in Z +100
-    pools_to_process = {k: v for k, v in unified_pools.items() if v["has_primary"]}
+        # Identity is based on CLEANED names
+        key = (clean_identity(game_name), clean_identity(macro_folder))
+        
+        if key not in unified_pools:
+            unified_pools[key] = {
+                "out_rel_path": Path(game_name) / macro_folder,
+                "display_name": f"{game_name} / {macro_folder}",
+                "files": [],
+                "is_ts": "time sensitive" in macro_folder.lower(),
+                "source_folders": []
+            }
+        
+        unified_pools[key]["files"].append(p)
+        if p.parent not in unified_pools[key]["source_folders"]:
+            unified_pools[key]["source_folders"].append(p.parent)
 
-    if not pools_to_process:
-        print("CRITICAL ERROR: No valid macro files found in 'originals' to merge!")
+    # 2. SCAN SUPPLEMENTAL FOLDERS (Any folder starting with Z)
+    print(f"--- SCANNING SUPPLEMENTAL STORAGE (Z folders) ---")
+    # Search for any directory in root that starts with 'Z'
+    for z_folder in base_dir.iterdir():
+        if z_folder.is_dir() and z_folder.name.upper().startswith('Z'):
+            print(f" Found supplemental source: {z_folder.name}")
+            for p in z_folder.rglob("*.json"):
+                if "output" in p.parts or p.name.startswith('.'): continue
+                
+                # Determine where this would fit in the 'originals' structure
+                rel_parts = p.parent.relative_to(z_folder).parts
+                if len(rel_parts) >= 2:
+                    z_game = rel_parts[0]
+                    z_macro = rel_parts[1]
+                elif len(rel_parts) == 1:
+                    z_game = "General"
+                    z_macro = rel_parts[0]
+                else:
+                    z_game = "General"
+                    z_macro = "Root"
+                
+                z_key = (clean_identity(z_game), clean_identity(z_macro))
+                
+                # ONLY add if it matches an existing pool from 'originals'
+                if z_key in unified_pools:
+                    unified_pools[z_key]["files"].append(p)
+                    if p.parent not in unified_pools[z_key]["source_folders"]:
+                        unified_pools[z_key]["source_folders"].append(p.parent)
+
+    if not unified_pools:
+        print("CRITICAL ERROR: No macro files found!")
         sys.exit(1)
 
-    print(f"Found {len(pools_to_process)} folders in 'originals'. Processing with Z +100 augmentation...")
-
-    for key, data in pools_to_process.items():
+    # 3. PROCESS POOLS
+    for key, data in unified_pools.items():
         mergeable_files = data["files"]
-        if not mergeable_files: continue
-        
-        super_name, child_name = data["display_name"]
-        rel_path = Path(super_name) / child_name
-        out_folder = bundle_dir / rel_path
+        out_rel = data["out_rel_path"]
+        out_folder = bundle_dir / out_rel
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        is_ts = data["is_ts"]
+        print(f"Processing: {data['display_name']} ({len(mergeable_files)} files)")
         
-        # Copy assets from ALL source folders (both original and Z+100)
-        for src_folder in data["source_folders"]:
-            for item in src_folder.iterdir():
-                if item.is_file() and item not in mergeable_files:
-                    if "click_zones" in item.name or not item.name.endswith(".json"):
-                        target_file = out_folder / item.name
-                        if not target_file.exists():
-                            shutil.copy2(item, target_file)
-        
+        # Copy non-json assets
+        for src in data["source_folders"]:
+            for item in src.iterdir():
+                if item.is_file() and not item.name.endswith(".json"):
+                    shutil.copy2(item, out_folder / item.name)
+                elif item.is_file() and "click_zones" in item.name.lower():
+                    shutil.copy2(item, out_folder / item.name)
+
         selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"MANIFEST FOR UNIFIED FOLDER: {super_name} / {child_name}\n{'='*40}\n"]
-        folder_manifest.append(f"Total files in unified pool (Originals + Z+100): {len(mergeable_files)}\n")
+        folder_manifest = [f"MANIFEST: {data['display_name']}\nTotal Pool: {len(mergeable_files)}\n"]
 
         for v_num in range(1, args.versions + 1):
-            afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if is_ts else rng.choice([1, 2, 3])
+            afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choice([1, 2, 3])
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
             
-            MAX_MS = 60 * 60 * 1000
             speed = rng.uniform(s_min, s_max)
-            
-            while True:
-                temp_total_dur = 0
-                for i, p_str in enumerate(selected_paths):
-                    p = Path(p_str)
-                    dur = get_file_duration_ms(p) * speed
-                    gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
-                    afk_pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    afk_val = round_to_sec((int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier)
-                    dba_val = 0
-                    if rng.random() < 0.40:
-                        dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
-                    temp_total_dur += dur + gap + afk_val + dba_val
-
-                if temp_total_dur <= MAX_MS or len(selected_paths) <= 1:
-                    break
-                else:
-                    selected_paths.pop()
-
             merged_events = []
             timeline_ms = 0
-            total_dba = 0
-            total_gaps = 0
-            total_afk_pool = 0
             file_segments = []
 
             for i, p_str in enumerate(selected_paths):
@@ -241,64 +213,28 @@ def main():
                 
                 gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
-                total_gaps += gap
                 
-                dba_val = 0
-                split_idx = -1
-                if rng.random() < 0.40:
-                    dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
-                    if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
-                total_dba += dba_val
-                
-                start_in_merge = len(merged_events)
-                for ev_idx, e in enumerate(raw):
+                start_idx = len(merged_events)
+                for e in raw:
                     ne = deepcopy(e)
-                    off = (int(e.get("Time", 0)) - base_t) * speed
-                    if ev_idx >= split_idx and split_idx != -1: off += dba_val
-                    ne["Time"] = int(off + timeline_ms)
+                    ne["Time"] = int((int(e.get("Time", 0)) - base_t) * speed + timeline_ms)
                     merged_events.append(ne)
                 
-                file_segments.append({"name": p.name, "start_idx": start_in_merge, "end_idx": len(merged_events)-1})
-                
-                if "screensharelink" not in p.name.lower():
-                    pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    total_afk_pool += round_to_sec((int(dur * speed * pct)) * afk_multiplier)
-                
+                file_segments.append({"name": p.name, "end_time": merged_events[-1]["Time"]})
                 timeline_ms = merged_events[-1]["Time"]
 
-            if total_afk_pool > 0:
-                if is_ts: merged_events[-1]["Time"] += total_afk_pool
-                else:
-                    target_idx = rng.randint(1, len(file_segments)-1) if len(file_segments) > 1 else 0
-                    split_pt = file_segments[target_idx]["start_idx"] if len(file_segments) > 1 else len(merged_events)-1
-                    for k in range(split_pt, len(merged_events)): merged_events[k]["Time"] += total_afk_pool
-
             v_code = number_to_letters(v_num)
-            final_dur = merged_events[-1]["Time"]
-            fname = f"{v_code}_{int(final_dur / 60000)}m.json"
+            fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
-            total_human_pause = total_dba + total_gaps + total_afk_pool
-            v_title = f"Version {v_code} (Multiplier: x{afk_multiplier}):"
-            manifest_entry = [v_title]
-            manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
-            manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
-            manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
-            manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
-            manifest_entry.append(f"    - AFK Pool: {format_ms_precise(total_afk_pool)}")
-            
-            manifest_entry.append("")
-            for i, seg in enumerate(file_segments):
-                bullet = "*" if i < 11 else "-"
-                end_time_str = format_ms_precise(merged_events[seg['end_idx']]['Time'])
-                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {end_time_str})")
-            
-            manifest_entry.append("-" * 30)
+            manifest_entry = [f"Version {v_code} (x{afk_multiplier}): {format_ms_precise(timeline_ms)}"]
+            for seg in file_segments:
+                manifest_entry.append(f"  - {seg['name']}")
             folder_manifest.append("\n".join(manifest_entry))
 
         (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
 
-    print(f"--- SUCCESS: Bundle {args.bundle_id} created ---")
+    print(f"--- Bundle {args.bundle_id} complete ---")
 
 if __name__ == "__main__":
     main()
