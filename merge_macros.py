@@ -47,7 +47,6 @@ def number_to_letters(n: int) -> str:
 
 def clean_identity(name: str) -> str:
     """Standardizes names for matching purposes."""
-    # Remove common suffixes like '- Copy', '(1)', etc.
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
     return name.lower()
 
@@ -96,7 +95,7 @@ def main():
         base_dir = Path(".")
     
     if not (base_dir / "originals").exists():
-        print(f"CRITICAL ERROR: 'originals' folder not found in {base_dir.resolve()}")
+        print(f"CRITICAL ERROR: 'originals' folder not found.")
         sys.exit(1)
     
     rng = random.Random()
@@ -104,93 +103,76 @@ def main():
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
     unified_pools = {}
-    
-    # 1. SCAN ORIGINALS FIRST (These define our output structure)
     originals_root = base_dir / "originals"
-    print(f"--- SCANNING ORIGINALS: {originals_root} ---")
-    for p in originals_root.rglob("*.json"):
-        if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
-        if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
-        
-        rel_parts = p.parent.relative_to(originals_root).parts
-        if len(rel_parts) >= 2:
-            game_name = rel_parts[0]
-            macro_folder = rel_parts[1]
-        elif len(rel_parts) == 1:
-            game_name = "General"
-            macro_folder = rel_parts[0]
-        else:
-            game_name = "General"
-            macro_folder = "Root"
 
-        # Identity is based on CLEANED names
-        key = (clean_identity(game_name), clean_identity(macro_folder))
+    # Step 1: Scan Originals to build the base structure
+    for game_folder in originals_root.iterdir():
+        if not game_folder.is_dir(): continue
         
-        if key not in unified_pools:
-            unified_pools[key] = {
-                "out_rel_path": Path(game_name) / macro_folder,
-                "display_name": f"{game_name} / {macro_folder}",
-                "files": [],
-                "is_ts": "time sensitive" in macro_folder.lower(),
-                "source_folders": []
-            }
+        game_name_clean = clean_identity(game_folder.name)
         
-        unified_pools[key]["files"].append(p)
-        if p.parent not in unified_pools[key]["source_folders"]:
-            unified_pools[key]["source_folders"].append(p.parent)
+        # Step 2: Check for supplemental Z folders INSIDE the game folder
+        z_sources = []
+        for sub in game_folder.iterdir():
+            if sub.is_dir() and sub.name.upper().startswith('Z'):
+                z_sources.append(sub)
+                print(f"Found Supplemental Source: {sub} for game {game_folder.name}")
 
-    # 2. SCAN SUPPLEMENTAL FOLDERS (Any folder starting with Z)
-    print(f"--- SCANNING SUPPLEMENTAL STORAGE (Z folders) ---")
-    # Search for any directory in root that starts with 'Z'
-    for z_folder in base_dir.iterdir():
-        if z_folder.is_dir() and z_folder.name.upper().startswith('Z'):
-            print(f" Found supplemental source: {z_folder.name}")
-            for p in z_folder.rglob("*.json"):
-                if "output" in p.parts or p.name.startswith('.'): continue
-                
-                # Determine where this would fit in the 'originals' structure
-                rel_parts = p.parent.relative_to(z_folder).parts
-                if len(rel_parts) >= 2:
-                    z_game = rel_parts[0]
-                    z_macro = rel_parts[1]
-                elif len(rel_parts) == 1:
-                    z_game = "General"
-                    z_macro = rel_parts[0]
-                else:
-                    z_game = "General"
-                    z_macro = "Root"
-                
-                z_key = (clean_identity(z_game), clean_identity(z_macro))
-                
-                # ONLY add if it matches an existing pool from 'originals'
-                if z_key in unified_pools:
-                    unified_pools[z_key]["files"].append(p)
-                    if p.parent not in unified_pools[z_key]["source_folders"]:
-                        unified_pools[z_key]["source_folders"].append(p.parent)
+        # Step 3: Scan macro folders inside the game folder
+        for macro_folder in game_folder.iterdir():
+            if not macro_folder.is_dir() or macro_folder.name.upper().startswith('Z'): continue
+            
+            macro_id = clean_identity(macro_folder.name)
+            key = (game_name_clean, macro_id)
+            
+            if key not in unified_pools:
+                unified_pools[key] = {
+                    "out_rel_path": Path(game_folder.name) / macro_folder.name,
+                    "display_name": f"{game_folder.name} / {macro_folder.name}",
+                    "files": [],
+                    "is_ts": "time sensitive" in macro_folder.name.lower(),
+                    "source_folders": [macro_folder]
+                }
+            
+            # Add primary files
+            for p in macro_folder.glob("*.json"):
+                if "click_zones" in p.name.lower() or "manifest" in p.name.lower(): continue
+                unified_pools[key]["files"].append(p)
+
+            # Step 4: Look for matching macro folders in the Z sources
+            for z_src in z_sources:
+                # Search for any folder in Z that matches the macro name
+                for z_sub in z_src.iterdir():
+                    if z_sub.is_dir() and clean_identity(z_sub.name) == macro_id:
+                        print(f"  -> Adding Z-pool files from: {z_sub.name}")
+                        for p in z_sub.glob("*.json"):
+                            if "click_zones" in p.name.lower(): continue
+                            unified_pools[key]["files"].append(p)
+                        if z_sub not in unified_pools[key]["source_folders"]:
+                            unified_pools[key]["source_folders"].append(z_sub)
 
     if not unified_pools:
-        print("CRITICAL ERROR: No macro files found!")
+        print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
-    # 3. PROCESS POOLS
+    # Step 5: Process and Merge
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
-        out_rel = data["out_rel_path"]
-        out_folder = bundle_dir / out_rel
+        if not mergeable_files: continue
+        
+        out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        print(f"Processing: {data['display_name']} ({len(mergeable_files)} files)")
+        print(f"Merging: {data['display_name']} ({len(mergeable_files)} total files)")
         
-        # Copy non-json assets
+        # Copy assets (images/click_zones)
         for src in data["source_folders"]:
             for item in src.iterdir():
-                if item.is_file() and not item.name.endswith(".json"):
-                    shutil.copy2(item, out_folder / item.name)
-                elif item.is_file() and "click_zones" in item.name.lower():
+                if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
                     shutil.copy2(item, out_folder / item.name)
 
         selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"MANIFEST: {data['display_name']}\nTotal Pool: {len(mergeable_files)}\n"]
+        folder_manifest = [f"Pool: {data['display_name']}\nTotal Files: {len(mergeable_files)}\n"]
 
         for v_num in range(1, args.versions + 1):
             afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choice([1, 2, 3])
@@ -209,32 +191,26 @@ def main():
                 
                 t_vals = [int(e.get("Time", 0)) for e in raw]
                 base_t = min(t_vals) if t_vals else 0
-                dur = (max(t_vals) - base_t) if t_vals else 0
                 
                 gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
                 
-                start_idx = len(merged_events)
                 for e in raw:
                     ne = deepcopy(e)
                     ne["Time"] = int((int(e.get("Time", 0)) - base_t) * speed + timeline_ms)
                     merged_events.append(ne)
                 
-                file_segments.append({"name": p.name, "end_time": merged_events[-1]["Time"]})
+                file_segments.append(p.name)
                 timeline_ms = merged_events[-1]["Time"]
 
             v_code = number_to_letters(v_num)
             fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
-            
-            manifest_entry = [f"Version {v_code} (x{afk_multiplier}): {format_ms_precise(timeline_ms)}"]
-            for seg in file_segments:
-                manifest_entry.append(f"  - {seg['name']}")
-            folder_manifest.append("\n".join(manifest_entry))
+            folder_manifest.append(f"Version {v_code}: {format_ms_precise(timeline_ms)}")
 
-        (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
+        (out_folder / "manifest.txt").write_text("\n".join(folder_manifest))
 
-    print(f"--- Bundle {args.bundle_id} complete ---")
+    print(f"--- Process Complete for Bundle {args.bundle_id} ---")
 
 if __name__ == "__main__":
     main()
