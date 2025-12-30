@@ -89,8 +89,17 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    # The input_root is usually the base (e.g. "input_macros" or ".")
+    # Robust root detection
     base_dir = args.input_root
+    if not (base_dir / "originals").exists():
+        print(f"Warning: 'originals' not found in {base_dir}. Checking current working directory...")
+        base_dir = Path(".")
+    
+    if not (base_dir / "originals").exists():
+        print(f"CRITICAL ERROR: 'originals' folder not found.")
+        print("Root directory contents:")
+        for item in base_dir.iterdir(): print(f" - {item.name}")
+        sys.exit(1)
     
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
@@ -99,29 +108,35 @@ def main():
     unified_pools = {}
     search_paths = [base_dir / "originals", base_dir / "Z +100"]
 
-    # Verify that at least "originals" exists
-    if not (base_dir / "originals").exists():
-        print(f"CRITICAL ERROR: 'originals' folder not found in {base_dir.absolute()}")
-        print("Contents of input_root:")
-        for item in base_dir.iterdir(): print(f" - {item.name}")
-        sys.exit(1)
-
     for root_path in search_paths:
         if not root_path.exists(): 
-            print(f"Skipping optional path: {root_path}")
+            print(f"Path not found (skipping): {root_path}")
             continue
         
         print(f"Scanning: {root_path}")
+        # Search for all JSONs
         for p in root_path.rglob("*.json"):
-            if "output" in p.parts or p.name.startswith('.'): continue
+            # Ignore metadata/system files
+            if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
             if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
             
-            folder = p.parent
-            # Need to handle super-parent scoping
-            # We want the folder name exactly one level above the macro folder
-            super_parent_name = folder.parent.name
+            # Determine relative path from the search root (originals or Z +100)
+            rel_parts = p.parent.relative_to(root_path).parts
             
-            child_name_clean = clean_folder_name(folder.name)
+            if len(rel_parts) >= 2:
+                # Standard: originals / GameName / MacroFolder
+                super_parent_name = rel_parts[0]
+                child_name_raw = rel_parts[1]
+            elif len(rel_parts) == 1:
+                # Shallow: originals / MacroFolder
+                super_parent_name = "General"
+                child_name_raw = rel_parts[0]
+            else:
+                # Root level: originals / macro.json
+                super_parent_name = "General"
+                child_name_raw = "Root"
+            
+            child_name_clean = clean_folder_name(child_name_raw)
             identity_key = (super_parent_name, child_name_clean)
             
             if identity_key not in unified_pools:
@@ -135,8 +150,8 @@ def main():
             
             if p not in unified_pools[identity_key]["files"]:
                 unified_pools[identity_key]["files"].append(p)
-            if folder not in unified_pools[identity_key]["source_folders"]:
-                unified_pools[identity_key]["source_folders"].append(folder)
+            if p.parent not in unified_pools[identity_key]["source_folders"]:
+                unified_pools[identity_key]["source_folders"].append(p.parent)
 
     if not unified_pools:
         print("CRITICAL ERROR: No valid macro files found to merge!")
@@ -154,6 +169,7 @@ def main():
         
         is_ts = data["is_ts"]
         
+        # Asset copying (images/clickzones)
         for src_folder in data["source_folders"]:
             for item in src_folder.iterdir():
                 if item.is_file() and item not in mergeable_files:
