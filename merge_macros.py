@@ -77,7 +77,7 @@ def main():
     parser.add_argument("input_root", type=Path)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
-    parser.add_argument("--target-minutes", type=int, default=25)
+    parser.add_argument("--target-minutes", type=int, default=35) # Updated from 25 to 35
     parser.add_argument("--delay-before-action-ms", type=int, default=10)
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
@@ -171,12 +171,9 @@ def main():
         folder_manifest = [f"MANIFEST FOR FOLDER: {data['display_name']}\n{'='*40}\n"]
 
         for v_num in range(1, args.versions + 1):
-            # APPLY WEIGHTED PERCENTAGES FOR MULTIPLIERS
             if data["is_ts"]:
-                # Time Sensitive: Equal weights for 1.0, 1.2, 1.5
                 afk_multiplier = rng.choice([1.0, 1.2, 1.5])
             else:
-                # Normal: x1 (50%), x2 (30%), x3 (20%)
                 afk_multiplier = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             selected_paths = selector.get_sequence(args.target_minutes)
