@@ -149,10 +149,6 @@ def main():
                         if z_path not in pool_data["source_folders"]:
                             pool_data["source_folders"].append(z_path)
 
-    if not unified_pools:
-        print("CRITICAL ERROR: No macro pools identified.")
-        sys.exit(1)
-
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
