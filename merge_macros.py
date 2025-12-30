@@ -153,6 +153,8 @@ def main():
         print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
+    # ✅ NEW: Assign folder numbers sequentially
+    folder_number = 1
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
@@ -231,11 +233,12 @@ def main():
                     timeline_ms = merged_events[-1]["Time"]
 
             v_code = number_to_letters(v_num)
-            fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
+            # ✅ CHANGED: Add folder number after letter (e.g., A1, B1, C1)
+            fname = f"{v_code}{folder_number}_{int(timeline_ms / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
             total_human_pause = total_dba + total_gaps + total_afk_pool
-            manifest_entry = [f"Version {v_code} (Multiplier: x{afk_multiplier}):", 
+            manifest_entry = [f"Version {v_code}{folder_number} (Multiplier: x{afk_multiplier}):", 
                               f"  TOTAL DURATION: {format_ms_precise(timeline_ms)}",
                               f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:",
                               f"    - Micro-pauses: {format_ms_precise(total_dba)}",
@@ -248,6 +251,9 @@ def main():
             folder_manifest.append("\n".join(manifest_entry))
 
         (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
+        
+        # ✅ NEW: Increment folder number for next folder
+        folder_number += 1
 
     print(f"--- Process Complete for Bundle {args.bundle_id} ---")
 
