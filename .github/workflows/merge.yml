@@ -1,8 +1,14 @@
-name: Merge macros (persisted counter, scan all folders, zip top-level)on:workflow_dispatch:inputs:versions:description: 'How many versions per group'required: truedefault: '6'target_minutes:description: 'Target duration per merged file'required: truedefault: '35'delay_before_action_ms:description: 'Delay Before Action (MS)'required: truedefault: '10'speed_range:description: 'Speed Range (Min Max, e.g., 1.0 1.0 or 0.95 1.05)'required: truedefault: '1.0 1.0'permissions:contents: writejobs:merge:runs-on: ubuntu-lateststeps:- name: Checkout Repositoryuses: actions/checkout@v4with:fetch-depth: 0  - name: Set up Python
+name: Merge macros (persisted counter, scan all folders, zip top-level)on:workflow_dispatch:inputs:versions:description: 'How many versions per group'required: truedefault: '6'target_minutes:description: 'Target duration per merged file'required: truedefault: '35'delay_before_action_ms:description: 'Delay Before Action (MS)'required: truedefault: '10'speed_range:description: 'Speed Range (Min Max, e.g., 1.0 1.0 or 0.95 1.05)'required: truedefault: '1.0 1.0'permissions:contents: writejobs:merge:runs-on: ubuntu-lateststeps:
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+    with:
+      fetch-depth: 0
+  
+  - name: Set up Python
     uses: actions/setup-python@v4
     with:
       python-version: '3.10'
-  
+      
   - name: Get current BUNDLE_SEQ
     id: seq
     run: |
@@ -12,7 +18,7 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
         VAL=1
       fi
       echo "BUNDLE_SEQ=$VAL" >> "$GITHUB_ENV"
-
+    
   - name: Execute macro merge script
     run: |
       mkdir -p output
@@ -24,7 +30,7 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
         --delay-before-action-ms ${{ github.event.inputs.delay_before_action_ms }} \
         --bundle-id ${{ env.BUNDLE_SEQ }} \
         --speed-range "${{ github.event.inputs.speed_range }}"
-    
+        
   - name: Commit and Push Counter Update
     run: |
       NEW_VAL=$((BUNDLE_SEQ + 1))
@@ -35,15 +41,16 @@ name: Merge macros (persisted counter, scan all folders, zip top-level)on:workfl
       git add .github/merge_bundle_counter.txt
       git commit -m "Increment bundle counter to $NEW_VAL" || echo "No changes"
       git push || echo "Push failed"
-    
+        
   - name: Create ZIP artifact
     run: |
       BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
       ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
+      
       if [ -d "output/$BUNDLE_NAME" ]; then
         cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
       else
-        echo "CRITICAL ERROR: Directory output/$BUNDLE_NAME was not created!"
+        echo "Error: Directory output/$BUNDLE_NAME was not found!"
         exit 1
       fi
       echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
