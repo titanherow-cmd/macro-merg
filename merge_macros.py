@@ -77,7 +77,7 @@ def main():
     parser.add_argument("input_root", type=Path)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
-    parser.add_argument("--target-minutes", type=int, default=25)
+    parser.add_argument("--target-minutes", type=int, default=35)
     parser.add_argument("--delay-before-action-ms", type=int, default=10)
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
