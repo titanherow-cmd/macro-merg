@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Deep Nesting Support, Detailed Manifests, Scoped Z +100 Pooling, Root Logout Support"""
+"""merge_macros.py - Weighted Multipliers (50/30/20), Deep Nesting Support, Detailed Manifests, Scoped Z +100 Pooling, Root Logout Support"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil, re
@@ -109,29 +109,18 @@ def main():
     unified_pools = {}
     originals_root = base_dir / "originals"
 
-    # Step 1: Find all Game Folders
     for game_folder in originals_root.iterdir():
         if not game_folder.is_dir(): continue
         game_name_clean = clean_identity(game_folder.name)
-        
-        # Step 2: Detect any Z folders locally for this game
         z_sources = [sub for sub in game_folder.iterdir() if sub.is_dir() and sub.name.upper().startswith('Z')]
         
-        # Step 3: Deep Scan for macro folders
-        # We look for any directory that contains .json files and isn't a Z folder
         for root, dirs, files in os.walk(game_folder):
             current_path = Path(root)
-            
-            # Skip Z folders and their children
             if any(part.upper().startswith('Z') for part in current_path.relative_to(game_folder).parts):
                 continue
-            
             json_files = [f for f in files if f.endswith(".json") and f.lower() != "logout.json" and "click_zones" not in f.lower() and "manifest" not in f.lower()]
-            
-            if not json_files:
-                continue
+            if not json_files: continue
                 
-            # If we found json files, this is a macro pool
             macro_rel_path = current_path.relative_to(game_folder)
             macro_id = clean_identity(current_path.name)
             key = (game_name_clean, str(macro_rel_path).lower())
@@ -145,19 +134,14 @@ def main():
                     "source_folders": [current_path],
                     "macro_name_only": macro_id
                 }
-            
             for f in json_files:
                 unified_pools[key]["files"].append(current_path / f)
 
-        # Step 4: Map Z-pool files to existing keys based on clean names
         for z_src in z_sources:
             for root, dirs, files in os.walk(z_src):
                 z_path = Path(root)
                 z_macro_id = clean_identity(z_path.name)
-                
-                # Try to find a pool that matches this Z-folder's name
                 for pool_key, pool_data in unified_pools.items():
-                    # Match if the Z-subfolder name matches the target pool's actual folder name
                     if pool_data["macro_name_only"] == z_macro_id:
                         for f in files:
                             if f.endswith(".json") and "click_zones" not in f.lower():
@@ -169,15 +153,11 @@ def main():
         print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
-    # Step 5: Process and Merge
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
-        
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Merging: {data['display_name']} ({len(mergeable_files)} total files)")
         
         if logout_file and logout_file.exists():
             shutil.copy2(logout_file, out_folder / "logout.json")
@@ -191,7 +171,14 @@ def main():
         folder_manifest = [f"MANIFEST FOR FOLDER: {data['display_name']}\n{'='*40}\n"]
 
         for v_num in range(1, args.versions + 1):
-            afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choice([1, 2, 3])
+            # APPLY WEIGHTED PERCENTAGES FOR MULTIPLIERS
+            if data["is_ts"]:
+                # Time Sensitive: Equal weights for 1.0, 1.2, 1.5
+                afk_multiplier = rng.choice([1.0, 1.2, 1.5])
+            else:
+                # Normal: x1 (50%), x2 (30%), x3 (20%)
+                afk_multiplier = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
             
