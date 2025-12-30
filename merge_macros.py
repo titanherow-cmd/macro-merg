@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), No Inefficient Versions, Rounded to Seconds"""
+"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), No Inefficient Versions, Scoped Z +100 Pooling"""
 
 from pathlib import Path
-import argparse, json, random, sys, os, math, shutil
+import argparse, json, random, sys, os, math, shutil, re
 from copy import deepcopy
 
 def load_json_events(path: Path):
@@ -36,7 +36,6 @@ def format_ms_precise(ms: int) -> str:
     return f"{minutes}m {seconds}s"
 
 def round_to_sec(ms: int) -> int:
-    """Rounds a millisecond value to the nearest 1000ms increment."""
     return int(round(ms / 1000.0) * 1000)
 
 def number_to_letters(n: int) -> str:
@@ -45,6 +44,10 @@ def number_to_letters(n: int) -> str:
         n, rem = divmod(n - 1, 26)
         res = chr(65 + rem) + res
     return res or "A"
+
+def clean_folder_name(name: str) -> str:
+    """Removes common suffixes like '- Copy' or '(2)' to find the base folder identity."""
+    return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
 
 class QueueFileSelector:
     def __init__(self, rng, all_mergeable_files):
@@ -57,20 +60,15 @@ class QueueFileSelector:
         sequence = []
         current_ms = 0.0
         target_ms = target_minutes * 60000
-        
-        if not self.pool_src:
-            return []
-
+        if not self.pool_src: return []
         while current_ms < target_ms:
             if not self.pool:
                 self.pool = list(self.pool_src)
                 self.rng.shuffle(self.pool)
-            
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
             current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
             if len(sequence) > 150: break 
-        
         return sequence
 
 def main():
@@ -91,68 +89,84 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    search_root = args.input_root / "originals"
-    if not search_root.exists():
-        search_root = Path("originals")
-        if not search_root.exists():
-            print("Error: 'originals' folder not found.")
-            sys.exit(1)
-
+    # The input_root is usually the base (e.g. "input_macros" or ".")
+    base_dir = args.input_root
+    
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
-    folders_with_json = []
-    seen_folders = set()
-    
-    for p in search_root.rglob("*.json"):
-        if "output" in p.parts or p.name.startswith('.'): continue
-        is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
-        if not is_special and p.parent not in seen_folders:
-            folder = p.parent
-            mergeable_jsons = sorted([
-                f for f in folder.glob("*.json") 
-                if not any(x in f.name.lower() for x in ["click_zones", "first", "last"])
-            ])
-            if mergeable_jsons:
-                folders_with_json.append((folder, mergeable_jsons))
-                seen_folders.add(folder)
+    # Logic: Unified Folder Mapping scoped by Parent Directory
+    # Key: (parent_folder_name, cleaned_child_name)
+    unified_pools = {}
 
-    for folder_path, mergeable_files in folders_with_json:
-        rel_path = folder_path.relative_to(search_root)
+    # We look for "originals" and "Z +100" at the top level
+    search_paths = [base_dir / "originals", base_dir / "Z +100"]
+
+    for root_path in search_paths:
+        if not root_path.exists(): continue
+        for p in root_path.rglob("*.json"):
+            if "output" in p.parts or p.name.startswith('.'): continue
+            if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
+            
+            # The direct parent folder (e.g., 'xyz')
+            folder = p.parent
+            # The parent of that folder (e.g., 'Desk- osrs')
+            super_parent_name = folder.parent.name
+            
+            # Identity is based on the parent folder name + cleaned child folder name
+            child_name_clean = clean_folder_name(folder.name)
+            identity_key = (super_parent_name, child_name_clean)
+            
+            if identity_key not in unified_pools:
+                # We maintain the structure relative to the originals root for output
+                # Output Path: merged_bundle_X / Desk- osrs / xyz
+                target_rel_path = Path(super_parent_name) / child_name_clean
+                
+                unified_pools[identity_key] = {
+                    "target_rel_path": target_rel_path,
+                    "files": [],
+                    "is_ts": "time sensitive" in child_name_clean.lower(),
+                    "source_folders": [] 
+                }
+            
+            if p not in unified_pools[identity_key]["files"]:
+                unified_pools[identity_key]["files"].append(p)
+            if folder not in unified_pools[identity_key]["source_folders"]:
+                unified_pools[identity_key]["source_folders"].append(folder)
+
+    for (super_name, child_name), data in unified_pools.items():
+        mergeable_files = data["files"]
+        if not mergeable_files: continue
+        
+        rel_path = data["target_rel_path"]
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        is_ts = "time sensitive" in str(folder_path).lower()
+        is_ts = data["is_ts"]
         
-        for item in folder_path.iterdir():
-            if item.is_file() and item not in mergeable_files and "click_zones" not in item.name:
-                shutil.copy2(item, out_folder / item.name)
+        # Asset copying
+        for src_folder in data["source_folders"]:
+            for item in src_folder.iterdir():
+                if item.is_file() and item not in mergeable_files:
+                    if "click_zones" in item.name or not item.name.endswith(".json"):
+                        target_file = out_folder / item.name
+                        if not target_file.exists():
+                            shutil.copy2(item, target_file)
         
         selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
+        folder_manifest = [f"MANIFEST FOR UNIFIED FOLDER: {super_name} / {child_name}\n{'='*40}\n"]
+        folder_manifest.append(f"Total files in pool: {len(mergeable_files)}\n")
 
-        # User requested: No inefficient versions. All are normal.
         for v_num in range(1, args.versions + 1):
-            
-            # MULTIPLIER LOGIC UPDATE:
-            # 1. Time Sensitive folders: x1, x1.2, or x1.5
-            # 2. Normal folders: x1, x2, or x3
-            if is_ts:
-                afk_multiplier = rng.choice([1.0, 1.2, 1.5])
-            else:
-                afk_multiplier = rng.choice([1, 2, 3])
-            
+            afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if is_ts else rng.choice([1, 2, 3])
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
-            
-            # Inefficient versions removed, so massive pauses are always 0
-            massive_p1 = 0
-            massive_p2 = 0
             
             MAX_MS = 60 * 60 * 1000
             speed = rng.uniform(s_min, s_max)
             
+            # Duration calculation loop
             while True:
                 temp_total_dur = 0
                 for i, p_str in enumerate(selected_paths):
