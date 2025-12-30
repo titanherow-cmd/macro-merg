@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), Detailed Manifests, Scoped Z +100 Pooling"""
+"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), Detailed Manifests, Scoped Z +100 Pooling, Root Logout Support"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil, re
@@ -97,7 +97,18 @@ def main():
     if not (base_dir / "originals").exists():
         print(f"CRITICAL ERROR: 'originals' folder not found.")
         sys.exit(1)
+
+    # Find logout.json at root level
+    logout_file = base_dir / "logout.json"
+    if not logout_file.exists():
+        # Check one level up just in case of environment nesting
+        logout_file = base_dir.parent / "logout.json"
     
+    if logout_file.exists():
+        print(f"Found root logout file: {logout_file.resolve()}")
+    else:
+        print("Note: logout.json not found at root level.")
+
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -130,14 +141,15 @@ def main():
                 }
             
             for p in macro_folder.glob("*.json"):
-                if "click_zones" in p.name.lower() or "manifest" in p.name.lower(): continue
+                if "click_zones" in p.name.lower() or "manifest" in p.name.lower() or p.name.lower() == "logout.json": 
+                    continue
                 unified_pools[key]["files"].append(p)
 
             for z_src in z_sources:
                 for z_sub in z_src.iterdir():
                     if z_sub.is_dir() and clean_identity(z_sub.name) == macro_id:
                         for p in z_sub.glob("*.json"):
-                            if "click_zones" in p.name.lower(): continue
+                            if "click_zones" in p.name.lower() or p.name.lower() == "logout.json": continue
                             unified_pools[key]["files"].append(p)
                         if z_sub not in unified_pools[key]["source_folders"]:
                             unified_pools[key]["source_folders"].append(z_sub)
@@ -155,8 +167,14 @@ def main():
         
         print(f"Merging: {data['display_name']} ({len(mergeable_files)} total files)")
         
+        # Copy the root logout.json to every folder if it exists
+        if logout_file and logout_file.exists():
+            shutil.copy2(logout_file, out_folder / "logout.json")
+
+        # Copy assets (images/click_zones) from source folders
         for src in data["source_folders"]:
             for item in src.iterdir():
+                # Don't copy json files unless they are click_zones (merger handles the rest)
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
                     shutil.copy2(item, out_folder / item.name)
 
@@ -212,21 +230,15 @@ def main():
                 timeline_ms = merged_events[-1]["Time"]
                 file_segments.append({"name": p.name, "end_time": timeline_ms})
 
-            # Add AFK pool to the end (or insert if non-TS, but for simplicity we'll append/shift)
             if total_afk_pool > 0:
                 if data["is_ts"]: 
                     timeline_ms += total_afk_pool
                     merged_events[-1]["Time"] = timeline_ms
                 else:
-                    # Shift last few files
                     shift_point = len(merged_events) // 2
                     for k in range(shift_point, len(merged_events)):
                         merged_events[k]["Time"] += total_afk_pool
                     timeline_ms = merged_events[-1]["Time"]
-                    # Update file segments for manifest
-                    for seg in file_segments:
-                         # Very rough estimate for manifest display
-                         pass 
 
             v_code = number_to_letters(v_num)
             fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
@@ -244,7 +256,6 @@ def main():
             
             for i, seg in enumerate(file_segments):
                 bullet = "*" if i < 11 else "-"
-                # Note: end_time might be slightly off if we shifted for AFK pool, but accurate enough for manifest
                 manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
             
             manifest_entry.append("-" * 30)
