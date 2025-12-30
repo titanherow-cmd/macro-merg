@@ -46,8 +46,12 @@ def number_to_letters(n: int) -> str:
     return res or "A"
 
 def clean_folder_name(name: str) -> str:
-    """Removes common suffixes like '- Copy' or '(2)' to find the base folder identity."""
-    return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
+    """Removes common suffixes like '- Copy' or '(2)' and standardizes naming."""
+    # Remove " - Copy", " (1)", etc.
+    name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
+    # Remove "Z +100" from the name if it's baked into the folder name
+    name = re.sub(r'Z\s*\+\s*100', '', name, flags=re.IGNORECASE).strip()
+    return name
 
 class QueueFileSelector:
     def __init__(self, rng, all_mergeable_files):
@@ -89,16 +93,12 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    # Robust root detection
     base_dir = args.input_root
     if not (base_dir / "originals").exists():
-        print(f"Warning: 'originals' not found in {base_dir}. Checking current working directory...")
         base_dir = Path(".")
     
     if not (base_dir / "originals").exists():
         print(f"CRITICAL ERROR: 'originals' folder not found.")
-        print("Root directory contents:")
-        for item in base_dir.iterdir(): print(f" - {item.name}")
         sys.exit(1)
     
     rng = random.Random()
@@ -107,78 +107,84 @@ def main():
     
     unified_pools = {}
     
-    # We define search roots
+    # Define search roots
     originals_root = base_dir / "originals"
     z_extra_root = base_dir / "Z +100"
 
     search_targets = [
-        (originals_root, True), # (Path, is_primary)
+        (originals_root, True), 
         (z_extra_root, False)
     ]
 
     for root_path, is_primary in search_targets:
         if not root_path.exists(): 
-            print(f"Path not found (skipping): {root_path}")
             continue
         
-        print(f"Scanning: {root_path}")
+        print(f"Scanning Root: {root_path.name}")
         for p in root_path.rglob("*.json"):
             if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
             if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
             
+            # 1. Identify Super-Parent (Game) and Child (Macro Folder)
             rel_parts = p.parent.relative_to(root_path).parts
             
             if len(rel_parts) >= 2:
-                super_parent_name = rel_parts[0]
+                # E.g. originals / GameName / MacroFolder
+                super_parent_name = clean_folder_name(rel_parts[0])
                 child_name_raw = rel_parts[1]
             elif len(rel_parts) == 1:
+                # E.g. originals / MacroFolder
                 super_parent_name = "General"
                 child_name_raw = rel_parts[0]
             else:
                 super_parent_name = "General"
                 child_name_raw = "Root"
             
+            # Clean names to ensure "Folder" and "Folder - Copy" match
             child_name_clean = clean_folder_name(child_name_raw)
-            identity_key = (super_parent_name, child_name_clean)
+            identity_key = (super_parent_name.lower(), child_name_clean.lower())
             
             if identity_key not in unified_pools:
-                target_rel_path = Path(super_parent_name) / child_name_clean
                 unified_pools[identity_key] = {
-                    "target_rel_path": target_rel_path,
+                    "display_name": (super_parent_name, child_name_clean),
                     "files": [],
                     "is_ts": "time sensitive" in child_name_clean.lower(),
                     "source_folders": [],
-                    "has_primary": False # Tracking if this pool exists in 'originals'
+                    "has_primary": False 
                 }
             
             if is_primary:
                 unified_pools[identity_key]["has_primary"] = True
             
+            # Add to files list
             if p not in unified_pools[identity_key]["files"]:
                 unified_pools[identity_key]["files"].append(p)
+            
+            # Collect folders to find non-json assets (images/clickzones)
             if p.parent not in unified_pools[identity_key]["source_folders"]:
                 unified_pools[identity_key]["source_folders"].append(p.parent)
 
-    # FILTER: Only keep pools that actually exist in 'originals'
-    # This prevents 'Z +100' from generating its own separate output folders
+    # FILTER: Remove any keys that ONLY exist in Z +100
     pools_to_process = {k: v for k, v in unified_pools.items() if v["has_primary"]}
 
     if not pools_to_process:
         print("CRITICAL ERROR: No valid macro files found in 'originals' to merge!")
         sys.exit(1)
 
-    print(f"Found {len(pools_to_process)} unique macro groups to process (Pooled with Z +100 where applicable).")
+    print(f"Found {len(pools_to_process)} folders in 'originals'. Processing with Z +100 augmentation...")
 
-    for (super_name, child_name), data in pools_to_process.items():
+    for key, data in pools_to_process.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
         
-        rel_path = data["target_rel_path"]
+        super_name, child_name = data["display_name"]
+        rel_path = Path(super_name) / child_name
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
         is_ts = data["is_ts"]
         
+        # Copy assets from ALL source folders (both original and Z+100)
         for src_folder in data["source_folders"]:
             for item in src_folder.iterdir():
                 if item.is_file() and item not in mergeable_files:
@@ -189,7 +195,7 @@ def main():
         
         selector = QueueFileSelector(rng, mergeable_files)
         folder_manifest = [f"MANIFEST FOR UNIFIED FOLDER: {super_name} / {child_name}\n{'='*40}\n"]
-        folder_manifest.append(f"Total files in pool: {len(mergeable_files)}\n")
+        folder_manifest.append(f"Total files in unified pool (Originals + Z+100): {len(mergeable_files)}\n")
 
         for v_num in range(1, args.versions + 1):
             afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if is_ts else rng.choice([1, 2, 3])
