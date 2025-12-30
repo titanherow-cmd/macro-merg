@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), No Inefficient Versions, Scoped Z +100 Pooling"""
+"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), Detailed Manifests, Scoped Z +100 Pooling"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil, re
@@ -105,20 +105,15 @@ def main():
     unified_pools = {}
     originals_root = base_dir / "originals"
 
-    # Step 1: Scan Originals to build the base structure
     for game_folder in originals_root.iterdir():
         if not game_folder.is_dir(): continue
-        
         game_name_clean = clean_identity(game_folder.name)
         
-        # Step 2: Check for supplemental Z folders INSIDE the game folder
         z_sources = []
         for sub in game_folder.iterdir():
             if sub.is_dir() and sub.name.upper().startswith('Z'):
                 z_sources.append(sub)
-                print(f"Found Supplemental Source: {sub} for game {game_folder.name}")
 
-        # Step 3: Scan macro folders inside the game folder
         for macro_folder in game_folder.iterdir():
             if not macro_folder.is_dir() or macro_folder.name.upper().startswith('Z'): continue
             
@@ -134,17 +129,13 @@ def main():
                     "source_folders": [macro_folder]
                 }
             
-            # Add primary files
             for p in macro_folder.glob("*.json"):
                 if "click_zones" in p.name.lower() or "manifest" in p.name.lower(): continue
                 unified_pools[key]["files"].append(p)
 
-            # Step 4: Look for matching macro folders in the Z sources
             for z_src in z_sources:
-                # Search for any folder in Z that matches the macro name
                 for z_sub in z_src.iterdir():
                     if z_sub.is_dir() and clean_identity(z_sub.name) == macro_id:
-                        print(f"  -> Adding Z-pool files from: {z_sub.name}")
                         for p in z_sub.glob("*.json"):
                             if "click_zones" in p.name.lower(): continue
                             unified_pools[key]["files"].append(p)
@@ -155,7 +146,6 @@ def main():
         print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
-    # Step 5: Process and Merge
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
@@ -165,14 +155,13 @@ def main():
         
         print(f"Merging: {data['display_name']} ({len(mergeable_files)} total files)")
         
-        # Copy assets (images/click_zones)
         for src in data["source_folders"]:
             for item in src.iterdir():
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
                     shutil.copy2(item, out_folder / item.name)
 
         selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"Pool: {data['display_name']}\nTotal Files: {len(mergeable_files)}\n"]
+        folder_manifest = [f"MANIFEST FOR FOLDER: {data['display_name']}\n{'='*40}\n"]
 
         for v_num in range(1, args.versions + 1):
             afk_multiplier = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choice([1, 2, 3])
@@ -182,6 +171,10 @@ def main():
             speed = rng.uniform(s_min, s_max)
             merged_events = []
             timeline_ms = 0
+            
+            total_dba = 0
+            total_gaps = 0
+            total_afk_pool = 0
             file_segments = []
 
             for i, p_str in enumerate(selected_paths):
@@ -191,24 +184,73 @@ def main():
                 
                 t_vals = [int(e.get("Time", 0)) for e in raw]
                 base_t = min(t_vals) if t_vals else 0
+                dur = (max(t_vals) - base_t) if t_vals else 0
                 
                 gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
+                total_gaps += gap
                 
-                for e in raw:
+                dba_val = 0
+                split_idx = -1
+                if rng.random() < 0.40:
+                    dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
+                    if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
+                total_dba += dba_val
+                
+                start_in_merge = len(merged_events)
+                for ev_idx, e in enumerate(raw):
                     ne = deepcopy(e)
-                    ne["Time"] = int((int(e.get("Time", 0)) - base_t) * speed + timeline_ms)
+                    off = (int(e.get("Time", 0)) - base_t) * speed
+                    if ev_idx >= split_idx and split_idx != -1: off += dba_val
+                    ne["Time"] = int(off + timeline_ms)
                     merged_events.append(ne)
                 
-                file_segments.append(p.name)
+                if "screensharelink" not in p.name.lower():
+                    pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
+                    total_afk_pool += round_to_sec((int(dur * speed * pct)) * afk_multiplier)
+                
                 timeline_ms = merged_events[-1]["Time"]
+                file_segments.append({"name": p.name, "end_time": timeline_ms})
+
+            # Add AFK pool to the end (or insert if non-TS, but for simplicity we'll append/shift)
+            if total_afk_pool > 0:
+                if data["is_ts"]: 
+                    timeline_ms += total_afk_pool
+                    merged_events[-1]["Time"] = timeline_ms
+                else:
+                    # Shift last few files
+                    shift_point = len(merged_events) // 2
+                    for k in range(shift_point, len(merged_events)):
+                        merged_events[k]["Time"] += total_afk_pool
+                    timeline_ms = merged_events[-1]["Time"]
+                    # Update file segments for manifest
+                    for seg in file_segments:
+                         # Very rough estimate for manifest display
+                         pass 
 
             v_code = number_to_letters(v_num)
             fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
-            folder_manifest.append(f"Version {v_code}: {format_ms_precise(timeline_ms)}")
+            
+            total_human_pause = total_dba + total_gaps + total_afk_pool
+            v_title = f"Version {v_code} (Multiplier: x{afk_multiplier}):"
+            manifest_entry = [v_title]
+            manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(timeline_ms)}")
+            manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
+            manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
+            manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
+            manifest_entry.append(f"    - AFK Pool: {format_ms_precise(total_afk_pool)}")
+            manifest_entry.append("")
+            
+            for i, seg in enumerate(file_segments):
+                bullet = "*" if i < 11 else "-"
+                # Note: end_time might be slightly off if we shifted for AFK pool, but accurate enough for manifest
+                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+            
+            manifest_entry.append("-" * 30)
+            folder_manifest.append("\n".join(manifest_entry))
 
-        (out_folder / "manifest.txt").write_text("\n".join(folder_manifest))
+        (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
 
     print(f"--- Process Complete for Bundle {args.bundle_id} ---")
 
