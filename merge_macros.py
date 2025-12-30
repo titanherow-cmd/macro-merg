@@ -96,33 +96,36 @@ def main():
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
-    # Logic: Unified Folder Mapping scoped by Parent Directory
-    # Key: (parent_folder_name, cleaned_child_name)
     unified_pools = {}
-
-    # We look for "originals" and "Z +100" at the top level
     search_paths = [base_dir / "originals", base_dir / "Z +100"]
 
+    # Verify that at least "originals" exists
+    if not (base_dir / "originals").exists():
+        print(f"CRITICAL ERROR: 'originals' folder not found in {base_dir.absolute()}")
+        print("Contents of input_root:")
+        for item in base_dir.iterdir(): print(f" - {item.name}")
+        sys.exit(1)
+
     for root_path in search_paths:
-        if not root_path.exists(): continue
+        if not root_path.exists(): 
+            print(f"Skipping optional path: {root_path}")
+            continue
+        
+        print(f"Scanning: {root_path}")
         for p in root_path.rglob("*.json"):
             if "output" in p.parts or p.name.startswith('.'): continue
             if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
             
-            # The direct parent folder (e.g., 'xyz')
             folder = p.parent
-            # The parent of that folder (e.g., 'Desk- osrs')
+            # Need to handle super-parent scoping
+            # We want the folder name exactly one level above the macro folder
             super_parent_name = folder.parent.name
             
-            # Identity is based on the parent folder name + cleaned child folder name
             child_name_clean = clean_folder_name(folder.name)
             identity_key = (super_parent_name, child_name_clean)
             
             if identity_key not in unified_pools:
-                # We maintain the structure relative to the originals root for output
-                # Output Path: merged_bundle_X / Desk- osrs / xyz
                 target_rel_path = Path(super_parent_name) / child_name_clean
-                
                 unified_pools[identity_key] = {
                     "target_rel_path": target_rel_path,
                     "files": [],
@@ -135,6 +138,12 @@ def main():
             if folder not in unified_pools[identity_key]["source_folders"]:
                 unified_pools[identity_key]["source_folders"].append(folder)
 
+    if not unified_pools:
+        print("CRITICAL ERROR: No valid macro files found to merge!")
+        sys.exit(1)
+
+    print(f"Found {len(unified_pools)} unique macro groups to process.")
+
     for (super_name, child_name), data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
@@ -145,7 +154,6 @@ def main():
         
         is_ts = data["is_ts"]
         
-        # Asset copying
         for src_folder in data["source_folders"]:
             for item in src_folder.iterdir():
                 if item.is_file() and item not in mergeable_files:
@@ -166,7 +174,6 @@ def main():
             MAX_MS = 60 * 60 * 1000
             speed = rng.uniform(s_min, s_max)
             
-            # Duration calculation loop
             while True:
                 temp_total_dur = 0
                 for i, p_str in enumerate(selected_paths):
