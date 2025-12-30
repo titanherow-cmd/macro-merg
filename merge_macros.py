@@ -173,7 +173,7 @@ def main():
                     shutil.copy2(item, out_folder / item.name)
 
         selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"MANIFEST FOR FOLDER: {data['display_name']}\n{'='*40}\n"]
+        folder_manifest = [f"MANIFEST FOR FOLDER: {data['display_name']}\n{'='*40}\nTotal Available Files: {len(mergeable_files)}\n"]
 
         for v_num in range(1, args.versions + 1):
             # APPLY WEIGHTED PERCENTAGES FOR MULTIPLIERS
