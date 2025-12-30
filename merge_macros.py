@@ -153,9 +153,12 @@ def main():
         print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
-    # ✅ NEW: Assign folder numbers sequentially
-    folder_number = 1
+    # ✅ NEW: Pre-assign folder numbers alphabetically
+    sorted_keys = sorted(unified_pools.keys(), key=lambda k: unified_pools[k]["display_name"].lower())
+    folder_numbers = {key: idx + 1 for idx, key in enumerate(sorted_keys)}
+    
     for key, data in unified_pools.items():
+        folder_number = folder_numbers[key]  # Get pre-assigned number
         mergeable_files = data["files"]
         if not mergeable_files: continue
         out_folder = bundle_dir / data["out_rel_path"]
@@ -251,9 +254,6 @@ def main():
             folder_manifest.append("\n".join(manifest_entry))
 
         (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
-        
-        # ✅ NEW: Increment folder number for next folder
-        folder_number += 1
 
     print(f"--- Process Complete for Bundle {args.bundle_id} ---")
 
