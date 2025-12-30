@@ -106,33 +106,35 @@ def main():
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
     unified_pools = {}
-    search_paths = [base_dir / "originals", base_dir / "Z +100"]
+    
+    # We define search roots
+    originals_root = base_dir / "originals"
+    z_extra_root = base_dir / "Z +100"
 
-    for root_path in search_paths:
+    search_targets = [
+        (originals_root, True), # (Path, is_primary)
+        (z_extra_root, False)
+    ]
+
+    for root_path, is_primary in search_targets:
         if not root_path.exists(): 
             print(f"Path not found (skipping): {root_path}")
             continue
         
         print(f"Scanning: {root_path}")
-        # Search for all JSONs
         for p in root_path.rglob("*.json"):
-            # Ignore metadata/system files
             if "output" in p.parts or p.name.startswith('.') or "manifest" in p.name.lower(): continue
             if any(x in p.name.lower() for x in ["click_zones", "first", "last"]): continue
             
-            # Determine relative path from the search root (originals or Z +100)
             rel_parts = p.parent.relative_to(root_path).parts
             
             if len(rel_parts) >= 2:
-                # Standard: originals / GameName / MacroFolder
                 super_parent_name = rel_parts[0]
                 child_name_raw = rel_parts[1]
             elif len(rel_parts) == 1:
-                # Shallow: originals / MacroFolder
                 super_parent_name = "General"
                 child_name_raw = rel_parts[0]
             else:
-                # Root level: originals / macro.json
                 super_parent_name = "General"
                 child_name_raw = "Root"
             
@@ -145,21 +147,29 @@ def main():
                     "target_rel_path": target_rel_path,
                     "files": [],
                     "is_ts": "time sensitive" in child_name_clean.lower(),
-                    "source_folders": [] 
+                    "source_folders": [],
+                    "has_primary": False # Tracking if this pool exists in 'originals'
                 }
+            
+            if is_primary:
+                unified_pools[identity_key]["has_primary"] = True
             
             if p not in unified_pools[identity_key]["files"]:
                 unified_pools[identity_key]["files"].append(p)
             if p.parent not in unified_pools[identity_key]["source_folders"]:
                 unified_pools[identity_key]["source_folders"].append(p.parent)
 
-    if not unified_pools:
-        print("CRITICAL ERROR: No valid macro files found to merge!")
+    # FILTER: Only keep pools that actually exist in 'originals'
+    # This prevents 'Z +100' from generating its own separate output folders
+    pools_to_process = {k: v for k, v in unified_pools.items() if v["has_primary"]}
+
+    if not pools_to_process:
+        print("CRITICAL ERROR: No valid macro files found in 'originals' to merge!")
         sys.exit(1)
 
-    print(f"Found {len(unified_pools)} unique macro groups to process.")
+    print(f"Found {len(pools_to_process)} unique macro groups to process (Pooled with Z +100 where applicable).")
 
-    for (super_name, child_name), data in unified_pools.items():
+    for (super_name, child_name), data in pools_to_process.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
         
@@ -169,7 +179,6 @@ def main():
         
         is_ts = data["is_ts"]
         
-        # Asset copying (images/clickzones)
         for src_folder in data["source_folders"]:
             for item in src_folder.iterdir():
                 if item.is_file() and item not in mergeable_files:
