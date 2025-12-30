@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, x3), TS (x1, x1.2, x1.5), Detailed Manifests, Scoped Z +100 Pooling, Root Logout Support"""
+"""merge_macros.py - Deep Nesting Support, Detailed Manifests, Scoped Z +100 Pooling, Root Logout Support"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil, re
@@ -98,16 +98,9 @@ def main():
         print(f"CRITICAL ERROR: 'originals' folder not found.")
         sys.exit(1)
 
-    # Find logout.json at root level
     logout_file = base_dir / "logout.json"
     if not logout_file.exists():
-        # Check one level up just in case of environment nesting
         logout_file = base_dir.parent / "logout.json"
-    
-    if logout_file.exists():
-        print(f"Found root logout file: {logout_file.resolve()}")
-    else:
-        print("Note: logout.json not found at root level.")
 
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
@@ -116,48 +109,67 @@ def main():
     unified_pools = {}
     originals_root = base_dir / "originals"
 
+    # Step 1: Find all Game Folders
     for game_folder in originals_root.iterdir():
         if not game_folder.is_dir(): continue
         game_name_clean = clean_identity(game_folder.name)
         
-        z_sources = []
-        for sub in game_folder.iterdir():
-            if sub.is_dir() and sub.name.upper().startswith('Z'):
-                z_sources.append(sub)
-
-        for macro_folder in game_folder.iterdir():
-            if not macro_folder.is_dir() or macro_folder.name.upper().startswith('Z'): continue
+        # Step 2: Detect any Z folders locally for this game
+        z_sources = [sub for sub in game_folder.iterdir() if sub.is_dir() and sub.name.upper().startswith('Z')]
+        
+        # Step 3: Deep Scan for macro folders
+        # We look for any directory that contains .json files and isn't a Z folder
+        for root, dirs, files in os.walk(game_folder):
+            current_path = Path(root)
             
-            macro_id = clean_identity(macro_folder.name)
-            key = (game_name_clean, macro_id)
+            # Skip Z folders and their children
+            if any(part.upper().startswith('Z') for part in current_path.relative_to(game_folder).parts):
+                continue
+            
+            json_files = [f for f in files if f.endswith(".json") and f.lower() != "logout.json" and "click_zones" not in f.lower() and "manifest" not in f.lower()]
+            
+            if not json_files:
+                continue
+                
+            # If we found json files, this is a macro pool
+            macro_rel_path = current_path.relative_to(game_folder)
+            macro_id = clean_identity(current_path.name)
+            key = (game_name_clean, str(macro_rel_path).lower())
             
             if key not in unified_pools:
                 unified_pools[key] = {
-                    "out_rel_path": Path(game_folder.name) / macro_folder.name,
-                    "display_name": f"{game_folder.name} / {macro_folder.name}",
+                    "out_rel_path": Path(game_folder.name) / macro_rel_path,
+                    "display_name": f"{game_folder.name} / {macro_rel_path}",
                     "files": [],
-                    "is_ts": "time sensitive" in macro_folder.name.lower(),
-                    "source_folders": [macro_folder]
+                    "is_ts": "time sensitive" in str(macro_rel_path).lower(),
+                    "source_folders": [current_path],
+                    "macro_name_only": macro_id
                 }
             
-            for p in macro_folder.glob("*.json"):
-                if "click_zones" in p.name.lower() or "manifest" in p.name.lower() or p.name.lower() == "logout.json": 
-                    continue
-                unified_pools[key]["files"].append(p)
+            for f in json_files:
+                unified_pools[key]["files"].append(current_path / f)
 
-            for z_src in z_sources:
-                for z_sub in z_src.iterdir():
-                    if z_sub.is_dir() and clean_identity(z_sub.name) == macro_id:
-                        for p in z_sub.glob("*.json"):
-                            if "click_zones" in p.name.lower() or p.name.lower() == "logout.json": continue
-                            unified_pools[key]["files"].append(p)
-                        if z_sub not in unified_pools[key]["source_folders"]:
-                            unified_pools[key]["source_folders"].append(z_sub)
+        # Step 4: Map Z-pool files to existing keys based on clean names
+        for z_src in z_sources:
+            for root, dirs, files in os.walk(z_src):
+                z_path = Path(root)
+                z_macro_id = clean_identity(z_path.name)
+                
+                # Try to find a pool that matches this Z-folder's name
+                for pool_key, pool_data in unified_pools.items():
+                    # Match if the Z-subfolder name matches the target pool's actual folder name
+                    if pool_data["macro_name_only"] == z_macro_id:
+                        for f in files:
+                            if f.endswith(".json") and "click_zones" not in f.lower():
+                                pool_data["files"].append(z_path / f)
+                        if z_path not in pool_data["source_folders"]:
+                            pool_data["source_folders"].append(z_path)
 
     if not unified_pools:
         print("CRITICAL ERROR: No macro pools identified.")
         sys.exit(1)
 
+    # Step 5: Process and Merge
     for key, data in unified_pools.items():
         mergeable_files = data["files"]
         if not mergeable_files: continue
@@ -167,14 +179,11 @@ def main():
         
         print(f"Merging: {data['display_name']} ({len(mergeable_files)} total files)")
         
-        # Copy the root logout.json to every folder if it exists
         if logout_file and logout_file.exists():
             shutil.copy2(logout_file, out_folder / "logout.json")
 
-        # Copy assets (images/click_zones) from source folders
         for src in data["source_folders"]:
             for item in src.iterdir():
-                # Don't copy json files unless they are click_zones (merger handles the rest)
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
                     shutil.copy2(item, out_folder / item.name)
 
@@ -189,10 +198,7 @@ def main():
             speed = rng.uniform(s_min, s_max)
             merged_events = []
             timeline_ms = 0
-            
-            total_dba = 0
-            total_gaps = 0
-            total_afk_pool = 0
+            total_dba, total_gaps, total_afk_pool = 0, 0, 0
             file_segments = []
 
             for i, p_str in enumerate(selected_paths):
@@ -201,21 +207,18 @@ def main():
                 if not raw: continue
                 
                 t_vals = [int(e.get("Time", 0)) for e in raw]
-                base_t = min(t_vals) if t_vals else 0
-                dur = (max(t_vals) - base_t) if t_vals else 0
+                base_t, dur = min(t_vals), (max(t_vals) - min(t_vals))
                 
                 gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
                 total_gaps += gap
                 
-                dba_val = 0
-                split_idx = -1
+                dba_val, split_idx = 0, -1
                 if rng.random() < 0.40:
                     dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
                     if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
                 total_dba += dba_val
                 
-                start_in_merge = len(merged_events)
                 for ev_idx, e in enumerate(raw):
                     ne = deepcopy(e)
                     off = (int(e.get("Time", 0)) - base_t) * speed
@@ -245,19 +248,15 @@ def main():
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
             total_human_pause = total_dba + total_gaps + total_afk_pool
-            v_title = f"Version {v_code} (Multiplier: x{afk_multiplier}):"
-            manifest_entry = [v_title]
-            manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(timeline_ms)}")
-            manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
-            manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
-            manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
-            manifest_entry.append(f"    - AFK Pool: {format_ms_precise(total_afk_pool)}")
-            manifest_entry.append("")
-            
+            manifest_entry = [f"Version {v_code} (Multiplier: x{afk_multiplier}):", 
+                              f"  TOTAL DURATION: {format_ms_precise(timeline_ms)}",
+                              f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:",
+                              f"    - Micro-pauses: {format_ms_precise(total_dba)}",
+                              f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}",
+                              f"    - AFK Pool: {format_ms_precise(total_afk_pool)}\n"]
             for i, seg in enumerate(file_segments):
                 bullet = "*" if i < 11 else "-"
                 manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
-            
             manifest_entry.append("-" * 30)
             folder_manifest.append("\n".join(manifest_entry))
 
