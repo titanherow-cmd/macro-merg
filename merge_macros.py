@@ -68,7 +68,7 @@ class QueueFileSelector:
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
             current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
-            if len(sequence) > 200: break # Guard against infinite loops
+            if len(sequence) > 200: break
         return sequence
 
 def main():
@@ -89,12 +89,10 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    # Locate 'originals' relative to input_root
     base_dir = args.input_root
     originals_root = base_dir / "originals"
     
     if not originals_root.exists():
-        # Try one level up just in case of different CI structures
         originals_root = base_dir.parent / "originals"
 
     if not originals_root.exists():
@@ -108,24 +106,17 @@ def main():
     
     unified_pools = {}
 
-    print(f"Scanning for macros in: {originals_root}")
-
     for game_folder in originals_root.iterdir():
         if not game_folder.is_dir(): continue
         game_name_clean = clean_identity(game_folder.name)
-        
-        # Track Z folders for pooling later
         z_sources = [sub for sub in game_folder.iterdir() if sub.is_dir() and sub.name.upper().startswith('Z')]
         
         for root, dirs, files in os.walk(game_folder):
             current_path = Path(root)
-            # Skip if inside a Z folder (those are pooled into main macros)
             if any(part.upper().startswith('Z') for part in current_path.relative_to(game_folder).parts):
                 continue
-                
             json_files = [f for f in files if f.endswith(".json") and f.lower() != "logout.json" and "click_zones" not in f.lower()]
             if not json_files: continue
-                
             macro_rel_path = current_path.relative_to(game_folder)
             macro_id = clean_identity(current_path.name)
             key = (game_name_clean, str(macro_rel_path).lower())
@@ -142,7 +133,6 @@ def main():
             for f in json_files:
                 unified_pools[key]["files"].append(current_path / f)
 
-        # Merge Z files into matching macro pools
         for z_src in z_sources:
             for root, dirs, files in os.walk(z_src):
                 z_path = Path(root)
@@ -156,7 +146,7 @@ def main():
                             pool_data["source_folders"].append(z_path)
 
     if not unified_pools:
-        print("CRITICAL ERROR: No valid macro files found to merge.")
+        print("CRITICAL ERROR: No valid macro files found.")
         sys.exit(1)
 
     for key, data in unified_pools.items():
@@ -165,26 +155,21 @@ def main():
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        # Copy logout.json if available
         if logout_file.exists():
             shutil.copy2(logout_file, out_folder / "logout.json")
 
-        # Copy non-JSON assets (images, etc)
         for src in data["source_folders"]:
             for item in src.iterdir():
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
-                    try:
-                        shutil.copy2(item, out_folder / item.name)
+                    try: shutil.copy2(item, out_folder / item.name)
                     except: pass
 
         selector = QueueFileSelector(rng, mergeable_files)
         folder_manifest = [f"MANIFEST FOR: {data['display_name']}"]
 
         for v_num in range(1, args.versions + 1):
-            if data["is_ts"]:
-                afk_multiplier = rng.choice([1.0, 1.2, 1.5])
-            else:
-                afk_multiplier = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            if data["is_ts"]: afk_multiplier = rng.choice([1.0, 1.2, 1.5])
+            else: afk_multiplier = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
@@ -192,37 +177,19 @@ def main():
             speed = rng.uniform(s_min, s_max)
             merged_events = []
             timeline_ms = 0
-            file_segments = []
-
             for i, p_str in enumerate(selected_paths):
                 p = Path(p_str)
                 raw = load_json_events(p)
                 if not raw: continue
                 t_vals = [int(e.get("Time", 0)) for e in raw]
-                if not t_vals: continue
-                
-                base_t, dur = min(t_vals), (max(t_vals) - min(t_vals))
-                
+                base_t = min(t_vals)
                 gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
                 timeline_ms += gap
-                
-                dba_val, split_idx = 0, -1
-                if rng.random() < 0.40:
-                    dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
-                    if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
-                
-                for ev_idx, e in enumerate(raw):
+                for e in raw:
                     ne = deepcopy(e)
-                    off = (int(e.get("Time", 0)) - base_t) * speed
-                    if ev_idx >= split_idx and split_idx != -1: off += dba_val
-                    ne["Time"] = int(off + timeline_ms)
+                    ne["Time"] = int(((int(e.get("Time", 0)) - base_t) * speed) + timeline_ms)
                     merged_events.append(ne)
-                
-                if merged_events:
-                    timeline_ms = merged_events[-1]["Time"]
-                file_segments.append({"name": p.name, "end_time": timeline_ms})
-
-            if not merged_events: continue
+                timeline_ms = merged_events[-1]["Time"]
 
             v_code = number_to_letters(v_num)
             fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
