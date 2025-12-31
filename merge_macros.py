@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - Robust Pathing Version
-Fixed case-sensitivity for 'Originals' folder and aligned with YAML.
+merge_macros.py - Final Pathing Fix
+Fixed FileNotFoundError by adding robust path validation before iteration.
 """
 
 from pathlib import Path
@@ -34,7 +34,6 @@ def format_ms_precise(ms: int) -> str:
     return f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
 
 def clean_identity(name: str) -> str:
-    # Removes " - Copy", " (1)", etc.
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
     return name.lower()
 
@@ -56,14 +55,13 @@ class QueueFileSelector:
                 self.rng.shuffle(self.pool)
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
-            # Overhead estimate for random gaps
             current_ms += (get_file_duration_ms(Path(pick)) * 1.3) + 1500
             if len(sequence) > 500: break 
         return sequence
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_root", type=Path)
+    parser.add_argument("input_root", type=str)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=35) 
@@ -71,21 +69,29 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     args, _ = parser.parse_known_args()
 
-    # --- ROBUST FOLDER DISCOVERY (CASE INSENSITIVE) ---
+    # --- ROBUST PATH DISCOVERY ---
+    # Use current working directory as the ultimate fallback
+    cwd = Path.cwd()
     originals_root = None
-    search_base = args.input_root.resolve()
-    print(f"Searching for 'Originals' folder in: {search_base}")
     
-    # 1. Direct check for common casing
+    print(f"Current Working Directory: {cwd}")
+    
+    # Check if input_root exists, otherwise use CWD
+    search_base = Path(args.input_root).resolve()
+    if not search_base.exists():
+        print(f"Warning: Provided path {search_base} not found. Defaulting to {cwd}")
+        search_base = cwd
+
+    # 1. Direct Search (Case Insensitive)
     for folder_name in ["Originals", "originals"]:
         p = search_base / folder_name
         if p.exists() and p.is_dir():
             originals_root = p
             break
             
-    # 2. Deep scan if not found directly
+    # 2. Recursive Search fallback
     if not originals_root:
-        print("Folder not found with direct check. Scanning all directories...")
+        print("Folder not found at top level. Scanning subdirectories...")
         for root, dirs, _ in os.walk(search_base):
             if any(x in root for x in [".git", "output", "__pycache__"]): continue
             for d in dirs:
@@ -96,12 +102,15 @@ def main():
 
     if not originals_root:
         print("\n!!! CRITICAL ERROR: 'Originals' folder not found !!!")
-        print("Repo contents for debugging:")
-        for item in search_base.iterdir():
-            print(f"  {'[DIR]' if item.is_dir() else '[FILE]'} {item.name}")
+        print("Listing directory content for debugging:")
+        try:
+            for item in search_base.iterdir():
+                print(f"  {'[DIR]' if item.is_dir() else '[FILE]'} {item.name}")
+        except Exception as e:
+            print(f"  Could not list directory: {e}")
         sys.exit(1)
     
-    print(f"Success! Using source folder: {originals_root}")
+    print(f"Success! Using source: {originals_root}")
 
     # --- ALIGN WITH YAML OUTPUT ---
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
@@ -111,7 +120,7 @@ def main():
     rng = random.Random()
     unified_pools = {}
 
-    # Scan game folders inside Originals
+    # Scan game folders
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
         game_id = clean_identity(game_folder.name)
         z_folders = [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]
@@ -119,11 +128,9 @@ def main():
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
             try:
-                # Check for Z-prefixed parent folders in the path
                 rel_to_game = curr.relative_to(game_folder)
-                if any(p.upper().startswith('Z') for p in rel_to_game.parts): 
-                    continue
-            except ValueError: pass
+                if any(p.upper().startswith('Z') for p in rel_to_game.parts): continue
+            except: pass
             
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
@@ -142,7 +149,7 @@ def main():
                 }
             for f in jsons: unified_pools[key]["files"].append(curr / f)
 
-    # Scoped Z-Pooling logic
+    # Z-Pooling
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
         z_folders = [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]
         for z in z_folders:
@@ -157,7 +164,7 @@ def main():
                         if zp not in pd["source_folders"]: 
                             pd["source_folders"].append(zp)
 
-    # Process and Merge
+    # Process merges
     for key, data in unified_pools.items():
         if not data["files"]: continue
         out_folder = bundle_dir / data["out_rel_path"]
@@ -177,25 +184,20 @@ def main():
 
         for v_num in range(1, args.versions + 1):
             v_code = chr(64 + v_num)
-            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
-            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            mult = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             paths = selector.get_sequence(args.target_minutes)
             if not paths: continue
             
-            merged = []
-            timeline = 0
+            merged, timeline = [], 0
             for i, p_str in enumerate(paths):
                 raw = load_json_events(Path(p_str))
                 if not raw: continue
-                
                 t_v = [int(e.get("Time", 0)) for e in raw]
                 if not t_v: continue
                 base_t = min(t_v)
-                
                 gap = int((rng.randint(500, 2500) if i > 0 else 0) * mult)
                 timeline += gap
-                
                 for e in raw:
                     ne = deepcopy(e)
                     ne["Time"] = int((int(e.get("Time", 0)) - base_t) + timeline)
@@ -208,7 +210,7 @@ def main():
 
         (out_folder / "manifest.txt").write_text("\n".join(manifest))
 
-    print(f"Successfully processed into {bundle_dir}")
+    print(f"Merge Complete. Output at: {bundle_dir}")
 
 if __name__ == "__main__":
     main()
