@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.1)
-- FIX: Robust path discovery to prevent FileNotFoundError on GitHub Actions.
+merge_macros.py - STABLE RESTORE POINT (v2.9.2)
+- FIX: Improved robust path discovery. Now scans for directories containing JSONs 
+  to avoid FileNotFoundError on various repo structures.
 - FEATURE: Internal speed multiplier removed to prevent mechanical desync.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
@@ -89,17 +90,31 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # Robust Path Resolution
+    # --- ADVANCED PATH DISCOVERY ---
+    # We want to find the directory that actually contains the macro folders.
     search_base = Path(args.input_root).resolve()
-    originals_root = search_base 
+    originals_root = None
     
-    # Check if we should dive into sub-directories, but only if they actually exist
-    possible_dirs = ["originals", "input_macros"]
-    for d in possible_dirs:
+    # Priority 1: Check known directory names
+    for d in ["originals", "input_macros"]:
         test_path = search_base / d
         if test_path.exists() and test_path.is_dir():
             originals_root = test_path
             break
+            
+    # Priority 2: If Priority 1 fails, find a folder containing JSONs that isn't 'output' or '.github'
+    if not originals_root:
+        for item in search_base.iterdir():
+            if item.is_dir() and item.name not in ["output", ".github", ".git"]:
+                # Check if this folder or its subfolders have JSON files
+                has_json = any(f.suffix == ".json" for _, _, files in os.walk(item) for f in [Path(fn) for fn in files])
+                if has_json:
+                    originals_root = search_base # The root is the container for these folders
+                    break
+
+    # Final Fallback: Just use the input root
+    if not originals_root:
+        originals_root = search_base
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -107,18 +122,12 @@ def main():
     pools = {}
     folder_counter = 1
 
-    # Safety check: if originals_root doesn't exist, exit gracefully
-    if not originals_root.exists():
-        print(f"Error: Source directory {originals_root} does not exist.")
-        sys.exit(1)
-
     # Discovery & Identity Pooling
-    subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir()])
+    # Get all subdirectories, excluding hidden ones and the output/github directories
+    subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir() and not d.name.startswith(('.', 'output', 'Z'))])
 
     for folder in subdirs:
-        # Ignore system folders or the output directory itself
-        if folder.name.lower() in [".git", "output", ".github"] or folder.name.upper().startswith('Z'): 
-            continue
+        if folder.name in [".github", "output"]: continue
         
         game_id = clean_identity(folder.name)
         found_macros = False
