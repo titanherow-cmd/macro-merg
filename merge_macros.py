@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v1.9)
-- Greedier folder discovery: If "originals" isn't found, uses input_root as source.
-- Case-insensitive search for "originals" / "Originals".
+merge_macros.py - ULTIMATE VERSION (v2.0)
+- Ultra-Defensive Folder Discovery: Prevents FileNotFoundError on runner.
+- Lists directory structure to console if primary paths are missing.
 - Rule: Standard Folders -> 50% x1, 30% x2, 20% x3
 - Rule: Time Sensitive Folders -> Equal 1.0, 1.2, 1.5
 - Manifest: "TOTAL FILES IN POOL" correctly placed under separator.
@@ -79,18 +79,26 @@ class QueueFileSelector:
         return sequence
 
 def find_originals_folder(search_base: Path):
-    """Finds 'originals' folder or defaults to the input folder itself if missing."""
-    # Try case-insensitive search first
+    """Deep search for 'originals' or 'input_macros'. Falls back to root if needed."""
+    # 1. Look for 'originals' or 'input_macros' specifically
     for root, dirs, _ in os.walk(search_base):
         root_path = Path(root)
         if any(part in [".git", "output", ".github"] for part in root_path.parts):
             continue
         for d in dirs:
-            if d.lower() == "originals":
-                return root_path / d
+            if d.lower() in ["originals", "input_macros"]:
+                found_path = root_path / d
+                print(f"DEBUG: Found source folder at: {found_path}")
+                return found_path
     
-    # Fallback: Just use the search_base itself as the root of macros
-    print(f"Notice: 'originals' folder not found specifically. Using {search_base} as source.")
+    # 2. If nothing found, list current directory contents to help debug
+    print("DEBUG: Could not find 'originals' or 'input_macros'. Listing root contents:")
+    try:
+        for item in search_base.iterdir():
+            print(f"  - {'[DIR]' if item.is_dir() else '[FILE]'} {item.name}")
+    except:
+        pass
+
     return search_base
 
 def main():
@@ -109,21 +117,43 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
+    # Ensure search base is absolute and exists
     search_base = Path(args.input_root).resolve()
+    if not search_base.exists():
+        print(f"Notice: Input path {search_base} does not exist. Using current directory.")
+        search_base = Path.cwd().resolve()
+
     originals_root = find_originals_folder(search_base)
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Try to find logout.json in current directory or search_base
     logout_file = search_base / "logout.json"
+    if not logout_file.exists():
+        logout_file = Path.cwd() / "logout.json"
+
     rng = random.Random()
     unified_pools = {}
 
+    # Check if we can actually iterate
+    if not originals_root.exists() or not originals_root.is_dir():
+        print("CRITICAL ERROR: Source path is not a valid directory.")
+        sys.exit(1)
+
     # 1. Discover Pools
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
+        # Avoid processing the output or system folders if we are in root
+        if game_folder.name.lower() in ["output", ".git", ".github", "input_macros"]: continue
+        
         game_id = clean_identity(game_folder.name)
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
-            if any(p.upper().startswith('Z') for p in curr.relative_to(game_folder).parts): continue
+            try:
+                rel_parts = curr.relative_to(game_folder).parts
+                if any(p.upper().startswith('Z') for p in rel_parts): continue
+            except:
+                continue
             
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
@@ -143,6 +173,7 @@ def main():
 
     # 2. Variation Injection (Z-Folders)
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
+        if game_folder.name.lower() in ["output", ".git", ".github"]: continue
         for z in [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]:
             for r, _, fs in os.walk(z):
                 zp = Path(r)
@@ -154,12 +185,18 @@ def main():
                         if zp not in pd["source_folders"]: pd["source_folders"].append(zp)
 
     # 3. Merge Execution
+    if not unified_pools:
+        print("ERROR: No macro folders found to merge. Check your directory structure.")
+        sys.exit(1)
+
     for key, data in unified_pools.items():
         if not data["files"]: continue
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        if logout_file.exists(): shutil.copy2(logout_file, out_folder / "logout.json")
+        if logout_file.exists(): 
+            shutil.copy2(logout_file, out_folder / "logout.json")
+        
         for src in data["source_folders"]:
             for item in src.iterdir():
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
