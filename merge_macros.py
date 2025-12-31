@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 merge_macros.py - Robust Pathing Version
-Fixed pathing discovery for 'originals' folder and aligned defaults.
+Fixed to work perfectly with the provided .yml workflow structure.
 """
 
 from pathlib import Path
@@ -56,7 +56,7 @@ class QueueFileSelector:
                 self.rng.shuffle(self.pool)
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
-            # Overhead estimate (30% for gaps)
+            # Estimating 30% overhead for randomized gaps
             current_ms += (get_file_duration_ms(Path(pick)) * 1.3) + 1500
             if len(sequence) > 500: break 
         return sequence
@@ -72,22 +72,21 @@ def main():
     args, _ = parser.parse_known_args()
 
     # --- ROBUST FOLDER DISCOVERY ---
+    # The YAML passes "." as input_root. We need to find "originals".
     originals_root = None
     search_base = args.input_root.resolve()
-    print(f"Searching for 'originals' folder in: {search_base}")
     
-    # 1. Check standard root and common nested paths
+    # 1. Check standard locations
     check_paths = [
         search_base / "originals",
-        search_base / "Originals",
-        search_base / "input_macros" / "originals"
+        search_base / "Originals"
     ]
     for p in check_paths:
         if p.exists() and p.is_dir():
             originals_root = p
             break
             
-    # 2. Deep walk if still not found
+    # 2. Recursive search fallback
     if not originals_root:
         for root, dirs, _ in os.walk(search_base):
             if any(x in root for x in [".git", "output", "__pycache__"]): continue
@@ -101,8 +100,8 @@ def main():
         print("CRITICAL ERROR: 'originals' folder not found.")
         sys.exit(1)
     
-    print(f"Success! Using folder: {originals_root}")
-
+    # --- OUTPUT STRUCTURE ALIGNMENT ---
+    # The YAML expects: output/merged_bundle_${BUNDLE_SEQ}/...
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
@@ -110,15 +109,18 @@ def main():
     rng = random.Random()
     unified_pools = {}
 
-    # Scan
+    # Scan game folders
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
         game_id = clean_identity(game_folder.name)
         z_folders = [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]
         
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
-            # Skip Z-prefixed folders in main scan
-            if any(p.upper().startswith('Z') for p in curr.relative_to(game_folder).parts): continue
+            try:
+                rel_to_game = curr.relative_to(game_folder)
+                if any(p.upper().startswith('Z') for p in rel_to_game.parts): 
+                    continue
+            except ValueError: pass
             
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
@@ -156,9 +158,11 @@ def main():
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
         
+        # Copy logout.json if available
         if logout_file.exists():
             shutil.copy2(logout_file, out_folder / "logout.json")
 
+        # Copy non-json assets
         for src in data["source_folders"]:
             for item in src.iterdir():
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
@@ -182,6 +186,7 @@ def main():
                 if not raw: continue
                 
                 t_vals = [int(e.get("Time", 0)) for e in raw]
+                if not t_vals: continue
                 base_t = min(t_vals)
                 
                 gap = int((rng.randint(500, 2500) if i > 0 else 0) * mult)
@@ -199,6 +204,8 @@ def main():
             folder_manifest.append(f"Version {v_code}: {format_ms_precise(timeline_ms)} (Multiplier x{mult})")
 
         (out_folder / "manifest.txt").write_text("\n".join(folder_manifest))
+
+    print(f"Successfully processed {len(unified_pools)} macro groups into {bundle_dir}")
 
 if __name__ == "__main__":
     main()
