@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.2)
+merge_macros.py - STABLE RESTORE POINT (v2.9.3)
+- FIX: Added strict existence checks for search_base to prevent FileNotFoundError.
 - FIX: Improved robust path discovery. Now scans for directories containing JSONs 
   to avoid FileNotFoundError on various repo structures.
 - FEATURE: Internal speed multiplier removed to prevent mechanical desync.
@@ -90,9 +91,13 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # --- ADVANCED PATH DISCOVERY ---
-    # We want to find the directory that actually contains the macro folders.
+    # --- robust path discovery ---
     search_base = Path(args.input_root).resolve()
+    
+    # fix: if the passed input_root doesn't exist, fallback to current directory
+    if not search_base.exists():
+        search_base = Path(".").resolve()
+        
     originals_root = None
     
     # Priority 1: Check known directory names
@@ -102,19 +107,22 @@ def main():
             originals_root = test_path
             break
             
-    # Priority 2: If Priority 1 fails, find a folder containing JSONs that isn't 'output' or '.github'
-    if not originals_root:
-        for item in search_base.iterdir():
-            if item.is_dir() and item.name not in ["output", ".github", ".git"]:
-                # Check if this folder or its subfolders have JSON files
-                has_json = any(f.suffix == ".json" for _, _, files in os.walk(item) for f in [Path(fn) for fn in files])
-                if has_json:
-                    originals_root = search_base # The root is the container for these folders
-                    break
+    # Priority 2: Find a folder containing JSONs that isn't 'output' or '.github'
+    if not originals_root and search_base.exists():
+        try:
+            for item in search_base.iterdir():
+                if item.is_dir() and item.name not in ["output", ".github", ".git"]:
+                    # Check if this folder or its subfolders have JSON files
+                    has_json = any(f.suffix == ".json" for _, _, files in os.walk(item) for f in [Path(fn) for fn in files])
+                    if has_json:
+                        originals_root = search_base 
+                        break
+        except FileNotFoundError:
+            originals_root = Path(".").resolve()
 
-    # Final Fallback: Just use the input root
+    # Final Fallback
     if not originals_root:
-        originals_root = search_base
+        originals_root = Path(".").resolve()
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +131,10 @@ def main():
     folder_counter = 1
 
     # Discovery & Identity Pooling
-    # Get all subdirectories, excluding hidden ones and the output/github directories
+    if not originals_root.exists():
+        print(f"Critical Error: {originals_root} does not exist.")
+        sys.exit(1)
+
     subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir() and not d.name.startswith(('.', 'output', 'Z'))])
 
     for folder in subdirs:
