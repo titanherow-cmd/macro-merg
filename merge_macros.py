@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.7)
-- FIX: Nested pathing preserved across multiple levels (Double/Triple Nesting).
-- FIX: Number prefixes the top-level category folder to keep groups together.
-- FIX: Alphabetical ID assignment based on full relative paths.
-- FIX: Naming scheme (A1, B1...) strictly tied to the specific folder's ID.
+merge_macros.py - STABLE RESTORE POINT (v2.9.8)
+- FIX: Nested paths are now properly grouped under a single numbered root.
+- FIX: Numbering prefixes the TOP-LEVEL folder only (e.g., 1-deskt- osrs).
+- FIX: Unique IDs (A1, B1...) are still assigned per sub-folder to avoid name collisions.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -109,7 +108,7 @@ def main():
     rng = random.Random()
     pools = {}
 
-    # 1. Discovery (Walk all subfolders)
+    # 1. Discovery
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
@@ -120,7 +119,6 @@ def main():
         macro_id = clean_identity(curr.name)
         rel_path = curr.relative_to(originals_root)
         
-        # Skip Z-variation folders for the primary pool keys
         if any(p.lower().startswith("z_") for p in rel_path.parts):
             continue
 
@@ -131,38 +129,49 @@ def main():
                 "rel_path": rel_path,
                 "files": [curr / f for f in jsons],
                 "is_ts": is_ts,
-                "macro_id": macro_id
+                "macro_id": macro_id,
+                "root_parent": rel_path.parts[0] if rel_path.parts else ""
             }
 
-    # 2. Z-Pooling Variation Injection
+    # 2. Z-Variation Injection
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if not any(p.lower().startswith("z_") for p in curr.parts): continue
-        
         zid = clean_identity(curr.name)
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
-        
         for pk, pd in pools.items():
             if pd["macro_id"] == zid:
                 pd["files"].extend([curr / f for f in jsons])
 
-    # 3. Merging Logic with Numbered Hierarchy
+    # 3. Smart Numbering Logic
+    # We need to map root folders to numbers, AND subfolders to unique IDs.
     sorted_keys = sorted(pools.keys())
     
+    # Map each unique top-level root to a number
+    root_to_id = {}
+    unique_roots = sorted(list(set(p["root_parent"] for p in pools.values() if p["root_parent"])))
+    for idx, rname in enumerate(unique_roots, start=1):
+        root_to_id[rname] = idx
+
+    # Every individual macro folder gets a unique index for its file naming (A1, B2...)
     for f_idx, key in enumerate(sorted_keys, start=1):
         data = pools[key]
         
-        # PRESERVE NESTING:
-        # We prefix the TOP-MOST directory in the relative path with the number.
-        # This keeps '1-deskt- osrs/Edge/Macro' grouped together.
+        # PRESERVE NESTING BUT NUMBER THE ROOT:
+        # If path is 'deskt- osrs/Edge/Macro', and deskt- osrs is root #1
+        # Target: '1-deskt- osrs/Edge/Macro'
         path_parts = list(data["rel_path"].parts)
-        if path_parts:
-            path_parts[0] = f"{f_idx}-{path_parts[0]}"
+        root_name = data["root_parent"]
+        if root_name in root_to_id:
+            root_num = root_to_id[root_name]
+            path_parts[0] = f"{root_num}-{root_name}"
             
         out_f = bundle_dir.joinpath(*path_parts)
         out_f.mkdir(parents=True, exist_ok=True)
         
-        manifest = [f"FOLDER: {out_f.relative_to(bundle_dir)}", f"TS MODE: {data['is_ts']}", f"FOLDER ID: {f_idx}", ""]
+        # We use f_idx for the file naming (A1, B2...) to ensure uniqueness 
+        # even if multiple folders share the same root number.
+        manifest = [f"FOLDER: {out_f.relative_to(bundle_dir)}", f"TS MODE: {data['is_ts']}", f"MACRO ID: {f_idx}", ""]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -184,10 +193,8 @@ def main():
                 if not raw: continue
                 t_vals = [int(e["Time"]) for e in raw]
                 base_t = min(t_vals)
-                
                 gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
                 timeline += gap
-                
                 for e_idx, e in enumerate(raw):
                     ne = deepcopy(e)
                     rel_offset = int(int(e["Time"]) - base_t)
