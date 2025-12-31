@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.6)
-- FIX: Nested pathing preserved. Numbers now prefix the leaf macro folder.
+merge_macros.py - STABLE RESTORE POINT (v2.9.7)
+- FIX: Nested pathing preserved across multiple levels (Double/Triple Nesting).
+- FIX: Number prefixes the top-level category folder to keep groups together.
 - FIX: Alphabetical ID assignment based on full relative paths.
-- FIX: Naming scheme (A1, B1...) strictly tied to the leaf folder's assigned ID.
+- FIX: Naming scheme (A1, B1...) strictly tied to the specific folder's ID.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -89,7 +90,6 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # --- Robust Path Discovery ---
     search_base = Path(args.input_root).resolve()
     if not search_base.exists():
         search_base = Path(".").resolve()
@@ -109,8 +109,7 @@ def main():
     rng = random.Random()
     pools = {}
 
-    # 1. Discovery
-    # We find every folder that contains at least one mergeable JSON
+    # 1. Discovery (Walk all subfolders)
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
@@ -118,13 +117,10 @@ def main():
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
         if not jsons: continue
         
-        # Identity for Z-pooling is just the folder name
         macro_id = clean_identity(curr.name)
-        
-        # Relative path from originals_root to maintain nesting
         rel_path = curr.relative_to(originals_root)
         
-        # Z-prefix folders are skipped here; they are injected into standard pools later
+        # Skip Z-variation folders for the primary pool keys
         if any(p.lower().startswith("z_") for p in rel_path.parts):
             continue
 
@@ -150,18 +146,18 @@ def main():
             if pd["macro_id"] == zid:
                 pd["files"].extend([curr / f for f in jsons])
 
-    # 3. Merging Logic with Nested Path Numbering
-    # Sort keys alphabetically so the sequence 1, 2, 3... is predictable
+    # 3. Merging Logic with Numbered Hierarchy
     sorted_keys = sorted(pools.keys())
     
     for f_idx, key in enumerate(sorted_keys, start=1):
         data = pools[key]
         
-        # Construct the output path: number only the leaf folder
-        # Example: Deskt -osrs/Cooker -> Deskt -osrs/1-Cooker
+        # PRESERVE NESTING:
+        # We prefix the TOP-MOST directory in the relative path with the number.
+        # This keeps '1-deskt- osrs/Edge/Macro' grouped together.
         path_parts = list(data["rel_path"].parts)
         if path_parts:
-            path_parts[-1] = f"{f_idx}-{path_parts[-1]}"
+            path_parts[0] = f"{f_idx}-{path_parts[0]}"
             
         out_f = bundle_dir.joinpath(*path_parts)
         out_f.mkdir(parents=True, exist_ok=True)
