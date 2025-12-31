@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.5)
-- FIX: Numbering logic updated to assign unique IDs to every individual sub-folder.
-- FIX: Every macro-containing folder gets its own manifest and unique ID.
-- FIX: Naming scheme (A1, B1...) now matches the specific sub-folder's ID.
+merge_macros.py - STABLE RESTORE POINT (v2.9.6)
+- FIX: Nested pathing preserved. Numbers now prefix the leaf macro folder.
+- FIX: Alphabetical ID assignment based on full relative paths.
+- FIX: Naming scheme (A1, B1...) strictly tied to the leaf folder's assigned ID.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -101,72 +101,67 @@ def main():
             originals_root = test_path
             break
             
-    if not originals_root and search_base.exists():
-        try:
-            for item in search_base.iterdir():
-                if item.is_dir() and item.name not in ["output", ".github", ".git"]:
-                    has_json = any(f.suffix == ".json" for _, _, files in os.walk(item) for f in [Path(fn) for fn in files])
-                    if has_json:
-                        originals_root = search_base 
-                        break
-        except FileNotFoundError:
-            originals_root = Path(".").resolve()
-
     if not originals_root:
-        originals_root = Path(".").resolve()
+        originals_root = search_base
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random()
     pools = {}
 
-    # Discovery & Identity Pooling
-    subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir() and not d.name.startswith(('.', 'output', 'Z'))])
-
-    for folder in subdirs:
-        if folder.name in [".github", "output"]: continue
+    # 1. Discovery
+    # We find every folder that contains at least one mergeable JSON
+    for root, dirs, files in os.walk(originals_root):
+        curr = Path(root)
+        if any(p in curr.parts for p in [".git", ".github", "output"]): continue
         
-        for root, _, files in os.walk(folder):
-            curr = Path(root)
-            jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
-            if not jsons: continue
-            
-            # Key is based on the full relative path to ensure unique subfolder detection
-            rel_to_originals = curr.relative_to(originals_root)
-            key = str(rel_to_originals).lower()
-            
-            if key not in pools:
-                is_ts = bool(re.search(r'time[\s-]*sens', str(curr).lower()))
-                pools[key] = {
-                    "full_rel_path": rel_to_originals,
-                    "files": [], 
-                    "is_ts": is_ts,
-                    "id": clean_identity(curr.name)
-                }
-            for f in jsons: pools[key]["files"].append(curr / f)
+        jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        if not jsons: continue
+        
+        # Identity for Z-pooling is just the folder name
+        macro_id = clean_identity(curr.name)
+        
+        # Relative path from originals_root to maintain nesting
+        rel_path = curr.relative_to(originals_root)
+        
+        # Z-prefix folders are skipped here; they are injected into standard pools later
+        if any(p.lower().startswith("z_") for p in rel_path.parts):
+            continue
 
-    # Z-Pooling Variation Injection
-    for folder in filter(Path.is_dir, originals_root.iterdir()):
-        if not folder.name.upper().startswith('Z'): continue
-        for r, _, fs in os.walk(folder):
-            zp = Path(r); zid = clean_identity(zp.name)
-            for pk, pd in pools.items():
-                if pd["id"] == zid:
-                    for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]: 
-                        pd["files"].append(zp / f)
+        key = str(rel_path).lower()
+        if key not in pools:
+            is_ts = bool(re.search(r'time[\s-]*sens', key))
+            pools[key] = {
+                "rel_path": rel_path,
+                "files": [curr / f for f in jsons],
+                "is_ts": is_ts,
+                "macro_id": macro_id
+            }
 
-    # Merging Logic with Individual Subfolder Numbering
-    # Sort keys alphabetically to ensure consistent numbering (e.g., A/B/C)
+    # 2. Z-Pooling Variation Injection
+    for root, dirs, files in os.walk(originals_root):
+        curr = Path(root)
+        if not any(p.lower().startswith("z_") for p in curr.parts): continue
+        
+        zid = clean_identity(curr.name)
+        jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        
+        for pk, pd in pools.items():
+            if pd["macro_id"] == zid:
+                pd["files"].extend([curr / f for f in jsons])
+
+    # 3. Merging Logic with Nested Path Numbering
+    # Sort keys alphabetically so the sequence 1, 2, 3... is predictable
     sorted_keys = sorted(pools.keys())
     
     for f_idx, key in enumerate(sorted_keys, start=1):
         data = pools[key]
         
-        # We construct the path such that the NUMBER prefixes the leaf folder or specific sub-path
-        # Example: originals/Parent/Sub -> merged_bundle/1-Parent/Sub
-        path_parts = list(data["full_rel_path"].parts)
+        # Construct the output path: number only the leaf folder
+        # Example: Deskt -osrs/Cooker -> Deskt -osrs/1-Cooker
+        path_parts = list(data["rel_path"].parts)
         if path_parts:
-            path_parts[0] = f"{f_idx}-{path_parts[0]}"
+            path_parts[-1] = f"{f_idx}-{path_parts[-1]}"
             
         out_f = bundle_dir.joinpath(*path_parts)
         out_f.mkdir(parents=True, exist_ok=True)
