@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v1.8)
-- Fixed: Aggressive "Originals" folder discovery for GitHub Actions
+merge_macros.py - ULTIMATE VERSION (v1.9)
+- Greedier folder discovery: If "originals" isn't found, uses input_root as source.
+- Case-insensitive search for "originals" / "Originals".
 - Rule: Standard Folders -> 50% x1, 30% x2, 20% x3
 - Rule: Time Sensitive Folders -> Equal 1.0, 1.2, 1.5
-- Rule: 2:1 Version Ratio (Every 3rd version C, F, I is Inefficient with Massive Pauses)
-- Manifest: "TOTAL FILES IN POOL" correctly placed under separator
+- Manifest: "TOTAL FILES IN POOL" correctly placed under separator.
 """
 
 from pathlib import Path
@@ -79,13 +79,8 @@ class QueueFileSelector:
         return sequence
 
 def find_originals_folder(search_base: Path):
-    """Aggressive search for the originals directory."""
-    # Priority 1: Direct child of search base
-    for n in ["Originals", "originals"]:
-        p = search_base / n
-        if p.is_dir(): return p
-    
-    # Priority 2: Deep search, ignoring noisy directories
+    """Finds 'originals' folder or defaults to the input folder itself if missing."""
+    # Try case-insensitive search first
     for root, dirs, _ in os.walk(search_base):
         root_path = Path(root)
         if any(part in [".git", "output", ".github"] for part in root_path.parts):
@@ -93,7 +88,10 @@ def find_originals_folder(search_base: Path):
         for d in dirs:
             if d.lower() == "originals":
                 return root_path / d
-    return None
+    
+    # Fallback: Just use the search_base itself as the root of macros
+    print(f"Notice: 'originals' folder not found specifically. Using {search_base} as source.")
+    return search_base
 
 def main():
     parser = argparse.ArgumentParser()
@@ -113,10 +111,6 @@ def main():
 
     search_base = Path(args.input_root).resolve()
     originals_root = find_originals_folder(search_base)
-    
-    if not originals_root:
-        print(f"CRITICAL ERROR: 'originals' folder not found in {search_base}")
-        sys.exit(1)
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +123,6 @@ def main():
         game_id = clean_identity(game_folder.name)
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
-            # Skip variation folders during primary scan
             if any(p.upper().startswith('Z') for p in curr.relative_to(game_folder).parts): continue
             
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
@@ -174,8 +167,6 @@ def main():
                     except: pass
 
         selector = QueueFileSelector(rng, data["files"])
-        
-        # Manifest Construction
         manifest = [
             f"MANIFEST FOR FOLDER: {data['display_name']}",
             f"========================================",
@@ -187,7 +178,6 @@ def main():
             v_code = chr(64 + v_num)
             is_inef_version = (v_num % 3 == 0)
             
-            # AFK Multiplier Logic
             if data["is_ts"]:
                 mult = rng.choice([1.0, 1.2, 1.5])
             else:
@@ -215,7 +205,6 @@ def main():
                 pause_breakdown["Gap"] += base_gap
                 pause_breakdown["AFK"] += (gap - base_gap)
                 
-                # Rule: Massive Pauses (5-15 mins) for every 3rd version
                 if is_inef_version and rng.random() < 0.2 and i > 0:
                     m_pause = rng.randint(300000, 900000)
                     gap += m_pause
