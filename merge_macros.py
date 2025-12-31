@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.0.0)
-- FEATURE: Random 0-1500ms delay rolled individually BEFORE every action.
-- REMOVED: Cumulative index-based delay (e_idx * 10ms).
+merge_macros.py - STABLE RESTORE POINT (v3.1.0)
+- FEATURE: Random 0-1500ms jitter rolled individually BEFORE every action.
+- FEATURE: Pre-Action Mouse Jitter. If delay > 100ms, injects a micro-move
+           within a 5px radius that resolves before the click.
 - FIX: Exact original directory structure is preserved.
 - FIX: Naming scheme A, B, C... (e.g., A_35m.json).
 - Massive Pause: One random event injection per inefficient file (300s-720s).
@@ -85,7 +86,7 @@ def main():
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=35)
-    parser.add_argument("--delay-before-action-ms", type=int, default=1500) # Updated default
+    parser.add_argument("--delay-before-action-ms", type=int, default=1500) 
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
@@ -159,9 +160,6 @@ def main():
             
             paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
             merged, timeline = [], 0
-            
-            # TRACKING JITTER:
-            # We keep a running 'cumulative jitter' to ensure the timeline never moves backward.
             total_jitter = 0
             
             for i, p in enumerate(paths):
@@ -170,23 +168,31 @@ def main():
                 t_vals = [int(e["Time"]) for e in raw]
                 base_t = min(t_vals)
                 
-                # Gap between files
                 gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
                 timeline += gap
                 
                 for e_idx, e in enumerate(raw):
-                    ne = deepcopy(e)
                     rel_offset = int(int(e["Time"]) - base_t)
-                    
-                    # ROLL RANDOM PRE-ACTION JITTER (0 to 1500ms)
-                    # This happens for EVERY action.
                     jitter = rng.randint(0, args.delay_before_action_ms)
-                    total_jitter += jitter
                     
+                    # --- MOUSE JITTER INJECTION ---
+                    # If we have a significant delay (>100ms) and the event has coordinates
+                    if jitter > 100 and "X" in e and "Y" in e:
+                        jitter_event = deepcopy(e)
+                        # Offset the mouse by a small random amount (radius of 5px)
+                        jitter_event["X"] = int(e["X"]) + rng.randint(-5, 5)
+                        jitter_event["Y"] = int(e["Y"]) + rng.randint(-5, 5)
+                        # Set this event type to "Move" or "None" to ensure it doesn't click
+                        jitter_event["Type"] = "Move" 
+                        # Occurs mid-jitter window
+                        jitter_event["Time"] = timeline + rel_offset + total_jitter + (jitter // 2)
+                        merged.append(jitter_event)
+
+                    total_jitter += jitter
+                    ne = deepcopy(e)
                     ne["Time"] = timeline + rel_offset + total_jitter
                     merged.append(ne)
                 
-                # Advance global timeline to the end of this file + its total jitter
                 timeline = merged[-1]["Time"]
 
             if is_inef and not data["is_ts"] and len(merged) > 1:
