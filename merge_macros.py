@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.7)
-- FIX: Robust event extraction to prevent 'list object has no attribute get' error.
+merge_macros.py - ULTIMATE VERSION (v2.8)
+- FIX: Massive Pause now occurs exactly ONCE per inefficient file.
+- IMPROVEMENT: Massive Pause happens after a random EVENT, not just between files.
 - Inefficient System: Creates EXTRA files (1 for every 2 normal files).
 - Inefficient Naming: Starts with ¬¬¬.
 - Manifest Symbols: Regular (-), Inefficient (*).
-- Massive Pause: 40% roll, up to 2 per merged file, 5-12 minutes.
 - Inefficient Weights: x1(20%), x2(40%), x3(40%).
-- Exemption: Ultra-robust Regex for "time sensitive" typos (handles sensitve, senstive, sensitiv, etc).
+- Exemption: Ultra-robust Regex for "time sensitive" typos.
 """
 
 from pathlib import Path
@@ -23,7 +23,6 @@ def load_json_events(path: Path):
         data = json.loads(path.read_text(encoding="utf-8"))
         events = []
 
-        # 1. If it's a dict, find the list of events inside common keys
         if isinstance(data, dict):
             found_list = None
             for k in ("events", "items", "entries", "records"):
@@ -33,25 +32,17 @@ def load_json_events(path: Path):
             if found_list is not None:
                 events = found_list
             else:
-                # If no key matches but the dict looks like a single event
                 if "Time" in data:
                     events = [data]
-        # 2. If it's a list, use it directly
         elif isinstance(data, list):
             events = data
 
-        # 3. CRITICAL FIX: Flatten and Validate
-        # Ensure every item in the list is a DICTIONARY with a 'Time' key.
-        # If an item is a list, we take the first element (handling double-nested arrays).
         cleaned_events = []
         for e in events:
-            # If the recorder double-wrapped the event in a list [ [{...}] ]
             if isinstance(e, list) and len(e) > 0:
                 e = e[0]
-            
             if isinstance(e, dict) and "Time" in e:
                 cleaned_events.append(e)
-            
         return deepcopy(cleaned_events)
     except Exception as e:
         print(f"Warning: Failed to load {path.name}: {e}")
@@ -158,10 +149,8 @@ def main():
         print("CRITICAL ERROR: Source path is not a valid directory.")
         sys.exit(1)
 
-    # 1. Discover Pools
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
         if game_folder.name.lower() in ["output", ".git", ".github", "input_macros"]: continue
-        
         game_id = clean_identity(game_folder.name)
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
@@ -169,16 +158,13 @@ def main():
                 rel_parts = curr.relative_to(game_folder).parts
                 if any(p.upper().startswith('Z') for p in rel_parts): continue
             except: continue
-            
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
-            
             rel = curr.relative_to(game_folder)
             key = (game_id, str(rel).lower())
             if key not in unified_pools:
                 path_str = str(curr).lower()
                 is_time_sensitive = bool(re.search(r'time[\s-]*sens', path_str))
-                
                 unified_pools[key] = {
                     "out_rel_path": Path(game_folder.name) / rel,
                     "display_name": f"{game_folder.name} / {rel}",
@@ -189,7 +175,6 @@ def main():
                 }
             for f in jsons: unified_pools[key]["files"].append(curr / f)
 
-    # 2. Variation Injection (Z-Folders)
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
         if game_folder.name.lower() in ["output", ".git", ".github"]: continue
         for z in [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]:
@@ -202,15 +187,12 @@ def main():
                             pd["files"].append(zp / f)
                         if zp not in pd["source_folders"]: pd["source_folders"].append(zp)
 
-    # 3. Merge Execution
     for key, data in unified_pools.items():
         if not data["files"]: continue
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
-        
         if logout_file.exists(): 
             shutil.copy2(logout_file, out_folder / "logout.json")
-        
         for src in data["source_folders"]:
             for item in src.iterdir():
                 if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
@@ -218,7 +200,6 @@ def main():
                     except: pass
 
         selector = QueueFileSelector(rng, data["files"])
-        
         manifest = [
             f"MANIFEST FOR FOLDER: {data['display_name']}",
             f"========================================",
@@ -254,15 +235,20 @@ def main():
             manifest.append(f"{v_title} (Multiplier: x{mult}):")
             
             merged, timeline = [], 0
-            pause_breakdown = {"Micro": 0, "Gap": 0, "AFK": 0, "Massive": []}
-            massive_rolls_used = 0
+            pause_breakdown = {"Micro": 0, "Gap": 0, "AFK": 0, "Massive": 0}
             file_entries = []
+
+            # Determine Massive Pause Target for Inefficient files
+            # It happens exactly once, after a random event in the whole sequence.
+            massive_pause_val = 0
+            massive_pause_target_event = -1
+            if is_extra_inef and not data["is_ts"]:
+                massive_pause_val = rng.randint(300000, 720000) # In ms (5-12 mins)
+                # We'll pick the event index once we know how many events there are.
+                # Since we don't know yet, we'll store all events first, then inject.
 
             for i, p_obj in enumerate(paths):
                 raw = load_json_events(p_obj)
-                if not raw: continue
-                
-                # Check for empty files after robust loading
                 if not raw: continue
                 
                 t_v = [int(e.get("Time", 0)) for e in raw]
@@ -272,14 +258,6 @@ def main():
                 gap = int(base_gap * mult)
                 pause_breakdown["Gap"] += base_gap
                 pause_breakdown["AFK"] += (gap - base_gap)
-                
-                if is_extra_inef and not data["is_ts"] and massive_rolls_used < 2:
-                    for _ in range(2):
-                        if massive_rolls_used < 2 and rng.random() < 0.40:
-                            m_pause = rng.randint(300000, 720000) 
-                            gap += m_pause
-                            pause_breakdown["Massive"].append(m_pause)
-                            massive_rolls_used += 1
 
                 timeline += gap
                 for e_idx, e in enumerate(raw):
@@ -294,14 +272,24 @@ def main():
                 bullet = '*' if ("¬¬¬" in p_obj.name) else '-'
                 file_entries.append(f"  {bullet} {p_obj.name} (Ends at {format_ms_precise(timeline)})")
 
-            total_pause = pause_breakdown["Micro"] + pause_breakdown["Gap"] + pause_breakdown["AFK"] + sum(pause_breakdown["Massive"])
+            # INJECT MASSIVE PAUSE AFTER A RANDOM EVENT
+            if massive_pause_val > 0 and len(merged) > 1:
+                pause_breakdown["Massive"] = massive_pause_val
+                # Pick a random event index (except the very last one)
+                split_idx = rng.randint(0, len(merged) - 2)
+                # Shift all subsequent events by the massive pause duration
+                for j in range(split_idx + 1, len(merged)):
+                    merged[j]["Time"] += massive_pause_val
+                timeline = merged[-1]["Time"]
+
+            total_pause = pause_breakdown["Micro"] + pause_breakdown["Gap"] + pause_breakdown["AFK"] + pause_breakdown["Massive"]
             manifest.append(f"  TOTAL DURATION: {format_ms_precise(timeline)}")
             manifest.append(f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:")
             manifest.append(f"    - Micro-pauses: {pause_breakdown['Micro']//1000}s")
             manifest.append(f"    - Inter-file Gaps: {pause_breakdown['Gap']//1000}s")
             manifest.append(f"    - AFK Pool: {pause_breakdown['AFK']//1000}s")
-            for idx, m in enumerate(pause_breakdown["Massive"]):
-                manifest.append(f"    - Massive P{idx+1}: {format_ms_precise(m)}")
+            if pause_breakdown["Massive"] > 0:
+                manifest.append(f"    - Massive Pause (Random Event Injection): {format_ms_precise(pause_breakdown['Massive'])}")
             manifest.append("")
             manifest.extend(file_entries)
             manifest.append("-" * 30)
