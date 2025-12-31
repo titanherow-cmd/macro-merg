@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.4)
-- FIX: Folder numbering now only applies to folders containing a manifest.
-- FIX: Added strict existence checks for search_base to prevent FileNotFoundError.
-- FEATURE: Internal speed multiplier removed to prevent mechanical desync.
+merge_macros.py - STABLE RESTORE POINT (v2.9.5)
+- FIX: Numbering logic updated to assign unique IDs to every individual sub-folder.
+- FIX: Every macro-containing folder gets its own manifest and unique ID.
+- FIX: Naming scheme (A1, B1...) now matches the specific sub-folder's ID.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -89,7 +89,7 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
-    # --- robust path discovery ---
+    # --- Robust Path Discovery ---
     search_base = Path(args.input_root).resolve()
     if not search_base.exists():
         search_base = Path(".").resolve()
@@ -126,23 +126,21 @@ def main():
     for folder in subdirs:
         if folder.name in [".github", "output"]: continue
         
-        game_id = clean_identity(folder.name)
-        
         for root, _, files in os.walk(folder):
             curr = Path(root)
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
             
-            rel = curr.relative_to(folder)
-            key = (game_id, str(rel).lower())
+            # Key is based on the full relative path to ensure unique subfolder detection
+            rel_to_originals = curr.relative_to(originals_root)
+            key = str(rel_to_originals).lower()
             
             if key not in pools:
                 is_ts = bool(re.search(r'time[\s-]*sens', str(curr).lower()))
                 pools[key] = {
-                    "source_folder_name": folder.name, # Store original name for later numbering
-                    "rel_path": rel,
+                    "full_rel_path": rel_to_originals,
                     "files": [], 
-                    "is_ts": is_ts, 
+                    "is_ts": is_ts,
                     "id": clean_identity(curr.name)
                 }
             for f in jsons: pools[key]["files"].append(curr / f)
@@ -157,71 +155,67 @@ def main():
                     for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]: 
                         pd["files"].append(zp / f)
 
-    # Merging Logic with Dynamic Numbering
-    # We group pools by their source folder to ensure consistent numbering
-    grouped_pools = {}
-    for key, data in pools.items():
-        fname = data["source_folder_name"]
-        if fname not in grouped_pools: grouped_pools[fname] = []
-        grouped_pools[fname].append(data)
-
-    folder_counter = 1
-    for source_name in sorted(grouped_pools.keys()):
-        # Assign the number only to folders that actually have macros to merge
-        current_f_num = folder_counter
-        folder_counter += 1
+    # Merging Logic with Individual Subfolder Numbering
+    # Sort keys alphabetically to ensure consistent numbering (e.g., A/B/C)
+    sorted_keys = sorted(pools.keys())
+    
+    for f_idx, key in enumerate(sorted_keys, start=1):
+        data = pools[key]
         
-        for data in grouped_pools[source_name]:
-            # Construct the numbered path
-            numbered_folder_name = f"{current_f_num}-{source_name}"
-            out_f = bundle_dir / numbered_folder_name / data["rel_path"]
-            out_f.mkdir(parents=True, exist_ok=True)
+        # We construct the path such that the NUMBER prefixes the leaf folder or specific sub-path
+        # Example: originals/Parent/Sub -> merged_bundle/1-Parent/Sub
+        path_parts = list(data["full_rel_path"].parts)
+        if path_parts:
+            path_parts[0] = f"{f_idx}-{path_parts[0]}"
             
-            manifest = [f"FOLDER: {numbered_folder_name}", f"TS MODE: {data['is_ts']}", f"FOLDER ID: {current_f_num}", ""]
+        out_f = bundle_dir.joinpath(*path_parts)
+        out_f.mkdir(parents=True, exist_ok=True)
+        
+        manifest = [f"FOLDER: {out_f.relative_to(bundle_dir)}", f"TS MODE: {data['is_ts']}", f"FOLDER ID: {f_idx}", ""]
+        
+        norm_v = args.versions
+        inef_v = 0 if data["is_ts"] else (norm_v // 2)
+        
+        for v_idx in range(1, (norm_v + inef_v) + 1):
+            is_inef = (v_idx > norm_v)
+            v_letter = chr(64 + v_idx)
+            v_code = f"{v_letter}{f_idx}"
             
-            norm_v = args.versions
-            inef_v = 0 if data["is_ts"] else (norm_v // 2)
+            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
-            for v_idx in range(1, (norm_v + inef_v) + 1):
-                is_inef = (v_idx > norm_v)
-                v_letter = chr(64 + v_idx)
-                v_code = f"{v_letter}{current_f_num}"
+            paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
+            merged, timeline = [], 0
+            
+            for i, p in enumerate(paths):
+                raw = load_json_events(p)
+                if not raw: continue
+                t_vals = [int(e["Time"]) for e in raw]
+                base_t = min(t_vals)
                 
-                if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
-                elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
-                else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+                gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
+                timeline += gap
                 
-                paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
-                merged, timeline = [], 0
-                
-                for i, p in enumerate(paths):
-                    raw = load_json_events(p)
-                    if not raw: continue
-                    t_vals = [int(e["Time"]) for e in raw]
-                    base_t = min(t_vals)
-                    
-                    gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
-                    timeline += gap
-                    
-                    for e_idx, e in enumerate(raw):
-                        ne = deepcopy(e)
-                        rel_offset = int(int(e["Time"]) - base_t)
-                        ne["Time"] = timeline + rel_offset + (e_idx * args.delay_before_action_ms)
-                        merged.append(ne)
-                    timeline = merged[-1]["Time"]
+                for e_idx, e in enumerate(raw):
+                    ne = deepcopy(e)
+                    rel_offset = int(int(e["Time"]) - base_t)
+                    ne["Time"] = timeline + rel_offset + (e_idx * args.delay_before_action_ms)
+                    merged.append(ne)
+                timeline = merged[-1]["Time"]
 
-                if is_inef and not data["is_ts"] and len(merged) > 1:
-                    p_ms = rng.randint(300000, 720000)
-                    split = rng.randint(0, len(merged) - 2)
-                    for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
-                    timeline = merged[-1]["Time"]
-                    manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
+            if is_inef and not data["is_ts"] and len(merged) > 1:
+                p_ms = rng.randint(300000, 720000)
+                split = rng.randint(0, len(merged) - 2)
+                for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
+                timeline = merged[-1]["Time"]
+                manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
-                fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
-                (out_f / fname).write_text(json.dumps(merged, indent=2))
-                manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
+            fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            (out_f / fname).write_text(json.dumps(merged, indent=2))
+            manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
 
-            (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
+        (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
     main()
