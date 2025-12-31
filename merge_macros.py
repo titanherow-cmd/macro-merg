@@ -702,31 +702,61 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", default="originals")
-    parser.add_argument("--output-dir", default="output")
+    # ✅ FIXED: Accept positional arguments from workflow
+    parser.add_argument("input_root", type=Path, nargs='?', default=Path("input_macros"))
+    parser.add_argument("output_root", type=Path, nargs='?', default=Path("output"))
+    parser.add_argument("--input-dir", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--exclude-count", type=int, default=10)
     parser.add_argument("--within-max-time", default="33")
     parser.add_argument("--within-max-pauses", type=int, default=2)
     parser.add_argument("--between-max-time", default="18")
-    parser.add_argument("--target-minutes", type=int, default=35)  # ✅ V7: Changed to 35
-    # ✅ HANDOFF FIX: --max-files removed entirely
+    parser.add_argument("--target-minutes", type=int, default=35)
+    parser.add_argument("--delay-before-action-ms", type=int, default=10)  # ✅ Accept but ignore
+    parser.add_argument("--bundle-id", type=int, default=None)  # ✅ Accept for compatibility
     
     args = parser.parse_args()
+    
+    # ✅ Handle both argument styles
+    if args.input_dir:
+        input_root = args.input_dir
+    else:
+        input_root = args.input_root
+    
+    if args.output_dir:
+        output_parent = args.output_dir
+    else:
+        output_parent = args.output_root
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
-    input_root, output_parent = Path(args.input_dir), Path(args.output_dir)
     output_parent.mkdir(parents=True, exist_ok=True)
     
-    current_bundle_seq = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter(COUNTER_PATH) or 1)
+    # ✅ Use bundle-id from args if provided, otherwise read from env/file
+    if args.bundle_id:
+        current_bundle_seq = args.bundle_id
+    else:
+        current_bundle_seq = int(os.environ.get("BUNDLE_SEQ", "").strip() or read_counter(COUNTER_PATH) or 1)
     output_base_name = f"merged_bundle_{current_bundle_seq}"
     output_root = output_parent / f"merged_bundle_{current_bundle_seq}"
     output_root.mkdir(parents=True, exist_ok=True)
     
-    folder_dirs = find_all_dirs_with_json(input_root)
+    # ✅ FIXED: Look for 'originals' folder inside input_root
+    originals_folder = input_root / "originals"
+    if not originals_folder.exists():
+        originals_folder = input_root
+    
+    if not originals_folder.exists():
+        print(f"ERROR: Cannot find input folder at {input_root}", file=sys.stderr)
+        if not args.bundle_id:  # Only increment counter if not provided
+            write_counter(COUNTER_PATH, current_bundle_seq + 1)
+        return
+    
+    folder_dirs = find_all_dirs_with_json(originals_folder)
     if not folder_dirs:
-        print(f"No JSON files found in {input_root}", file=sys.stderr)
-        write_counter(COUNTER_PATH, current_bundle_seq + 1)
+        print(f"No JSON files found in {originals_folder}", file=sys.stderr)
+        if not args.bundle_id:  # Only increment counter if not provided
+            write_counter(COUNTER_PATH, current_bundle_seq + 1)
         return
         
     try:
@@ -734,11 +764,12 @@ def main():
         between_max_s = parse_time_to_seconds(args.between_max_time)
     except Exception as e:
         print(f"ERROR parsing time: {e}", file=sys.stderr)
-        write_counter(COUNTER_PATH, current_bundle_seq + 1)
+        if not args.bundle_id:  # Only increment counter if not provided
+            write_counter(COUNTER_PATH, current_bundle_seq + 1)
         return
     
     # ✅ V7 IMPROVEMENT: Alphabetical folder numbering
-    folder_display_names = {folder: str(folder.relative_to(input_root)) for folder in folder_dirs}
+    folder_display_names = {folder: str(folder.relative_to(originals_folder)) for folder in folder_dirs}
     sorted_folders = sorted(folder_dirs, key=lambda f: folder_display_names[f].lower())
     folder_numbers = {folder: idx + 1 for idx, folder in enumerate(sorted_folders)}
     
@@ -752,7 +783,7 @@ def main():
             continue
         
         try:
-            rel_folder = folder.relative_to(input_root)
+            rel_folder = folder.relative_to(originals_folder)
         except:
             rel_folder = Path(folder.name)
         
@@ -768,7 +799,7 @@ def main():
         for v in range(1, max(1, args.versions) + 1):
             merged_fname, merged_events, finals, pauses, excluded, total_minutes = generate_version_for_folder(
                 files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
-                between_max_s, folder, input_root, selector, exemption_config, 
+                between_max_s, folder, originals_folder, selector, exemption_config, 
                 target_minutes=args.target_minutes, folder_number=folder_number
             )
             
@@ -792,7 +823,10 @@ def main():
                 arcname = f"{output_base_name}/{fpath.name}"
             zf.write(fpath, arcname=arcname)
     
-    write_counter(COUNTER_PATH, current_bundle_seq + 1)
+    # ✅ Only increment counter if not provided by workflow
+    if not args.bundle_id:
+        write_counter(COUNTER_PATH, current_bundle_seq + 1)
+    
     print(f"\n✅ DONE. Created: {zip_path} ({len(all_written_paths)} files)")
 
 if __name__ == "__main__":
