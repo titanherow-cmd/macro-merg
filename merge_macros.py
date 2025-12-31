@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.1)
+merge_macros.py - ULTIMATE VERSION (v2.2)
 - Inefficient System: Creates EXTRA files (1 for every 2 normal files).
 - Inefficient Naming: Starts with ¬¬¬.
 - Manifest Symbols: Regular (-), Inefficient (*).
 - Massive Pause: 40% roll, up to 2 per merged file, 5-12 minutes.
 - Inefficient Weights: x1(20%), x2(40%), x3(40%).
 - Exemption: Time Sensitive folders skip inefficient creation.
+- BIG FONT: Total file count displayed as ASCII block letters in manifest.
 """
 
 from pathlib import Path
@@ -41,6 +42,28 @@ def format_ms_precise(ms: int) -> str:
 def clean_identity(name: str) -> str:
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
     return name.lower()
+
+def get_big_font_number(n):
+    """Returns an ASCII art block representation of a number."""
+    digits = {
+        '0': ["  000  ", " 0   0 ", " 0   0 ", " 0   0 ", "  000  "],
+        '1': ["   1   ", "  11   ", "   1   ", "   1   ", "  111  "],
+        '2': [" 2222  ", "     2 ", "  222  ", " 2     ", " 22222 "],
+        '3': [" 3333  ", "     3 ", "  333  ", "     3 ", " 3333  "],
+        '4': [" 4   4 ", " 4   4 ", " 44444 ", "     4 ", "     4 "],
+        '5': [" 55555 ", " 5     ", " 5555  ", "     5 ", " 5555  "],
+        '6': ["  666  ", " 6     ", " 6666  ", " 6   6 ", "  666  "],
+        '7': [" 77777 ", "    7  ", "   7   ", "  7    ", " 7     "],
+        '8': ["  888  ", " 8   8 ", "  888  ", " 8   8 ", "  888  "],
+        '9': ["  999  ", " 9   9 ", "  9999 ", "     9 ", "  999  "]
+    }
+    s = str(n)
+    rows = ["", "", "", "", ""]
+    for char in s:
+        if char in digits:
+            for i in range(5):
+                rows[i] += digits[char][i] + "  "
+    return "\n".join(rows)
 
 class QueueFileSelector:
     def __init__(self, rng, all_files):
@@ -185,14 +208,18 @@ def main():
                     except: pass
 
         selector = QueueFileSelector(rng, data["files"])
+        
+        # MANIFEST HEADER WITH BIG FONT NUMBER
+        pool_size = len(data["files"])
         manifest = [
             f"MANIFEST FOR FOLDER: {data['display_name']}",
             f"========================================",
-            f"TOTAL FILES IN POOL: {len(data['files'])}",
+            f"TOTAL FILES IN POOL:",
+            get_big_font_number(pool_size),
+            f"({pool_size} files total)",
             ""
         ]
 
-        # Calculate Total Versions: Normal + (1 Extra per 2 Normal)
         normal_count = args.versions
         inef_count = 0 if data["is_ts"] else (normal_count // 2)
         total_to_make = normal_count + inef_count
@@ -201,7 +228,6 @@ def main():
             v_code = chr(64 + v_num)
             is_extra_inef = (v_num > normal_count)
             
-            # Weighted Probability Rules
             if data["is_ts"]:
                 mult = rng.choice([1.0, 1.2, 1.5])
             elif is_extra_inef:
@@ -227,18 +253,15 @@ def main():
                 t_v = [int(e.get("Time", 0)) for e in raw]
                 base_t = min(t_v) if t_v else 0
                 
-                # Inter-file Gap
                 base_gap = rng.randint(500, 2500) if i > 0 else 0
                 gap = int(base_gap * mult)
                 pause_breakdown["Gap"] += base_gap
                 pause_breakdown["AFK"] += (gap - base_gap)
                 
-                # Massive Pause Logic (40% Chance, up to 2 successes per merged file)
                 if is_extra_inef and massive_rolls_used < 2:
-                    # Roll twice per file transition
                     for _ in range(2):
                         if massive_rolls_used < 2 and rng.random() < 0.40:
-                            m_pause = rng.randint(300000, 720000) # 5-12 mins
+                            m_pause = rng.randint(300000, 720000) 
                             gap += m_pause
                             pause_breakdown["Massive"].append(m_pause)
                             massive_rolls_used += 1
@@ -252,7 +275,6 @@ def main():
                 
                 pause_breakdown["Micro"] += (len(raw) * args.delay_before_action_ms)
                 timeline = merged[-1]["Time"]
-                # SYMBOLISM: * for Inefficient, - for Regular
                 bullet = '*' if is_extra_inef else '-'
                 file_entries.append(f"  {bullet} {p_obj.name} (Ends at {format_ms_precise(timeline)})")
 
@@ -269,7 +291,6 @@ def main():
             manifest.append("-" * 30)
             manifest.append("")
 
-            # File Naming Logic
             prefix = "¬¬¬" if is_extra_inef else ""
             fname = f"{prefix}{v_code}_{int(timeline / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged, indent=2), encoding="utf-8")
