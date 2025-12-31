@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.2)
+merge_macros.py - ULTIMATE VERSION (v2.6)
 - Inefficient System: Creates EXTRA files (1 for every 2 normal files).
 - Inefficient Naming: Starts with ¬¬¬.
 - Manifest Symbols: Regular (-), Inefficient (*).
 - Massive Pause: 40% roll, up to 2 per merged file, 5-12 minutes.
 - Inefficient Weights: x1(20%), x2(40%), x3(40%).
-- Exemption: Time Sensitive folders skip inefficient creation.
-- BIG FONT: Total file count displayed as ASCII block letters in manifest.
+- Exemption: Ultra-robust Regex for "time sensitive" typos (handles sensitve, senstive, sensitiv, etc).
 """
 
 from pathlib import Path
@@ -21,7 +20,7 @@ def load_json_events(path: Path):
             for k in ("events", "items", "entries", "records"):
                 if k in data and isinstance(data[k], list): return deepcopy(data[k])
             return [data] if "Time" in data else []
-        return deepcopy(data) if isinstance(data, list) else []
+        return [deepcopy(data)] if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -43,28 +42,6 @@ def clean_identity(name: str) -> str:
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
     return name.lower()
 
-def get_big_font_number(n):
-    """Returns an ASCII art block representation of a number."""
-    digits = {
-        '0': ["  000  ", " 0   0 ", " 0   0 ", " 0   0 ", "  000  "],
-        '1': ["   1   ", "  11   ", "   1   ", "   1   ", "  111  "],
-        '2': [" 2222  ", "     2 ", "  222  ", " 2     ", " 22222 "],
-        '3': [" 3333  ", "     3 ", "  333  ", "     3 ", " 3333  "],
-        '4': [" 4   4 ", " 4   4 ", " 44444 ", "     4 ", "     4 "],
-        '5': [" 55555 ", " 5     ", " 5555  ", "     5 ", " 5555  "],
-        '6': ["  666  ", " 6     ", " 6666  ", " 6   6 ", "  666  "],
-        '7': [" 77777 ", "    7  ", "   7   ", "  7    ", " 7     "],
-        '8': ["  888  ", " 8   8 ", "  888  ", " 8   8 ", "  888  "],
-        '9': ["  999  ", " 9   9 ", "  9999 ", "     9 ", "  999  "]
-    }
-    s = str(n)
-    rows = ["", "", "", "", ""]
-    for char in s:
-        if char in digits:
-            for i in range(5):
-                rows[i] += digits[char][i] + "  "
-    return "\n".join(rows)
-
 class QueueFileSelector:
     def __init__(self, rng, all_files):
         self.rng = rng
@@ -75,13 +52,14 @@ class QueueFileSelector:
         self.rng.shuffle(self.eff_pool)
         self.rng.shuffle(self.ineff_pool)
 
-    def get_sequence(self, target_minutes, force_inefficient=False):
+    def get_sequence(self, target_minutes, force_inefficient=False, strictly_efficient=False):
         sequence = []
         current_ms = 0.0
         target_ms = target_minutes * 60000
+        actual_force_inef = force_inefficient if not strictly_efficient else False
         
         while current_ms < target_ms:
-            if force_inefficient and self.ineff_pool:
+            if actual_force_inef and self.ineff_pool:
                 pick = self.ineff_pool.pop(0)
             elif self.eff_pool:
                 pick = self.eff_pool.pop(0)
@@ -89,9 +67,9 @@ class QueueFileSelector:
                 self.eff_pool = list(self.efficient)
                 self.rng.shuffle(self.eff_pool)
                 pick = self.eff_pool.pop(0)
-            elif self.ineff_pool:
+            elif self.ineff_pool and not strictly_efficient:
                 pick = self.ineff_pool.pop(0)
-            elif self.inefficient:
+            elif self.inefficient and not strictly_efficient:
                 self.ineff_pool = list(self.inefficient)
                 self.rng.shuffle(self.ineff_pool)
                 pick = self.ineff_pool.pop(0)
@@ -165,11 +143,16 @@ def main():
             rel = curr.relative_to(game_folder)
             key = (game_id, str(rel).lower())
             if key not in unified_pools:
+                # ULTRA ROBUST TYPO-TOLERANT REGEX
+                # Matches: "time sensitve", "time sensitive", "timesens", "time-sensitiv", "senstive", etc.
+                path_str = str(curr).lower()
+                is_time_sensitive = bool(re.search(r'time[\s-]*sens', path_str))
+                
                 unified_pools[key] = {
                     "out_rel_path": Path(game_folder.name) / rel,
                     "display_name": f"{game_folder.name} / {rel}",
                     "files": [], 
-                    "is_ts": "time sensitive" in str(curr).lower(),
+                    "is_ts": is_time_sensitive,
                     "source_folders": [curr], 
                     "macro_id": clean_identity(curr.name)
                 }
@@ -189,10 +172,6 @@ def main():
                         if zp not in pd["source_folders"]: pd["source_folders"].append(zp)
 
     # 3. Merge Execution
-    if not unified_pools:
-        print("ERROR: No macro folders found to merge.")
-        sys.exit(1)
-
     for key, data in unified_pools.items():
         if not data["files"]: continue
         out_folder = bundle_dir / data["out_rel_path"]
@@ -209,14 +188,11 @@ def main():
 
         selector = QueueFileSelector(rng, data["files"])
         
-        # MANIFEST HEADER WITH BIG FONT NUMBER
-        pool_size = len(data["files"])
         manifest = [
             f"MANIFEST FOR FOLDER: {data['display_name']}",
             f"========================================",
-            f"TOTAL FILES IN POOL:",
-            get_big_font_number(pool_size),
-            f"({pool_size} files total)",
+            f"TOTAL FILES IN POOL: {len(data['files'])}",
+            f"TIME SENSITIVE MODE: {'ACTIVE' if data['is_ts'] else 'OFF'}",
             ""
         ]
 
@@ -236,7 +212,11 @@ def main():
                 mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             internal_speed = rng.uniform(s_min, s_max)
-            paths = selector.get_sequence(args.target_minutes, force_inefficient=is_extra_inef)
+            paths = selector.get_sequence(
+                args.target_minutes, 
+                force_inefficient=is_extra_inef,
+                strictly_efficient=data["is_ts"]
+            )
             
             v_title = f"Version {v_code}"
             if is_extra_inef: v_title += " [EXTRA - INEFFICIENT]"
@@ -258,7 +238,7 @@ def main():
                 pause_breakdown["Gap"] += base_gap
                 pause_breakdown["AFK"] += (gap - base_gap)
                 
-                if is_extra_inef and massive_rolls_used < 2:
+                if is_extra_inef and not data["is_ts"] and massive_rolls_used < 2:
                     for _ in range(2):
                         if massive_rolls_used < 2 and rng.random() < 0.40:
                             m_pause = rng.randint(300000, 720000) 
@@ -275,7 +255,8 @@ def main():
                 
                 pause_breakdown["Micro"] += (len(raw) * args.delay_before_action_ms)
                 timeline = merged[-1]["Time"]
-                bullet = '*' if is_extra_inef else '-'
+                
+                bullet = '*' if ("¬¬¬" in p_obj.name) else '-'
                 file_entries.append(f"  {bullet} {p_obj.name} (Ends at {format_ms_precise(timeline)})")
 
             total_pause = pause_breakdown["Micro"] + pause_breakdown["Gap"] + pause_breakdown["AFK"] + sum(pause_breakdown["Massive"])
