@@ -10,7 +10,7 @@ on:
       target_minutes:
         description: 'Target duration per merged file'
         required: true
-        default: '25'
+        default: '35'
       delay_before_action_ms:
         description: 'Delay Before Action (MS)'
         required: true
