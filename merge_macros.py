@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.8.2)
+merge_macros.py - STABLE RESTORE POINT (v2.9)
 - FEATURE: Internal speed multiplier removed to prevent mechanical desync.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Typo-Tolerant Time Sensitive: regex r'time[\s-]*sens'.
-- Multipliers: Standard (x1, x2, x3) @ 50/30/20% | TS (1.0, 1.2, 1.5) @ Equal weights.
-- Manifest Update: Renamed to '!_MANIFEST_!' for maximum visibility.
+- Folder Numbering: Prefixes output folders and macro filenames with a unique ID (e.g., 1-FolderName, A1_35m.json).
+- Manifest: Named '!_MANIFEST_!' for maximum visibility.
 """
 
 import argparse, json, random, re, sys, os, math, shutil
@@ -98,39 +98,66 @@ def main():
     bundle_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random()
     pools = {}
+    folder_counter = 1
 
-    for folder in filter(Path.is_dir, originals_root.iterdir()):
-        if folder.name.lower() in [".git", "output"]: continue
+    # Discovery & Identity Pooling
+    # We sort folders alphabetically to ensure numbering is consistent across versions
+    subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir()])
+
+    for folder in subdirs:
+        if folder.name.lower() in [".git", "output"] or folder.name.upper().startswith('Z'): continue
+        
         game_id = clean_identity(folder.name)
+        found_macros = False
+        
         for root, _, files in os.walk(folder):
             curr = Path(root)
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
+            
+            found_macros = True
             rel = curr.relative_to(folder)
             key = (game_id, str(rel).lower())
+            
             if key not in pools:
                 is_ts = bool(re.search(r'time[\s-]*sens', str(curr).lower()))
-                pools[key] = {"out": Path(folder.name) / rel, "files": [], "is_ts": is_ts, "id": clean_identity(curr.name), "srcs": [curr]}
+                # Rule 16: Apply unique folder number prefix
+                numbered_name = f"{folder_counter}-{folder.name}"
+                pools[key] = {
+                    "out": Path(numbered_name) / rel, 
+                    "files": [], 
+                    "is_ts": is_ts, 
+                    "id": clean_identity(curr.name), 
+                    "f_num": folder_counter
+                }
             for f in jsons: pools[key]["files"].append(curr / f)
+        
+        if found_macros:
+            folder_counter += 1
 
+    # Z-Pooling Variation Injection
     for folder in filter(Path.is_dir, originals_root.iterdir()):
         if not folder.name.upper().startswith('Z'): continue
         for r, _, fs in os.walk(folder):
             zp = Path(r); zid = clean_identity(zp.name)
             for pk, pd in pools.items():
                 if pd["id"] == zid:
-                    for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]: pd["files"].append(zp / f)
+                    for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]: 
+                        pd["files"].append(zp / f)
 
+    # Merging Logic
     for key, data in pools.items():
         out_f = bundle_dir / data["out"]; out_f.mkdir(parents=True, exist_ok=True)
-        manifest = [f"FOLDER: {data['out']}", f"TS MODE: {data['is_ts']}", ""]
+        manifest = [f"FOLDER: {data['out']}", f"TS MODE: {data['is_ts']}", f"FOLDER ID: {data['f_num']}", ""]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
         
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
-            v_code = chr(64 + v_idx)
+            v_letter = chr(64 + v_idx)
+            # Rule 16: Version becomes A1, B1, etc.
+            v_code = f"{v_letter}{data['f_num']}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
@@ -162,11 +189,11 @@ def main():
                 timeline = merged[-1]["Time"]
                 manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
+            # Example: A1_35m.json
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
 
-        # Filename updated to !_MANIFEST_!
         (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
