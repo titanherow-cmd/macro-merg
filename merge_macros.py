@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.8)
-- FIX: Nested paths are now properly grouped under a single numbered root.
-- FIX: Numbering prefixes the TOP-LEVEL folder only (e.g., 1-deskt- osrs).
-- FIX: Unique IDs (A1, B1...) are still assigned per sub-folder to avoid name collisions.
+merge_macros.py - STABLE RESTORE POINT (v2.9.9)
+- REMOVED: Folder numbering and file ID naming (A1, B2...) features.
+- FIX: Exact original directory structure is preserved in the output bundle.
+- FIX: Naming scheme simplified to A, B, C... (e.g., A_35m.json).
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -119,6 +119,7 @@ def main():
         macro_id = clean_identity(curr.name)
         rel_path = curr.relative_to(originals_root)
         
+        # Variations starting with Z_ are pools, not output folders
         if any(p.lower().startswith("z_") for p in rel_path.parts):
             continue
 
@@ -129,8 +130,7 @@ def main():
                 "rel_path": rel_path,
                 "files": [curr / f for f in jsons],
                 "is_ts": is_ts,
-                "macro_id": macro_id,
-                "root_parent": rel_path.parts[0] if rel_path.parts else ""
+                "macro_id": macro_id
             }
 
     # 2. Z-Variation Injection
@@ -143,35 +143,13 @@ def main():
             if pd["macro_id"] == zid:
                 pd["files"].extend([curr / f for f in jsons])
 
-    # 3. Smart Numbering Logic
-    # We need to map root folders to numbers, AND subfolders to unique IDs.
-    sorted_keys = sorted(pools.keys())
-    
-    # Map each unique top-level root to a number
-    root_to_id = {}
-    unique_roots = sorted(list(set(p["root_parent"] for p in pools.values() if p["root_parent"])))
-    for idx, rname in enumerate(unique_roots, start=1):
-        root_to_id[rname] = idx
-
-    # Every individual macro folder gets a unique index for its file naming (A1, B2...)
-    for f_idx, key in enumerate(sorted_keys, start=1):
-        data = pools[key]
-        
-        # PRESERVE NESTING BUT NUMBER THE ROOT:
-        # If path is 'deskt- osrs/Edge/Macro', and deskt- osrs is root #1
-        # Target: '1-deskt- osrs/Edge/Macro'
-        path_parts = list(data["rel_path"].parts)
-        root_name = data["root_parent"]
-        if root_name in root_to_id:
-            root_num = root_to_id[root_name]
-            path_parts[0] = f"{root_num}-{root_name}"
-            
-        out_f = bundle_dir.joinpath(*path_parts)
+    # 3. Merging Logic
+    for key, data in pools.items():
+        # Preserve original nesting exactly
+        out_f = bundle_dir / data["rel_path"]
         out_f.mkdir(parents=True, exist_ok=True)
         
-        # We use f_idx for the file naming (A1, B2...) to ensure uniqueness 
-        # even if multiple folders share the same root number.
-        manifest = [f"FOLDER: {out_f.relative_to(bundle_dir)}", f"TS MODE: {data['is_ts']}", f"MACRO ID: {f_idx}", ""]
+        manifest = [f"FOLDER: {data['rel_path']}", f"TS MODE: {data['is_ts']}", ""]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -179,7 +157,8 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            v_code = f"{v_letter}{f_idx}"
+            # Simplified code: just the letter
+            v_code = v_letter
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
@@ -209,6 +188,7 @@ def main():
                 timeline = merged[-1]["Time"]
                 manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
+            # Filename is now just the Letter and duration
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
