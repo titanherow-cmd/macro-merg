@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.6)
+merge_macros.py - ULTIMATE VERSION (v2.7)
+- FIX: Robust event extraction to prevent 'list object has no attribute get' error.
 - Inefficient System: Creates EXTRA files (1 for every 2 normal files).
 - Inefficient Naming: Starts with ¬¬¬.
 - Manifest Symbols: Regular (-), Inefficient (*).
@@ -14,14 +15,46 @@ import argparse, json, random, re, sys, os, math, shutil
 from copy import deepcopy
 
 def load_json_events(path: Path):
+    """
+    Robustly extracts a list of event dictionaries from a JSON file.
+    Handles nested lists and various dictionary keys.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        events = []
+
+        # 1. If it's a dict, find the list of events inside common keys
         if isinstance(data, dict):
+            found_list = None
             for k in ("events", "items", "entries", "records"):
-                if k in data and isinstance(data[k], list): return deepcopy(data[k])
-            return [data] if "Time" in data else []
-        return [deepcopy(data)] if isinstance(data, list) else []
-    except Exception:
+                if k in data and isinstance(data[k], list):
+                    found_list = data[k]
+                    break
+            if found_list is not None:
+                events = found_list
+            else:
+                # If no key matches but the dict looks like a single event
+                if "Time" in data:
+                    events = [data]
+        # 2. If it's a list, use it directly
+        elif isinstance(data, list):
+            events = data
+
+        # 3. CRITICAL FIX: Flatten and Validate
+        # Ensure every item in the list is a DICTIONARY with a 'Time' key.
+        # If an item is a list, we take the first element (handling double-nested arrays).
+        cleaned_events = []
+        for e in events:
+            # If the recorder double-wrapped the event in a list [ [{...}] ]
+            if isinstance(e, list) and len(e) > 0:
+                e = e[0]
+            
+            if isinstance(e, dict) and "Time" in e:
+                cleaned_events.append(e)
+            
+        return deepcopy(cleaned_events)
+    except Exception as e:
+        print(f"Warning: Failed to load {path.name}: {e}")
         return []
 
 def get_file_duration_ms(path: Path) -> int:
@@ -143,8 +176,6 @@ def main():
             rel = curr.relative_to(game_folder)
             key = (game_id, str(rel).lower())
             if key not in unified_pools:
-                # ULTRA ROBUST TYPO-TOLERANT REGEX
-                # Matches: "time sensitve", "time sensitive", "timesens", "time-sensitiv", "senstive", etc.
                 path_str = str(curr).lower()
                 is_time_sensitive = bool(re.search(r'time[\s-]*sens', path_str))
                 
@@ -230,6 +261,10 @@ def main():
             for i, p_obj in enumerate(paths):
                 raw = load_json_events(p_obj)
                 if not raw: continue
+                
+                # Check for empty files after robust loading
+                if not raw: continue
+                
                 t_v = [int(e.get("Time", 0)) for e in raw]
                 base_t = min(t_v) if t_v else 0
                 
