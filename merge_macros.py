@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9.9)
-- REMOVED: Folder numbering and file ID naming (A1, B2...) features.
-- FIX: Exact original directory structure is preserved in the output bundle.
-- FIX: Naming scheme simplified to A, B, C... (e.g., A_35m.json).
+merge_macros.py - STABLE RESTORE POINT (v3.0.0)
+- FEATURE: Random 0-1500ms delay rolled individually BEFORE every action.
+- REMOVED: Cumulative index-based delay (e_idx * 10ms).
+- FIX: Exact original directory structure is preserved.
+- FIX: Naming scheme A, B, C... (e.g., A_35m.json).
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
@@ -84,7 +85,7 @@ def main():
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=35)
-    parser.add_argument("--delay-before-action-ms", type=int, default=10)
+    parser.add_argument("--delay-before-action-ms", type=int, default=1500) # Updated default
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
@@ -112,16 +113,11 @@ def main():
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
-        
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
         if not jsons: continue
-        
         macro_id = clean_identity(curr.name)
         rel_path = curr.relative_to(originals_root)
-        
-        # Variations starting with Z_ are pools, not output folders
-        if any(p.lower().startswith("z_") for p in rel_path.parts):
-            continue
+        if any(p.lower().startswith("z_") for p in rel_path.parts): continue
 
         key = str(rel_path).lower()
         if key not in pools:
@@ -145,11 +141,9 @@ def main():
 
     # 3. Merging Logic
     for key, data in pools.items():
-        # Preserve original nesting exactly
         out_f = bundle_dir / data["rel_path"]
         out_f.mkdir(parents=True, exist_ok=True)
-        
-        manifest = [f"FOLDER: {data['rel_path']}", f"TS MODE: {data['is_ts']}", ""]
+        manifest = [f"FOLDER: {data['rel_path']}", f"TS MODE: {data['is_ts']}", f"JITTER: 0-{args.delay_before_action_ms}ms", ""]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -157,7 +151,6 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            # Simplified code: just the letter
             v_code = v_letter
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
@@ -167,18 +160,33 @@ def main():
             paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
             merged, timeline = [], 0
             
+            # TRACKING JITTER:
+            # We keep a running 'cumulative jitter' to ensure the timeline never moves backward.
+            total_jitter = 0
+            
             for i, p in enumerate(paths):
                 raw = load_json_events(p)
                 if not raw: continue
                 t_vals = [int(e["Time"]) for e in raw]
                 base_t = min(t_vals)
+                
+                # Gap between files
                 gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
                 timeline += gap
+                
                 for e_idx, e in enumerate(raw):
                     ne = deepcopy(e)
                     rel_offset = int(int(e["Time"]) - base_t)
-                    ne["Time"] = timeline + rel_offset + (e_idx * args.delay_before_action_ms)
+                    
+                    # ROLL RANDOM PRE-ACTION JITTER (0 to 1500ms)
+                    # This happens for EVERY action.
+                    jitter = rng.randint(0, args.delay_before_action_ms)
+                    total_jitter += jitter
+                    
+                    ne["Time"] = timeline + rel_offset + total_jitter
                     merged.append(ne)
+                
+                # Advance global timeline to the end of this file + its total jitter
                 timeline = merged[-1]["Time"]
 
             if is_inef and not data["is_ts"] and len(merged) > 1:
@@ -188,7 +196,6 @@ def main():
                 timeline = merged[-1]["Time"]
                 manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
-            # Filename is now just the Letter and duration
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
