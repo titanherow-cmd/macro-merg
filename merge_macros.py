@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.0)
-- Ultra-Defensive Folder Discovery: Prevents FileNotFoundError on runner.
-- Lists directory structure to console if primary paths are missing.
-- Rule: Standard Folders -> 50% x1, 30% x2, 20% x3
-- Rule: Time Sensitive Folders -> Equal 1.0, 1.2, 1.5
-- Manifest: "TOTAL FILES IN POOL" correctly placed under separator.
+merge_macros.py - ULTIMATE VERSION (v2.1)
+- Inefficient System: Creates EXTRA files (1 for every 2 normal files).
+- Inefficient Naming: Starts with ¬¬¬.
+- Manifest Symbols: Regular (-), Inefficient (*).
+- Massive Pause: 40% roll, up to 2 per merged file, 5-12 minutes.
+- Inefficient Weights: x1(20%), x2(40%), x3(40%).
+- Exemption: Time Sensitive folders skip inefficient creation.
 """
 
 from pathlib import Path
@@ -79,26 +80,13 @@ class QueueFileSelector:
         return sequence
 
 def find_originals_folder(search_base: Path):
-    """Deep search for 'originals' or 'input_macros'. Falls back to root if needed."""
-    # 1. Look for 'originals' or 'input_macros' specifically
     for root, dirs, _ in os.walk(search_base):
         root_path = Path(root)
         if any(part in [".git", "output", ".github"] for part in root_path.parts):
             continue
         for d in dirs:
             if d.lower() in ["originals", "input_macros"]:
-                found_path = root_path / d
-                print(f"DEBUG: Found source folder at: {found_path}")
-                return found_path
-    
-    # 2. If nothing found, list current directory contents to help debug
-    print("DEBUG: Could not find 'originals' or 'input_macros'. Listing root contents:")
-    try:
-        for item in search_base.iterdir():
-            print(f"  - {'[DIR]' if item.is_dir() else '[FILE]'} {item.name}")
-    except:
-        pass
-
+                return root_path / d
     return search_base
 
 def main():
@@ -117,18 +105,14 @@ def main():
     except:
         s_min, s_max = 1.0, 1.0
 
-    # Ensure search base is absolute and exists
     search_base = Path(args.input_root).resolve()
     if not search_base.exists():
-        print(f"Notice: Input path {search_base} does not exist. Using current directory.")
         search_base = Path.cwd().resolve()
 
     originals_root = find_originals_folder(search_base)
-
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
-    # Try to find logout.json in current directory or search_base
     logout_file = search_base / "logout.json"
     if not logout_file.exists():
         logout_file = Path.cwd() / "logout.json"
@@ -136,14 +120,12 @@ def main():
     rng = random.Random()
     unified_pools = {}
 
-    # Check if we can actually iterate
     if not originals_root.exists() or not originals_root.is_dir():
         print("CRITICAL ERROR: Source path is not a valid directory.")
         sys.exit(1)
 
     # 1. Discover Pools
     for game_folder in filter(Path.is_dir, originals_root.iterdir()):
-        # Avoid processing the output or system folders if we are in root
         if game_folder.name.lower() in ["output", ".git", ".github", "input_macros"]: continue
         
         game_id = clean_identity(game_folder.name)
@@ -152,8 +134,7 @@ def main():
             try:
                 rel_parts = curr.relative_to(game_folder).parts
                 if any(p.upper().startswith('Z') for p in rel_parts): continue
-            except:
-                continue
+            except: continue
             
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
@@ -186,7 +167,7 @@ def main():
 
     # 3. Merge Execution
     if not unified_pools:
-        print("ERROR: No macro folders found to merge. Check your directory structure.")
+        print("ERROR: No macro folders found to merge.")
         sys.exit(1)
 
     for key, data in unified_pools.items():
@@ -211,24 +192,33 @@ def main():
             ""
         ]
 
-        for v_num in range(1, args.versions + 1):
+        # Calculate Total Versions: Normal + (1 Extra per 2 Normal)
+        normal_count = args.versions
+        inef_count = 0 if data["is_ts"] else (normal_count // 2)
+        total_to_make = normal_count + inef_count
+
+        for v_num in range(1, total_to_make + 1):
             v_code = chr(64 + v_num)
-            is_inef_version = (v_num % 3 == 0)
+            is_extra_inef = (v_num > normal_count)
             
+            # Weighted Probability Rules
             if data["is_ts"]:
                 mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_extra_inef:
+                mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
             else:
                 mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             internal_speed = rng.uniform(s_min, s_max)
-            paths = selector.get_sequence(args.target_minutes, force_inefficient=is_inef_version)
+            paths = selector.get_sequence(args.target_minutes, force_inefficient=is_extra_inef)
             
             v_title = f"Version {v_code}"
-            if is_inef_version: v_title += " [EXTRA - INEFFICIENT]"
+            if is_extra_inef: v_title += " [EXTRA - INEFFICIENT]"
             manifest.append(f"{v_title} (Multiplier: x{mult}):")
             
             merged, timeline = [], 0
             pause_breakdown = {"Micro": 0, "Gap": 0, "AFK": 0, "Massive": []}
+            massive_rolls_used = 0
             file_entries = []
 
             for i, p_obj in enumerate(paths):
@@ -237,15 +227,21 @@ def main():
                 t_v = [int(e.get("Time", 0)) for e in raw]
                 base_t = min(t_v) if t_v else 0
                 
+                # Inter-file Gap
                 base_gap = rng.randint(500, 2500) if i > 0 else 0
                 gap = int(base_gap * mult)
                 pause_breakdown["Gap"] += base_gap
                 pause_breakdown["AFK"] += (gap - base_gap)
                 
-                if is_inef_version and rng.random() < 0.2 and i > 0:
-                    m_pause = rng.randint(300000, 900000)
-                    gap += m_pause
-                    pause_breakdown["Massive"].append(m_pause)
+                # Massive Pause Logic (40% Chance, up to 2 successes per merged file)
+                if is_extra_inef and massive_rolls_used < 2:
+                    # Roll twice per file transition
+                    for _ in range(2):
+                        if massive_rolls_used < 2 and rng.random() < 0.40:
+                            m_pause = rng.randint(300000, 720000) # 5-12 mins
+                            gap += m_pause
+                            pause_breakdown["Massive"].append(m_pause)
+                            massive_rolls_used += 1
 
                 timeline += gap
                 for e_idx, e in enumerate(raw):
@@ -256,7 +252,8 @@ def main():
                 
                 pause_breakdown["Micro"] += (len(raw) * args.delay_before_action_ms)
                 timeline = merged[-1]["Time"]
-                bullet = '-' if is_inef_version else '*'
+                # SYMBOLISM: * for Inefficient, - for Regular
+                bullet = '*' if is_extra_inef else '-'
                 file_entries.append(f"  {bullet} {p_obj.name} (Ends at {format_ms_precise(timeline)})")
 
             total_pause = pause_breakdown["Micro"] + pause_breakdown["Gap"] + pause_breakdown["AFK"] + sum(pause_breakdown["Massive"])
@@ -272,7 +269,9 @@ def main():
             manifest.append("-" * 30)
             manifest.append("")
 
-            fname = f"{v_code}_{int(timeline / 60000)}m.json"
+            # File Naming Logic
+            prefix = "¬¬¬" if is_extra_inef else ""
+            fname = f"{prefix}{v_code}_{int(timeline / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged, indent=2), encoding="utf-8")
 
         (out_folder / "manifest.txt").write_text("\n".join(manifest), encoding="utf-8")
