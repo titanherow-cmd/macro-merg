@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - Integrated Version
-Fixed pathing for GitHub Actions compatibility to resolve empty ZIP issues.
+merge_macros.py - Robust Pathing Version
+Fixed pathing discovery for 'originals' folder and aligned defaults.
 """
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
 from copy import deepcopy
-from zipfile import ZipFile
 
 def load_json_events(path: Path):
     try:
@@ -35,6 +34,7 @@ def format_ms_precise(ms: int) -> str:
     return f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
 
 def clean_identity(name: str) -> str:
+    # Removes " - Copy", " (1)", etc.
     name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
     return name.lower()
 
@@ -56,6 +56,7 @@ class QueueFileSelector:
                 self.rng.shuffle(self.pool)
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
+            # Overhead estimate (30% for gaps)
             current_ms += (get_file_duration_ms(Path(pick)) * 1.3) + 1500
             if len(sequence) > 500: break 
         return sequence
@@ -70,22 +71,42 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     args, _ = parser.parse_known_args()
 
-    # Find originals folder
+    # --- ROBUST FOLDER DISCOVERY ---
     originals_root = None
-    for root, dirs, _ in os.walk(args.input_root):
-        if 'originals' in dirs:
-            originals_root = Path(root) / 'originals'
+    search_base = args.input_root.resolve()
+    print(f"Searching for 'originals' folder in: {search_base}")
+    
+    # 1. Check standard root and common nested paths
+    check_paths = [
+        search_base / "originals",
+        search_base / "Originals",
+        search_base / "input_macros" / "originals"
+    ]
+    for p in check_paths:
+        if p.exists() and p.is_dir():
+            originals_root = p
             break
+            
+    # 2. Deep walk if still not found
+    if not originals_root:
+        for root, dirs, _ in os.walk(search_base):
+            if any(x in root for x in [".git", "output", "__pycache__"]): continue
+            for d in dirs:
+                if d.lower() == "originals":
+                    originals_root = Path(root) / d
+                    break
+            if originals_root: break
 
     if not originals_root:
         print("CRITICAL ERROR: 'originals' folder not found.")
         sys.exit(1)
+    
+    print(f"Success! Using folder: {originals_root}")
 
-    # Create the SPECIFIC bundle folder the YAML expects
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
-    logout_file = args.input_root / "logout.json"
+    logout_file = search_base / "logout.json"
     rng = random.Random()
     unified_pools = {}
 
@@ -96,7 +117,9 @@ def main():
         
         for root, _, files in os.walk(game_folder):
             curr = Path(root)
+            # Skip Z-prefixed folders in main scan
             if any(p.upper().startswith('Z') for p in curr.relative_to(game_folder).parts): continue
+            
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
             
@@ -114,6 +137,7 @@ def main():
                 }
             for f in jsons: unified_pools[key]["files"].append(curr / f)
 
+        # Scoped Z Pooling
         for z in z_folders:
             for r, _, fs in os.walk(z):
                 zp = Path(r)
@@ -121,11 +145,14 @@ def main():
                 for pk, pd in unified_pools.items():
                     if pd["macro_id"] == zid:
                         for f in fs:
-                            if f.endswith(".json") and "click_zones" not in f.lower(): pd["files"].append(zp / f)
-                        if zp not in pd["source_folders"]: pd["source_folders"].append(zp)
+                            if f.endswith(".json") and "click_zones" not in f.lower(): 
+                                pd["files"].append(zp / f)
+                        if zp not in pd["source_folders"]: 
+                            pd["source_folders"].append(zp)
 
-    # Process
+    # Process merges
     for key, data in unified_pools.items():
+        if not data["files"]: continue
         out_folder = bundle_dir / data["out_rel_path"]
         out_folder.mkdir(parents=True, exist_ok=True)
         
@@ -139,35 +166,39 @@ def main():
                     except: pass
 
         selector = QueueFileSelector(rng, data["files"])
-        manifest = [f"MANIFEST FOR: {data['display_name']}"]
+        folder_manifest = [f"MANIFEST FOR: {data['display_name']}"]
 
-        for v_idx in range(args.versions):
-            v_code = chr(65 + v_idx)
+        for v_num in range(1, args.versions + 1):
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
-            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20])[0]
+            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
-            paths = selector.get_sequence(args.target_minutes)
-            if not paths: continue
+            selected_paths = selector.get_sequence(args.target_minutes)
+            if not selected_paths: continue
             
-            merged = []
-            timeline = 0
-            for i, p_str in enumerate(paths):
+            merged_events = []
+            timeline_ms = 0
+            for i, p_str in enumerate(selected_paths):
                 raw = load_json_events(Path(p_str))
                 if not raw: continue
-                base_t = min(int(e.get("Time", 0)) for e in raw)
+                
+                t_vals = [int(e.get("Time", 0)) for e in raw]
+                base_t = min(t_vals)
+                
                 gap = int((rng.randint(500, 2500) if i > 0 else 0) * mult)
-                timeline += gap
+                timeline_ms += gap
+                
                 for e in raw:
                     ne = deepcopy(e)
-                    ne["Time"] = int((int(e.get("Time", 0)) - base_t) + timeline)
-                    merged.append(ne)
-                timeline = merged[-1]["Time"]
+                    ne["Time"] = int((int(e.get("Time", 0)) - base_t) + timeline_ms)
+                    merged_events.append(ne)
+                timeline_ms = merged_events[-1]["Time"]
 
-            fname = f"{v_code}_{int(timeline / 60000)}m.json"
-            (out_folder / fname).write_text(json.dumps(merged, indent=2))
-            manifest.append(f"Version {v_code}: {format_ms_precise(timeline)} (Multiplier x{mult})")
+            v_code = chr(64 + v_num)
+            fname = f"{v_code}_{int(timeline_ms / 60000)}m.json"
+            (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
+            folder_manifest.append(f"Version {v_code}: {format_ms_precise(timeline_ms)} (Multiplier x{mult})")
 
-        (out_folder / "manifest.txt").write_text("\n".join(manifest))
+        (out_folder / "manifest.txt").write_text("\n".join(folder_manifest))
 
 if __name__ == "__main__":
     main()
