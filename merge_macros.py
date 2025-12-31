@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Yesterday's stable working version"""
+"""merge_macros.py - Weighted Multipliers, Deep Nesting, Scoped Pooling, and Manifest Generation"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, shutil, re
@@ -74,10 +74,33 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     args, _ = parser.parse_known_args()
 
-    originals_root = args.input_root / "originals"
-    if not originals_root.exists():
-        print("CRITICAL ERROR: 'originals' folder not found.")
+    # --- Robust Originals Search ---
+    possible_paths = [
+        args.input_root / "originals",
+        args.input_root / "input_macros" / "originals",
+        Path.cwd() / "originals",
+        Path.cwd() / "input_macros" / "originals"
+    ]
+    
+    originals_root = None
+    for p in possible_paths:
+        if p.exists() and p.is_dir():
+            originals_root = p
+            break
+            
+    if not originals_root:
+        # Last ditch effort: Search one level deep for a folder named 'originals'
+        for root, dirs, files in os.walk(args.input_root):
+            if 'originals' in dirs:
+                originals_root = Path(root) / 'originals'
+                break
+
+    if not originals_root:
+        print(f"CRITICAL ERROR: 'originals' folder not found in {args.input_root.absolute()} or subfolders.")
+        print("Current directory contents:", os.listdir('.'))
         sys.exit(1)
+
+    print(f"Found originals at: {originals_root}")
 
     logout_file = args.input_root / "logout.json"
     rng = random.Random()
