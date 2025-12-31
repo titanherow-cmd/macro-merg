@@ -1,51 +1,38 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - ULTIMATE VERSION (v2.8)
-- FIX: Massive Pause now occurs exactly ONCE per inefficient file.
-- IMPROVEMENT: Massive Pause happens after a random EVENT, not just between files.
-- Inefficient System: Creates EXTRA files (1 for every 2 normal files).
-- Inefficient Naming: Starts with ¬¬¬.
-- Manifest Symbols: Regular (-), Inefficient (*).
-- Inefficient Weights: x1(20%), x2(40%), x3(40%).
-- Exemption: Ultra-robust Regex for "time sensitive" typos.
+merge_macros.py - STABLE RESTORE POINT (v2.8.2)
+- FEATURE: Internal speed multiplier removed to prevent mechanical desync.
+- Massive Pause: One random event injection per inefficient file (300s-720s).
+- Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
+- Typo-Tolerant Time Sensitive: regex r'time[\s-]*sens'.
+- Multipliers: Standard (x1, x2, x3) @ 50/30/20% | TS (1.0, 1.2, 1.5) @ Equal weights.
+- Manifest Update: Renamed to '!_MANIFEST_!' for maximum visibility.
 """
 
-from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
+from pathlib import Path
 from copy import deepcopy
 
 def load_json_events(path: Path):
-    """
-    Robustly extracts a list of event dictionaries from a JSON file.
-    Handles nested lists and various dictionary keys.
-    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         events = []
-
         if isinstance(data, dict):
             found_list = None
             for k in ("events", "items", "entries", "records"):
                 if k in data and isinstance(data[k], list):
                     found_list = data[k]
                     break
-            if found_list is not None:
-                events = found_list
-            else:
-                if "Time" in data:
-                    events = [data]
+            events = found_list if found_list is not None else ([data] if "Time" in data else [])
         elif isinstance(data, list):
             events = data
-
-        cleaned_events = []
+        
+        cleaned = []
         for e in events:
-            if isinstance(e, list) and len(e) > 0:
-                e = e[0]
-            if isinstance(e, dict) and "Time" in e:
-                cleaned_events.append(e)
-        return deepcopy(cleaned_events)
-    except Exception as e:
-        print(f"Warning: Failed to load {path.name}: {e}")
+            if isinstance(e, list) and len(e) > 0: e = e[0]
+            if isinstance(e, dict) and "Time" in e: cleaned.append(e)
+        return deepcopy(cleaned)
+    except Exception:
         return []
 
 def get_file_duration_ms(path: Path) -> int:
@@ -57,14 +44,12 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
-    total_seconds = int(round(ms / 1000))
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    return f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+    ts = int(round(ms / 1000))
+    m, s = ts // 60, ts % 60
+    return f"{m}m {s}s" if m > 0 else f"{s}s"
 
 def clean_identity(name: str) -> str:
-    name = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip()
-    return name.lower()
+    return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
 
 class QueueFileSelector:
     def __init__(self, rng, all_files):
@@ -76,232 +61,113 @@ class QueueFileSelector:
         self.rng.shuffle(self.eff_pool)
         self.rng.shuffle(self.ineff_pool)
 
-    def get_sequence(self, target_minutes, force_inefficient=False, strictly_efficient=False):
-        sequence = []
-        current_ms = 0.0
+    def get_sequence(self, target_minutes, force_inef=False, strictly_eff=False):
+        seq, cur_ms = [], 0.0
         target_ms = target_minutes * 60000
-        actual_force_inef = force_inefficient if not strictly_efficient else False
-        
-        while current_ms < target_ms:
-            if actual_force_inef and self.ineff_pool:
-                pick = self.ineff_pool.pop(0)
-            elif self.eff_pool:
-                pick = self.eff_pool.pop(0)
+        actual_force = force_inef if not strictly_eff else False
+        while cur_ms < target_ms:
+            if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
+            elif self.eff_pool: pick = self.eff_pool.pop(0)
             elif self.efficient:
-                self.eff_pool = list(self.efficient)
-                self.rng.shuffle(self.eff_pool)
+                self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
                 pick = self.eff_pool.pop(0)
-            elif self.ineff_pool and not strictly_efficient:
-                pick = self.ineff_pool.pop(0)
-            elif self.inefficient and not strictly_efficient:
-                self.ineff_pool = list(self.inefficient)
-                self.rng.shuffle(self.ineff_pool)
-                pick = self.ineff_pool.pop(0)
+            elif self.ineff_pool and not strictly_eff: pick = self.ineff_pool.pop(0)
             else: break
-
-            sequence.append(pick)
-            current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
-            if len(sequence) > 1000: break 
-        return sequence
-
-def find_originals_folder(search_base: Path):
-    for root, dirs, _ in os.walk(search_base):
-        root_path = Path(root)
-        if any(part in [".git", "output", ".github"] for part in root_path.parts):
-            continue
-        for d in dirs:
-            if d.lower() in ["originals", "input_macros"]:
-                return root_path / d
-    return search_base
+            seq.append(pick)
+            cur_ms += (get_file_duration_ms(pick) + 1500)
+            if len(seq) > 1000: break
+        return seq
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_root", type=str)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
-    parser.add_argument("--target-minutes", type=int, default=35) 
+    parser.add_argument("--target-minutes", type=int, default=35)
     parser.add_argument("--delay-before-action-ms", type=int, default=10)
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
-    args, _ = parser.parse_known_args()
-
-    try:
-        s_min, s_max = map(float, args.speed_range.split())
-    except:
-        s_min, s_max = 1.0, 1.0
+    args = parser.parse_args()
 
     search_base = Path(args.input_root).resolve()
-    if not search_base.exists():
-        search_base = Path.cwd().resolve()
+    originals_root = search_base 
+    for d in ["originals", "input_macros"]:
+        if (search_base / d).exists(): originals_root = search_base / d; break
 
-    originals_root = find_originals_folder(search_base)
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    
-    logout_file = search_base / "logout.json"
-    if not logout_file.exists():
-        logout_file = Path.cwd() / "logout.json"
-
     rng = random.Random()
-    unified_pools = {}
+    pools = {}
 
-    if not originals_root.exists() or not originals_root.is_dir():
-        print("CRITICAL ERROR: Source path is not a valid directory.")
-        sys.exit(1)
-
-    for game_folder in filter(Path.is_dir, originals_root.iterdir()):
-        if game_folder.name.lower() in ["output", ".git", ".github", "input_macros"]: continue
-        game_id = clean_identity(game_folder.name)
-        for root, _, files in os.walk(game_folder):
+    for folder in filter(Path.is_dir, originals_root.iterdir()):
+        if folder.name.lower() in [".git", "output"]: continue
+        game_id = clean_identity(folder.name)
+        for root, _, files in os.walk(folder):
             curr = Path(root)
-            try:
-                rel_parts = curr.relative_to(game_folder).parts
-                if any(p.upper().startswith('Z') for p in rel_parts): continue
-            except: continue
             jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
             if not jsons: continue
-            rel = curr.relative_to(game_folder)
+            rel = curr.relative_to(folder)
             key = (game_id, str(rel).lower())
-            if key not in unified_pools:
-                path_str = str(curr).lower()
-                is_time_sensitive = bool(re.search(r'time[\s-]*sens', path_str))
-                unified_pools[key] = {
-                    "out_rel_path": Path(game_folder.name) / rel,
-                    "display_name": f"{game_folder.name} / {rel}",
-                    "files": [], 
-                    "is_ts": is_time_sensitive,
-                    "source_folders": [curr], 
-                    "macro_id": clean_identity(curr.name)
-                }
-            for f in jsons: unified_pools[key]["files"].append(curr / f)
+            if key not in pools:
+                is_ts = bool(re.search(r'time[\s-]*sens', str(curr).lower()))
+                pools[key] = {"out": Path(folder.name) / rel, "files": [], "is_ts": is_ts, "id": clean_identity(curr.name), "srcs": [curr]}
+            for f in jsons: pools[key]["files"].append(curr / f)
 
-    for game_folder in filter(Path.is_dir, originals_root.iterdir()):
-        if game_folder.name.lower() in ["output", ".git", ".github"]: continue
-        for z in [s for s in game_folder.iterdir() if s.is_dir() and s.name.upper().startswith('Z')]:
-            for r, _, fs in os.walk(z):
-                zp = Path(r)
-                zid = clean_identity(zp.name)
-                for pk, pd in unified_pools.items():
-                    if pd["macro_id"] == zid:
-                        for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]:
-                            pd["files"].append(zp / f)
-                        if zp not in pd["source_folders"]: pd["source_folders"].append(zp)
+    for folder in filter(Path.is_dir, originals_root.iterdir()):
+        if not folder.name.upper().startswith('Z'): continue
+        for r, _, fs in os.walk(folder):
+            zp = Path(r); zid = clean_identity(zp.name)
+            for pk, pd in pools.items():
+                if pd["id"] == zid:
+                    for f in [f for f in fs if f.endswith(".json") and "click_zones" not in f.lower()]: pd["files"].append(zp / f)
 
-    for key, data in unified_pools.items():
-        if not data["files"]: continue
-        out_folder = bundle_dir / data["out_rel_path"]
-        out_folder.mkdir(parents=True, exist_ok=True)
-        if logout_file.exists(): 
-            shutil.copy2(logout_file, out_folder / "logout.json")
-        for src in data["source_folders"]:
-            for item in src.iterdir():
-                if item.is_file() and (not item.name.endswith(".json") or "click_zones" in item.name.lower()):
-                    try: shutil.copy2(item, out_folder / item.name)
-                    except: pass
-
-        selector = QueueFileSelector(rng, data["files"])
-        manifest = [
-            f"MANIFEST FOR FOLDER: {data['display_name']}",
-            f"========================================",
-            f"TOTAL FILES IN POOL: {len(data['files'])}",
-            f"TIME SENSITIVE MODE: {'ACTIVE' if data['is_ts'] else 'OFF'}",
-            ""
-        ]
-
-        normal_count = args.versions
-        inef_count = 0 if data["is_ts"] else (normal_count // 2)
-        total_to_make = normal_count + inef_count
-
-        for v_num in range(1, total_to_make + 1):
-            v_code = chr(64 + v_num)
-            is_extra_inef = (v_num > normal_count)
+    for key, data in pools.items():
+        out_f = bundle_dir / data["out"]; out_f.mkdir(parents=True, exist_ok=True)
+        manifest = [f"FOLDER: {data['out']}", f"TS MODE: {data['is_ts']}", ""]
+        
+        norm_v = args.versions
+        inef_v = 0 if data["is_ts"] else (norm_v // 2)
+        
+        for v_idx in range(1, (norm_v + inef_v) + 1):
+            is_inef = (v_idx > norm_v)
+            v_code = chr(64 + v_idx)
             
-            if data["is_ts"]:
-                mult = rng.choice([1.0, 1.2, 1.5])
-            elif is_extra_inef:
-                mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
-            else:
-                mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
-            internal_speed = rng.uniform(s_min, s_max)
-            paths = selector.get_sequence(
-                args.target_minutes, 
-                force_inefficient=is_extra_inef,
-                strictly_efficient=data["is_ts"]
-            )
-            
-            v_title = f"Version {v_code}"
-            if is_extra_inef: v_title += " [EXTRA - INEFFICIENT]"
-            manifest.append(f"{v_title} (Multiplier: x{mult}):")
-            
+            paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
             merged, timeline = [], 0
-            pause_breakdown = {"Micro": 0, "Gap": 0, "AFK": 0, "Massive": 0}
-            file_entries = []
-
-            # Determine Massive Pause Target for Inefficient files
-            # It happens exactly once, after a random event in the whole sequence.
-            massive_pause_val = 0
-            massive_pause_target_event = -1
-            if is_extra_inef and not data["is_ts"]:
-                massive_pause_val = rng.randint(300000, 720000) # In ms (5-12 mins)
-                # We'll pick the event index once we know how many events there are.
-                # Since we don't know yet, we'll store all events first, then inject.
-
-            for i, p_obj in enumerate(paths):
-                raw = load_json_events(p_obj)
+            
+            for i, p in enumerate(paths):
+                raw = load_json_events(p)
                 if not raw: continue
+                t_vals = [int(e["Time"]) for e in raw]
+                base_t = min(t_vals)
                 
-                t_v = [int(e.get("Time", 0)) for e in raw]
-                base_t = min(t_v) if t_v else 0
-                
-                base_gap = rng.randint(500, 2500) if i > 0 else 0
-                gap = int(base_gap * mult)
-                pause_breakdown["Gap"] += base_gap
-                pause_breakdown["AFK"] += (gap - base_gap)
-
+                gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
                 timeline += gap
+                
                 for e_idx, e in enumerate(raw):
                     ne = deepcopy(e)
-                    offset = int((int(e.get("Time", 0)) - base_t) * internal_speed)
-                    ne["Time"] = timeline + offset + (e_idx * args.delay_before_action_ms)
+                    rel_offset = int(int(e["Time"]) - base_t)
+                    ne["Time"] = timeline + rel_offset + (e_idx * args.delay_before_action_ms)
                     merged.append(ne)
-                
-                pause_breakdown["Micro"] += (len(raw) * args.delay_before_action_ms)
-                timeline = merged[-1]["Time"]
-                
-                bullet = '*' if ("¬¬¬" in p_obj.name) else '-'
-                file_entries.append(f"  {bullet} {p_obj.name} (Ends at {format_ms_precise(timeline)})")
-
-            # INJECT MASSIVE PAUSE AFTER A RANDOM EVENT
-            if massive_pause_val > 0 and len(merged) > 1:
-                pause_breakdown["Massive"] = massive_pause_val
-                # Pick a random event index (except the very last one)
-                split_idx = rng.randint(0, len(merged) - 2)
-                # Shift all subsequent events by the massive pause duration
-                for j in range(split_idx + 1, len(merged)):
-                    merged[j]["Time"] += massive_pause_val
                 timeline = merged[-1]["Time"]
 
-            total_pause = pause_breakdown["Micro"] + pause_breakdown["Gap"] + pause_breakdown["AFK"] + pause_breakdown["Massive"]
-            manifest.append(f"  TOTAL DURATION: {format_ms_precise(timeline)}")
-            manifest.append(f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:")
-            manifest.append(f"    - Micro-pauses: {pause_breakdown['Micro']//1000}s")
-            manifest.append(f"    - Inter-file Gaps: {pause_breakdown['Gap']//1000}s")
-            manifest.append(f"    - AFK Pool: {pause_breakdown['AFK']//1000}s")
-            if pause_breakdown["Massive"] > 0:
-                manifest.append(f"    - Massive Pause (Random Event Injection): {format_ms_precise(pause_breakdown['Massive'])}")
-            manifest.append("")
-            manifest.extend(file_entries)
-            manifest.append("-" * 30)
-            manifest.append("")
+            if is_inef and not data["is_ts"] and len(merged) > 1:
+                p_ms = rng.randint(300000, 720000)
+                split = rng.randint(0, len(merged) - 2)
+                for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
+                timeline = merged[-1]["Time"]
+                manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
-            prefix = "¬¬¬" if is_extra_inef else ""
-            fname = f"{prefix}{v_code}_{int(timeline / 60000)}m.json"
-            (out_folder / fname).write_text(json.dumps(merged, indent=2), encoding="utf-8")
+            fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            (out_f / fname).write_text(json.dumps(merged, indent=2))
+            manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
 
-        (out_folder / "manifest.txt").write_text("\n".join(manifest), encoding="utf-8")
-
-    print(f"Merge Complete. Bundle ID: {args.bundle_id}")
+        # Filename updated to !_MANIFEST_!
+        (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
     main()
