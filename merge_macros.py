@@ -128,20 +128,23 @@ def main():
                     "files": [],
                     "is_ts": "time sensitive" in str(rel).lower(),
                     "source_folders": [curr],
-                    "macro_name_only": clean_identity(curr.name)
+                    "macro_id": clean_identity(curr.name) # Fixed Key Name
                 }
             for f in jsons: unified_pools[key]["files"].append(curr / f)
 
-        # Scoped Z +100 Pooling Logic
+        # Scoped Z Pooling Logic
         for z in z_folders:
             for r, _, fs in os.walk(z):
                 zp = Path(r)
                 zid = clean_identity(zp.name)
                 for pk, pd in unified_pools.items():
+                    # Match Z-folder identity with standard folder identity
                     if pd["macro_id"] == zid:
                         for f in fs:
-                            if f.endswith(".json") and "click_zones" not in f.lower(): pd["files"].append(zp / f)
-                        if zp not in pd["sources"]: pd["sources"].append(zp)
+                            if f.endswith(".json") and "click_zones" not in f.lower(): 
+                                pd["files"].append(zp / f)
+                        if zp not in pd["source_folders"]: 
+                            pd["source_folders"].append(zp)
 
     # Process merges
     for key, data in unified_pools.items():
