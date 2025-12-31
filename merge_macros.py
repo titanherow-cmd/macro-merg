@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v2.9)
+merge_macros.py - STABLE RESTORE POINT (v2.9.1)
+- FIX: Robust path discovery to prevent FileNotFoundError on GitHub Actions.
 - FEATURE: Internal speed multiplier removed to prevent mechanical desync.
 - Massive Pause: One random event injection per inefficient file (300s-720s).
 - Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
-- Typo-Tolerant Time Sensitive: regex r'time[\s-]*sens'.
-- Folder Numbering: Prefixes output folders and macro filenames with a unique ID (e.g., 1-FolderName, A1_35m.json).
+- Folder Numbering: Prefixes output folders and macro filenames with a unique ID.
 - Manifest: Named '!_MANIFEST_!' for maximum visibility.
 """
 
@@ -89,10 +89,17 @@ def main():
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     args = parser.parse_args()
 
+    # Robust Path Resolution
     search_base = Path(args.input_root).resolve()
     originals_root = search_base 
-    for d in ["originals", "input_macros"]:
-        if (search_base / d).exists(): originals_root = search_base / d; break
+    
+    # Check if we should dive into sub-directories, but only if they actually exist
+    possible_dirs = ["originals", "input_macros"]
+    for d in possible_dirs:
+        test_path = search_base / d
+        if test_path.exists() and test_path.is_dir():
+            originals_root = test_path
+            break
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -100,12 +107,18 @@ def main():
     pools = {}
     folder_counter = 1
 
+    # Safety check: if originals_root doesn't exist, exit gracefully
+    if not originals_root.exists():
+        print(f"Error: Source directory {originals_root} does not exist.")
+        sys.exit(1)
+
     # Discovery & Identity Pooling
-    # We sort folders alphabetically to ensure numbering is consistent across versions
     subdirs = sorted([d for d in originals_root.iterdir() if d.is_dir()])
 
     for folder in subdirs:
-        if folder.name.lower() in [".git", "output"] or folder.name.upper().startswith('Z'): continue
+        # Ignore system folders or the output directory itself
+        if folder.name.lower() in [".git", "output", ".github"] or folder.name.upper().startswith('Z'): 
+            continue
         
         game_id = clean_identity(folder.name)
         found_macros = False
@@ -121,7 +134,6 @@ def main():
             
             if key not in pools:
                 is_ts = bool(re.search(r'time[\s-]*sens', str(curr).lower()))
-                # Rule 16: Apply unique folder number prefix
                 numbered_name = f"{folder_counter}-{folder.name}"
                 pools[key] = {
                     "out": Path(numbered_name) / rel, 
@@ -156,7 +168,6 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            # Rule 16: Version becomes A1, B1, etc.
             v_code = f"{v_letter}{data['f_num']}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
@@ -189,7 +200,6 @@ def main():
                 timeline = merged[-1]["Time"]
                 manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
-            # Example: A1_35m.json
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
