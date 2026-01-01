@@ -10,11 +10,7 @@ on:
       target_minutes:
         description: 'Target duration per merged file'
         required: true
-        default: '25'
-      delay_before_action_ms:
-        description: 'Delay Before Action (MS)'
-        required: true
-        default: '10'
+        default: '35'
 
 permissions:
   contents: write
@@ -51,7 +47,6 @@ jobs:
             "output" \
             --versions ${{ github.event.inputs.versions }} \
             --target-minutes ${{ github.event.inputs.target_minutes }} \
-            --delay-before-action-ms ${{ github.event.inputs.delay_before_action_ms }} \
             --bundle-id ${{ env.BUNDLE_SEQ }}
             
       - name: Commit and Push Counter Update
@@ -70,11 +65,9 @@ jobs:
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
           
-          # Debugging: check if the folder actually exists
           ls -R output/
           
           if [ -d "output/$BUNDLE_NAME" ]; then
-            # Move into output so ZIP structure is clean
             cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
           else
             echo "Error: Directory output/$BUNDLE_NAME was not found!"
