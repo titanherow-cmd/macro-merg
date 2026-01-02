@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.2.4) - FILE COPYING FIX
+merge_macros.py - STABLE RESTORE POINT (v3.2.5) - ALWAYS FILES FIX
+- FIX: "always first/last" files now detected properly (checks contains, not just starts with)
 - FIX: Logout file now properly searches for "- logout", "logout", etc.
 - FIX: All non-JSON files (PNG, TXT, etc.) are copied to output folders
 - FIX: Logout file copied to EVERY folder with a manifest
@@ -66,6 +67,15 @@ def extract_folder_number(folder_name: str) -> int:
     if match:
         return int(match.group(1))
     return 0
+
+def is_always_first_or_last_file(filename: str) -> bool:
+    """
+    Check if a file should be treated as "always first" or "always last".
+    Checks if these phrases appear ANYWHERE in the filename (case-insensitive).
+    """
+    filename_lower = filename.lower()
+    patterns = ["always first", "always last", "alwaysfirst", "alwayslast"]
+    return any(pattern in filename_lower for pattern in patterns)
 
 def is_in_drag_sequence(events, index):
     """
@@ -513,10 +523,10 @@ def main():
         if z_key in z_storage:
             pool_data["files"].extend(z_storage[z_key])
     
-    # Filter out "always first" and "always last" files from merging
+    # ✅ IMPROVED: Filter out "always first" and "always last" files using better detection
     for pool_key, pool_data in pools.items():
         all_files = pool_data["files"]
-        always_files = [f for f in all_files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
+        always_files = [f for f in all_files if is_always_first_or_last_file(Path(f).name)]
         mergeable_files = [f for f in all_files if f not in always_files]
         pool_data["files"] = mergeable_files
         pool_data["always_files"] = always_files
@@ -566,12 +576,12 @@ def main():
                 except Exception as e:
                     print(f"  ✗ Error copying {non_json_file.name}: {e}")
         
-        # Copy "always first/last" files unmodified
-        if "always_files" in data:
+        # ✅ IMPROVED: Copy "always first/last" files unmodified
+        if "always_files" in data and data["always_files"]:
             for always_file in data["always_files"]:
                 try:
                     shutil.copy2(always_file, out_f / Path(always_file).name)
-                    print(f"  ✓ Copied unmodified: {Path(always_file).name}")
+                    print(f"  ✓ Copied 'always' file: {Path(always_file).name}")
                 except Exception as e:
                     print(f"  ✗ Error copying {Path(always_file).name}: {e}")
         
