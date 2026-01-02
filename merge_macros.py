@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.2.3) - SMOOTH TRANSITIONS
+merge_macros.py - STABLE RESTORE POINT (v3.2.4) - FILE COPYING FIX
+- FIX: Logout file now properly searches for "- logout", "logout", etc.
+- FIX: All non-JSON files (PNG, TXT, etc.) are copied to output folders
+- FIX: Logout file copied to EVERY folder with a manifest
 - FEATURE: Smooth transitions back to next recorded position (no teleporting!)
 - FEATURE: Realistic smooth mouse movements with multiple patterns
 - FEATURE: Pre-Action Mouse Jitter. If delay > 100ms, injects a micro-move.
@@ -421,13 +424,23 @@ def main():
     if not originals_root:
         originals_root = search_base
     
-    # ✅ NEW: Look for logout.json in multiple locations
+    # ✅ IMPROVED: Look for logout file with various names
     logout_file = None
-    for location in [originals_root / "logout.json", originals_root.parent / "logout.json", search_base / "logout.json"]:
-        if location.exists() and location.is_file():
-            logout_file = location
-            print(f"Found logout.json at: {logout_file}")
+    logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
+    
+    for location_dir in [originals_root, originals_root.parent, search_base]:
+        if logout_file:
             break
+        for pattern in logout_patterns:
+            test_file = location_dir / pattern
+            # Check both with and without .json extension
+            for test_path in [test_file, Path(str(test_file) + ".json")]:
+                if test_path.exists() and test_path.is_file():
+                    logout_file = test_path
+                    print(f"✓ Found logout file at: {logout_file}")
+                    break
+            if logout_file:
+                break
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +452,11 @@ def main():
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
+        
+        # ✅ NEW: Separate JSON files from non-JSON files
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        non_jsons = [f for f in files if not f.endswith(".json")]
+        
         if not jsons: continue
         
         is_z_storage = "z +100" in str(curr).lower()
@@ -481,7 +498,8 @@ def main():
                     "files": file_paths,
                     "is_ts": is_ts,
                     "macro_id": macro_id,
-                    "parent_scope": parent_scope
+                    "parent_scope": parent_scope,
+                    "non_json_files": [curr / f for f in non_jsons]  # ✅ NEW: Store non-JSON files
                 }
                 
                 for fp in file_paths:
@@ -527,13 +545,26 @@ def main():
         out_f = bundle_dir / original_rel_path  # Use folder as-is
         out_f.mkdir(parents=True, exist_ok=True)
         
-        # ✅ NEW: Copy logout.json to this folder
+        # ✅ IMPROVED: Copy logout file to EVERY folder that has a manifest
         if logout_file:
             try:
-                shutil.copy2(logout_file, out_f / "logout.json")
-                print(f"  ✓ Copied logout.json to {original_rel_path}")
+                # Keep original filename
+                logout_dest = out_f / logout_file.name
+                shutil.copy2(logout_file, logout_dest)
+                print(f"  ✓ Copied {logout_file.name} to {original_rel_path}")
             except Exception as e:
-                print(f"  ✗ Error copying logout.json: {e}")
+                print(f"  ✗ Error copying {logout_file.name}: {e}")
+        else:
+            print(f"  ⚠ Warning: No logout file found")
+        
+        # ✅ NEW: Copy all non-JSON files (PNG, TXT, etc.)
+        if "non_json_files" in data and data["non_json_files"]:
+            for non_json_file in data["non_json_files"]:
+                try:
+                    shutil.copy2(non_json_file, out_f / non_json_file.name)
+                    print(f"  ✓ Copied non-JSON file: {non_json_file.name}")
+                except Exception as e:
+                    print(f"  ✗ Error copying {non_json_file.name}: {e}")
         
         # Copy "always first/last" files unmodified
         if "always_files" in data:
