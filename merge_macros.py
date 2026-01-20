@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.2.5) - ALWAYS FILES FIX
-- FIX: "always first/last" files now detected properly (checks contains, not just starts with)
-- FIX: Logout file now properly searches for "- logout", "logout", etc.
-- FIX: All non-JSON files (PNG, TXT, etc.) are copied to output folders
+merge_macros.py - STABLE RESTORE POINT (v3.4.0) - HUMAN-LIKE MOVEMENTS
+- NEW: Imperfect, human-like mouse movements (no perfect geometry)
+- NEW: Variable cursor speeds during idle movements (fast/slow/acceleration)
+- NEW: Random wobbles, overshoots, corrections, pauses mid-movement
+- NEW: Total original file duration shown in manifest
+- FIX: AFK pool now properly calculated (was always showing 0)
+- FIX: "always first/last" files now detected properly
 - FIX: Logout file copied to EVERY folder with a manifest
-- FEATURE: Smooth transitions back to next recorded position (no teleporting!)
-- FEATURE: Realistic smooth mouse movements with multiple patterns
-- FEATURE: Pre-Action Mouse Jitter. If delay > 100ms, injects a micro-move.
-- FIX: Mouse now flows smoothly through idle → back to recorded position
-- FIX: Idle mouse movements now SKIP drag sequences (DragStart to DragEnd)
-- FIX: Naming scheme A1, B1, C1... with folder numbering (1-Folder).
-- FIX: Z +100 scoped to parent directory only.
-- FIX: Jitter is individual per event (non-cumulative).
-- FIX: All variables properly initialized.
+- FEATURE: Smooth transitions back to next recorded position
+- FIX: Idle mouse movements SKIP drag sequences
+- FIX: Naming scheme 29A, 29B, 29C (number before letter)
 - OPTIMIZED: Cached durations, single os.walk(), shallow copy.
 """
 
@@ -82,83 +79,147 @@ def is_in_drag_sequence(events, index):
     Check if the given index is inside a drag sequence (between DragStart and DragEnd).
     Returns True if we're in the middle of a drag.
     """
-    # Look backwards to find the most recent DragStart or DragEnd
     drag_started = False
     for j in range(index, -1, -1):
         event_type = events[j].get("Type", "")
         if event_type == "DragEnd":
-            # Found a DragEnd before DragStart, so we're not in a drag
             return False
         elif event_type == "DragStart":
-            # Found a DragStart, now check if there's a DragEnd after current index
             drag_started = True
             break
     
     if not drag_started:
         return False
     
-    # Now look forward to see if there's a DragEnd
     for j in range(index + 1, len(events)):
         event_type = events[j].get("Type", "")
         if event_type == "DragEnd":
-            # We're between DragStart and DragEnd
             return True
         elif event_type == "DragStart":
-            # Another DragStart before DragEnd? Shouldn't happen but means not in drag
             return False
     
     return False
 
-def generate_smooth_path(start_x, start_y, end_x, end_y, num_points, rng):
+def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
     """
-    Generate a smooth, natural path between two points using bezier-like curves.
-    Returns list of (x, y) coordinates.
+    Generate a human-like path with variable speed, wobbles, and imperfections.
+    
+    Returns: List of (time_ms, x, y) tuples with realistic timing and positions.
     """
-    if num_points <= 1:
-        return [(end_x, end_y)]
+    if duration_ms < 100:
+        return [(0, end_x, end_y)]
     
-    points = []
+    path = []
     
-    # Add slight randomness to the path with control points
-    mid_t = 0.5
-    # Control point offset - creates the curve
-    ctrl_offset_x = rng.randint(-50, 50)
-    ctrl_offset_y = rng.randint(-50, 50)
+    # Calculate distance
+    dx = end_x - start_x
+    dy = end_y - start_y
+    distance = math.sqrt(dx**2 + dy**2)
     
-    # Calculate control point
-    ctrl_x = int((start_x + end_x) / 2 + ctrl_offset_x)
-    ctrl_y = int((start_y + end_y) / 2 + ctrl_offset_y)
+    if distance < 5:
+        return [(0, end_x, end_y)]
     
-    # Generate points along a quadratic bezier curve
-    for i in range(num_points):
-        t = i / (num_points - 1) if num_points > 1 else 0
+    # Determine speed profile (variable speeds make it human)
+    speed_profile = rng.choice(['fast_start', 'slow_start', 'medium', 'hesitant'])
+    
+    # Number of steps based on distance and duration
+    num_steps = max(3, min(int(distance / 15), int(duration_ms / 50)))
+    
+    # Add control points for curve (not perfect bezier)
+    num_control = rng.randint(1, 3)
+    control_points = []
+    for _ in range(num_control):
+        # Offset perpendicular to main direction
+        offset = rng.uniform(-0.3, 0.3) * distance
+        t = rng.uniform(0.2, 0.8)
+        ctrl_x = start_x + dx * t + (-dy / (distance + 1)) * offset
+        ctrl_y = start_y + dy * t + (dx / (distance + 1)) * offset
+        control_points.append((ctrl_x, ctrl_y, t))
+    
+    control_points.sort(key=lambda p: p[2])  # Sort by t position
+    
+    current_time = 0
+    
+    for step in range(num_steps + 1):
+        # Non-linear time progression based on speed profile
+        t_raw = step / num_steps
         
-        # Quadratic Bezier formula: B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
-        x = int((1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t ** 2 * end_x)
-        y = int((1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t ** 2 * end_y)
+        if speed_profile == 'fast_start':
+            # Fast at start, slow at end
+            t = 1 - (1 - t_raw) ** 2
+        elif speed_profile == 'slow_start':
+            # Slow at start, fast at end
+            t = t_raw ** 2
+        elif speed_profile == 'hesitant':
+            # Slow-fast-slow with micro-pauses
+            t = 0.5 * (1 - math.cos(t_raw * math.pi))
+        else:  # medium
+            # Slight ease in/out
+            t = 0.5 * (1 - math.cos(t_raw * math.pi))
         
-        # Add tiny jitter to make it more human-like
-        x += rng.randint(-2, 2)
-        y += rng.randint(-2, 2)
+        # Calculate position using control points (imperfect curve)
+        if not control_points:
+            # Simple interpolation with wobble
+            x = start_x + dx * t
+            y = start_y + dy * t
+        else:
+            # Multi-segment curve through control points
+            x, y = start_x, start_y
+            for i, (ctrl_x, ctrl_y, ctrl_t) in enumerate(control_points):
+                if t <= ctrl_t:
+                    segment_t = t / ctrl_t if ctrl_t > 0 else 0
+                    x = start_x + (ctrl_x - start_x) * segment_t
+                    y = start_y + (ctrl_y - start_y) * segment_t
+                    break
+                else:
+                    if i == len(control_points) - 1:
+                        # Last segment
+                        segment_t = (t - ctrl_t) / (1 - ctrl_t) if (1 - ctrl_t) > 0 else 0
+                        x = ctrl_x + (end_x - ctrl_x) * segment_t
+                        y = ctrl_y + (end_y - ctrl_y) * segment_t
+                    else:
+                        start_x, start_y = ctrl_x, ctrl_y
+        
+        # Add random wobble (humans don't move in perfect lines)
+        wobble_amount = rng.uniform(1, 5) if step > 0 and step < num_steps else 0
+        x += rng.uniform(-wobble_amount, wobble_amount)
+        y += rng.uniform(-wobble_amount, wobble_amount)
+        
+        # Add occasional micro-corrections (overshoot and correct)
+        if step > 0 and step < num_steps and rng.random() < 0.15:
+            overshoot = rng.uniform(5, 15)
+            direction = 1 if rng.random() < 0.5 else -1
+            x += direction * overshoot * (dx / (distance + 1))
+            y += direction * overshoot * (dy / (distance + 1))
         
         # Keep within bounds
-        x = max(100, min(1800, x))
-        y = max(100, min(1000, y))
+        x = max(100, min(1800, int(x)))
+        y = max(100, min(1000, int(y)))
         
-        points.append((x, y))
+        # Calculate time with variable speed
+        time_progress = t
+        
+        # Add micro-pauses (humans sometimes pause mid-movement)
+        if step > 0 and step < num_steps and rng.random() < 0.1:
+            pause = rng.randint(30, 100)
+            current_time += pause
+        
+        step_time = int(time_progress * duration_ms)
+        current_time = max(current_time, step_time)  # Ensure monotonic
+        
+        path.append((current_time, x, y))
     
-    return points
+    return path
 
 def insert_idle_mouse_movements(events, rng, movement_percentage):
     """
-    Insert realistic mouse movements during idle periods (gaps > 5 seconds).
+    Insert realistic human-like mouse movements during idle periods (gaps > 5 seconds).
     
-    Rules:
-    - Only in gaps >= 5000ms
-    - SKIP gaps that are inside drag sequences (DragStart to DragEnd)
-    - Use middle 40-50% of gap (25% buffer on each side)
-    - Smooth flowing movements with realistic patterns
-    - ALWAYS smoothly transition back to next recorded position at the end
+    Movements have:
+    - Variable speeds (fast bursts, slow drifts, hesitations)
+    - Imperfect paths (wobbles, overshoots, corrections)
+    - Natural patterns (wandering, checking, fidgeting)
+    - Smooth transition back to next recorded position
     """
     if not events or len(events) < 2:
         return events, 0
@@ -177,17 +238,16 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
             
             # Only process gaps >= 5 seconds
             if gap >= 5000:
-                # ✅ Check if we're in a drag sequence - if so, SKIP idle movements
+                # Skip if in drag sequence
                 if is_in_drag_sequence(events, i):
                     continue
                 
-                # Calculate active window (middle 40-50% of gap)
+                # Calculate active window
                 active_duration = int(gap * movement_percentage)
                 buffer_start = (gap - active_duration) // 2
-                
                 movement_start = current_time + buffer_start
                 
-                # Get last known mouse position by searching backwards
+                # Get start position
                 start_x, start_y = 500, 500
                 for j in range(i, -1, -1):
                     x_val = events[j].get("X")
@@ -197,9 +257,9 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                         start_y = int(y_val)
                         break
                 
-                # ✅ NEW: Get the NEXT recorded position (where we need to end up)
-                next_x, next_y = start_x, start_y  # Default to staying in place
-                for j in range(i + 1, min(i + 20, len(events))):  # Look ahead max 20 events
+                # Get next position (where we need to end up)
+                next_x, next_y = start_x, start_y
+                for j in range(i + 1, min(i + 20, len(events))):
                     x_val = events[j].get("X")
                     y_val = events[j].get("Y")
                     if x_val is not None and y_val is not None:
@@ -207,176 +267,198 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                         next_y = int(y_val)
                         break
                 
-                # Reserve last 20% of time for smooth transition back
-                transition_duration = int(active_duration * 0.2)
+                # Reserve last 25% for smooth transition back
+                transition_duration = int(active_duration * 0.25)
                 pattern_duration = active_duration - transition_duration
                 
-                # Choose a movement pattern
-                pattern = rng.choice(['drift', 'check_corner', 'fidget', 'return'])
+                # Choose movement behavior
+                behavior = rng.choice([
+                    'wander',      # Random wandering around
+                    'check_edge',  # Quick look at screen edge
+                    'fidget',      # Small nervous movements
+                    'explore',     # Move far then return
+                    'drift',       # Slow meandering
+                    'scan'         # Move across screen
+                ])
                 
-                # Track where we end up after the pattern
-                final_pattern_x, final_pattern_y = start_x, start_y
+                pattern_end_x, pattern_end_y = start_x, start_y
+                pattern_time_used = 0
                 
-                if pattern == 'drift':
-                    # Slow meandering - pick a nearby target and drift there
-                    target_x = start_x + rng.randint(-200, 200)
-                    target_y = start_y + rng.randint(-150, 150)
-                    target_x = max(100, min(1800, target_x))
-                    target_y = max(100, min(1000, target_y))
-                    
-                    # Generate smooth path
-                    num_steps = max(3, pattern_duration // 600)  # ~600ms per step
-                    path = generate_smooth_path(start_x, start_y, target_x, target_y, num_steps, rng)
-                    
-                    for step_idx, (px, py) in enumerate(path):
-                        step_time = int(movement_start + (pattern_duration * step_idx / len(path)))
-                        result.append({
-                            "Time": step_time,
-                            "Type": "MouseMove",
-                            "X": px,
-                            "Y": py
-                        })
-                    
-                    final_pattern_x, final_pattern_y = path[-1]
-                
-                elif pattern == 'check_corner':
-                    # Quick glance to screen edge/corner then back
-                    corner_choices = [
-                        (150, 150),   # Top-left
-                        (1750, 150),  # Top-right
-                        (150, 950),   # Bottom-left
-                        (1750, 950),  # Bottom-right
-                        (950, 100),   # Top-center
-                        (950, 1000),  # Bottom-center
-                    ]
-                    corner_x, corner_y = rng.choice(corner_choices)
-                    
-                    # Move to corner (first half of time)
-                    half_duration = pattern_duration // 2
-                    num_steps_out = max(2, half_duration // 400)
-                    path_out = generate_smooth_path(start_x, start_y, corner_x, corner_y, num_steps_out, rng)
-                    
-                    for step_idx, (px, py) in enumerate(path_out):
-                        step_time = int(movement_start + (half_duration * step_idx / len(path_out)))
-                        result.append({
-                            "Time": step_time,
-                            "Type": "MouseMove",
-                            "X": px,
-                            "Y": py
-                        })
-                    
-                    # Return to somewhere random (second half)
-                    return_x = start_x + rng.randint(-60, 60)
-                    return_y = start_y + rng.randint(-60, 60)
-                    return_x = max(100, min(1800, return_x))
-                    return_y = max(100, min(1000, return_y))
-                    
-                    num_steps_back = max(2, half_duration // 400)
-                    path_back = generate_smooth_path(corner_x, corner_y, return_x, return_y, num_steps_back, rng)
-                    
-                    for step_idx, (px, py) in enumerate(path_back):
-                        step_time = int(movement_start + half_duration + (half_duration * step_idx / len(path_back)))
-                        result.append({
-                            "Time": step_time,
-                            "Type": "MouseMove",
-                            "X": px,
-                            "Y": py
-                        })
-                    
-                    final_pattern_x, final_pattern_y = path_back[-1]
-                
-                elif pattern == 'fidget':
-                    # Small nervous movements in a small area
-                    num_fidgets = rng.randint(4, 8)
-                    fidget_interval = pattern_duration // num_fidgets
+                if behavior == 'wander':
+                    # Random wandering - multiple small moves
+                    num_moves = rng.randint(3, 6)
+                    move_duration = pattern_duration // num_moves
                     
                     current_x, current_y = start_x, start_y
                     
-                    for fidget_idx in range(num_fidgets):
-                        # Small random offset
-                        new_x = current_x + rng.randint(-40, 40)
-                        new_y = current_y + rng.randint(-40, 40)
-                        new_x = max(100, min(1800, new_x))
-                        new_y = max(100, min(1000, new_y))
+                    for move_idx in range(num_moves):
+                        # Pick random nearby target
+                        target_x = current_x + rng.randint(-150, 150)
+                        target_y = current_y + rng.randint(-100, 100)
+                        target_x = max(100, min(1800, target_x))
+                        target_y = max(100, min(1000, target_y))
                         
-                        # Smooth path to new position
-                        num_micro_steps = rng.randint(2, 4)
-                        micro_path = generate_smooth_path(current_x, current_y, new_x, new_y, num_micro_steps, rng)
+                        # Generate human path
+                        path = generate_human_path(current_x, current_y, target_x, target_y, move_duration, rng)
                         
-                        for micro_idx, (px, py) in enumerate(micro_path):
-                            step_time = int(movement_start + fidget_idx * fidget_interval + 
-                                          (fidget_interval * micro_idx / len(micro_path)))
+                        for path_time, px, py in path:
+                            abs_time = movement_start + pattern_time_used + path_time
                             result.append({
-                                "Time": step_time,
+                                "Time": abs_time,
                                 "Type": "MouseMove",
                                 "X": px,
                                 "Y": py
                             })
                         
-                        current_x, current_y = new_x, new_y
+                        current_x, current_y = path[-1][1], path[-1][2]
+                        pattern_time_used += move_duration
                     
-                    final_pattern_x, final_pattern_y = current_x, current_y
+                    pattern_end_x, pattern_end_y = current_x, current_y
                 
-                elif pattern == 'return':
-                    # Move somewhere then return to almost exactly where we were
-                    away_x = start_x + rng.randint(-300, 300)
-                    away_y = start_y + rng.randint(-200, 200)
-                    away_x = max(100, min(1800, away_x))
-                    away_y = max(100, min(1000, away_y))
+                elif behavior == 'check_edge':
+                    # Quick look at screen edge then back
+                    edges = [
+                        (150, start_y),    # Left edge
+                        (1750, start_y),   # Right edge
+                        (start_x, 150),    # Top edge
+                        (start_x, 950),    # Bottom edge
+                    ]
+                    edge_x, edge_y = rng.choice(edges)
                     
-                    # Move away (60% of time)
-                    away_duration = int(pattern_duration * 0.6)
-                    num_steps_away = max(3, away_duration // 500)
-                    path_away = generate_smooth_path(start_x, start_y, away_x, away_y, num_steps_away, rng)
+                    # Move to edge (60% of time, fast)
+                    edge_duration = int(pattern_duration * 0.6)
+                    path_to_edge = generate_human_path(start_x, start_y, edge_x, edge_y, edge_duration, rng)
                     
-                    for step_idx, (px, py) in enumerate(path_away):
-                        step_time = int(movement_start + (away_duration * step_idx / len(path_away)))
-                        result.append({
-                            "Time": step_time,
-                            "Type": "MouseMove",
-                            "X": px,
-                            "Y": py
-                        })
+                    for path_time, px, py in path_to_edge:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
                     
-                    # Return near original (40% of time)
-                    return_duration = pattern_duration - away_duration
-                    return_x = start_x + rng.randint(-20, 20)
-                    return_y = start_y + rng.randint(-20, 20)
+                    # Return near start (40% of time, slower)
+                    return_duration = pattern_duration - edge_duration
+                    return_x = start_x + rng.randint(-40, 40)
+                    return_y = start_y + rng.randint(-40, 40)
                     return_x = max(100, min(1800, return_x))
                     return_y = max(100, min(1000, return_y))
                     
-                    num_steps_return = max(2, return_duration // 500)
-                    path_return = generate_smooth_path(away_x, away_y, return_x, return_y, num_steps_return, rng)
+                    path_return = generate_human_path(edge_x, edge_y, return_x, return_y, return_duration, rng)
                     
-                    for step_idx, (px, py) in enumerate(path_return):
-                        step_time = int(movement_start + away_duration + (return_duration * step_idx / len(path_return)))
-                        result.append({
-                            "Time": step_time,
-                            "Type": "MouseMove",
-                            "X": px,
-                            "Y": py
-                        })
+                    for path_time, px, py in path_return:
+                        abs_time = movement_start + edge_duration + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
                     
-                    final_pattern_x, final_pattern_y = path_return[-1]
+                    pattern_end_x, pattern_end_y = path_return[-1][1], path_return[-1][2]
+                    pattern_time_used = pattern_duration
                 
-                # ✅ NEW: Smooth transition back to next recorded position
-                # Use the last 20% of time to smoothly drift to where the next event expects us
-                num_transition_steps = max(2, transition_duration // 400)
-                transition_path = generate_smooth_path(
-                    final_pattern_x, final_pattern_y, 
-                    next_x, next_y, 
-                    num_transition_steps, 
+                elif behavior == 'fidget':
+                    # Small rapid movements in small area
+                    num_fidgets = rng.randint(5, 10)
+                    fidget_duration = pattern_duration // num_fidgets
+                    
+                    current_x, current_y = start_x, start_y
+                    
+                    for fidget_idx in range(num_fidgets):
+                        # Small offset
+                        target_x = current_x + rng.randint(-30, 30)
+                        target_y = current_y + rng.randint(-30, 30)
+                        target_x = max(100, min(1800, target_x))
+                        target_y = max(100, min(1000, target_y))
+                        
+                        path = generate_human_path(current_x, current_y, target_x, target_y, fidget_duration, rng)
+                        
+                        for path_time, px, py in path:
+                            abs_time = movement_start + pattern_time_used + path_time
+                            result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                        
+                        current_x, current_y = path[-1][1], path[-1][2]
+                        pattern_time_used += fidget_duration
+                    
+                    pattern_end_x, pattern_end_y = current_x, current_y
+                
+                elif behavior == 'explore':
+                    # Move far away then return near start
+                    away_x = start_x + rng.randint(-400, 400)
+                    away_y = start_y + rng.randint(-300, 300)
+                    away_x = max(100, min(1800, away_x))
+                    away_y = max(100, min(1000, away_y))
+                    
+                    # Go away (65% of time)
+                    away_duration = int(pattern_duration * 0.65)
+                    path_away = generate_human_path(start_x, start_y, away_x, away_y, away_duration, rng)
+                    
+                    for path_time, px, py in path_away:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    # Return (35% of time)
+                    return_duration = pattern_duration - away_duration
+                    return_x = start_x + rng.randint(-15, 15)
+                    return_y = start_y + rng.randint(-15, 15)
+                    return_x = max(100, min(1800, return_x))
+                    return_y = max(100, min(1000, return_y))
+                    
+                    path_return = generate_human_path(away_x, away_y, return_x, return_y, return_duration, rng)
+                    
+                    for path_time, px, py in path_return:
+                        abs_time = movement_start + away_duration + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path_return[-1][1], path_return[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                elif behavior == 'drift':
+                    # Slow continuous drift
+                    target_x = start_x + rng.randint(-200, 200)
+                    target_y = start_y + rng.randint(-150, 150)
+                    target_x = max(100, min(1800, target_x))
+                    target_y = max(100, min(1000, target_y))
+                    
+                    path = generate_human_path(start_x, start_y, target_x, target_y, pattern_duration, rng)
+                    
+                    for path_time, px, py in path:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path[-1][1], path[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                elif behavior == 'scan':
+                    # Scan across screen
+                    scan_distance = rng.randint(300, 600)
+                    direction = rng.choice(['horizontal', 'vertical', 'diagonal'])
+                    
+                    if direction == 'horizontal':
+                        target_x = start_x + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                        target_y = start_y + rng.randint(-50, 50)
+                    elif direction == 'vertical':
+                        target_x = start_x + rng.randint(-50, 50)
+                        target_y = start_y + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                    else:  # diagonal
+                        target_x = start_x + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                        target_y = start_y + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                    
+                    target_x = max(100, min(1800, target_x))
+                    target_y = max(100, min(1000, target_y))
+                    
+                    path = generate_human_path(start_x, start_y, target_x, target_y, pattern_duration, rng)
+                    
+                    for path_time, px, py in path:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path[-1][1], path[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                # Smooth transition back to next recorded position
+                transition_path = generate_human_path(
+                    pattern_end_x, pattern_end_y,
+                    next_x, next_y,
+                    transition_duration,
                     rng
                 )
                 
-                for step_idx, (px, py) in enumerate(transition_path):
-                    step_time = int(movement_start + pattern_duration + (transition_duration * step_idx / len(transition_path)))
-                    result.append({
-                        "Time": step_time,
-                        "Type": "MouseMove",
-                        "X": px,
-                        "Y": py
-                    })
+                for path_time, px, py in transition_path:
+                    abs_time = movement_start + pattern_duration + path_time
+                    result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
                 
                 total_idle_time += active_duration
     
@@ -434,7 +516,6 @@ def main():
     if not originals_root:
         originals_root = search_base
     
-    # ✅ IMPROVED: Look for logout file with various names
     logout_file = None
     logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
     
@@ -443,7 +524,6 @@ def main():
             break
         for pattern in logout_patterns:
             test_file = location_dir / pattern
-            # Check both with and without .json extension
             for test_path in [test_file, Path(str(test_file) + ".json")]:
                 if test_path.exists() and test_path.is_file():
                     logout_file = test_path
@@ -463,7 +543,6 @@ def main():
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
         
-        # ✅ NEW: Separate JSON files from non-JSON files
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
         non_jsons = [f for f in files if not f.endswith(".json")]
         
@@ -509,7 +588,7 @@ def main():
                     "is_ts": is_ts,
                     "macro_id": macro_id,
                     "parent_scope": parent_scope,
-                    "non_json_files": [curr / f for f in non_jsons]  # ✅ NEW: Store non-JSON files
+                    "non_json_files": [curr / f for f in non_jsons]
                 }
                 
                 for fp in file_paths:
@@ -523,7 +602,6 @@ def main():
         if z_key in z_storage:
             pool_data["files"].extend(z_storage[z_key])
     
-    # ✅ IMPROVED: Filter out "always first" and "always last" files using better detection
     for pool_key, pool_data in pools.items():
         all_files = pool_data["files"]
         always_files = [f for f in all_files if is_always_first_or_last_file(Path(f).name)]
@@ -531,34 +609,29 @@ def main():
         pool_data["files"] = mergeable_files
         pool_data["always_files"] = always_files
     
-    # ✅ FIX #3: Extract folder numbers from folder names instead of generating them
     for key, data in pools.items():
         folder_name = data["rel_path"].name
         folder_number = extract_folder_number(folder_name)
         
-        # If no number found, default to 0
         if folder_number == 0:
             print(f"WARNING: No number found in folder name '{folder_name}', using 0")
         
         data["folder_number"] = folder_number
     
     for key, data in pools.items():
-        folder_number = data["folder_number"]  # Use extracted number from folder name
+        folder_number = data["folder_number"]
         
-        # ✅ FIX: Skip folders with 0 mergeable files
         if not data["files"]:
             print(f"Skipping folder (0 files): {data['rel_path']}")
             continue
         
         original_rel_path = data["rel_path"]
         
-        out_f = bundle_dir / original_rel_path  # Use folder as-is
+        out_f = bundle_dir / original_rel_path
         out_f.mkdir(parents=True, exist_ok=True)
         
-        # ✅ IMPROVED: Copy logout file to EVERY folder that has a manifest
         if logout_file:
             try:
-                # Keep original filename
                 logout_dest = out_f / logout_file.name
                 shutil.copy2(logout_file, logout_dest)
                 print(f"  ✓ Copied {logout_file.name} to {original_rel_path}")
@@ -567,7 +640,6 @@ def main():
         else:
             print(f"  ⚠ Warning: No logout file found")
         
-        # ✅ NEW: Copy all non-JSON files (PNG, TXT, etc.)
         if "non_json_files" in data and data["non_json_files"]:
             for non_json_file in data["non_json_files"]:
                 try:
@@ -576,7 +648,6 @@ def main():
                 except Exception as e:
                     print(f"  ✗ Error copying {non_json_file.name}: {e}")
         
-        # ✅ IMPROVED: Copy "always first/last" files unmodified
         if "always_files" in data and data["always_files"]:
             for always_file in data["always_files"]:
                 try:
@@ -585,10 +656,13 @@ def main():
                 except Exception as e:
                     print(f"  ✗ Error copying {Path(always_file).name}: {e}")
         
+        total_original_ms = sum(durations_cache.get(f, 0) for f in data["files"])
+        
         manifest = [
             f"MANIFEST FOR FOLDER: {original_rel_path}",
             "=" * 40,
             f"Total Available Files: {len(data['files'])}",
+            f"Total Original Duration: {format_ms_precise(total_original_ms)}",
             f"Folder Number: {folder_number}",
             "",
             ""
@@ -600,13 +674,12 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            v_code = f"{folder_number}{v_letter}"  # Changed from "{v_letter}{folder_number}"
+            v_code = f"{folder_number}{v_letter}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
             else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
-            # ✅ NEW: Random movement percentage per version (40-50%)
             movement_percentage = rng.uniform(0.40, 0.50)
             
             total_idle_movements = 0
@@ -626,7 +699,6 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                # ✅ NEW: Insert idle mouse movements in this file's events
                 raw_with_movements, idle_time = insert_idle_mouse_movements(raw, rng, movement_percentage)
                 total_idle_movements += idle_time
                 
@@ -646,12 +718,24 @@ def main():
                 timeline = merged[-1]["Time"]
                 file_segments.append({"name": p.name, "end_time": timeline})
             
+            total_afk_pool = total_idle_movements
+            
             if is_inef and not data["is_ts"] and len(merged) > 1:
                 p_ms = rng.randint(300000, 720000)
                 split = rng.randint(0, len(merged) - 2)
                 for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
                 massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"
+                
+                # ✅ FIX: Update file segment end times AFTER massive pause
+                # Find which file the split happened in and update all segments after it
+                accumulated_time = 0
+                for seg_idx, seg in enumerate(file_segments):
+                    if seg["end_time"] > merged[split]["Time"]:
+                        # This segment and all after it are affected by the massive pause
+                        for update_idx in range(seg_idx, len(file_segments)):
+                            file_segments[update_idx]["end_time"] += p_ms
+                        break
             
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
@@ -668,7 +752,7 @@ def main():
                 f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
                 f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
                 f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}",
-                f"    - AFK Pool: {format_ms_precise(total_afk_pool)}"
+                f"    - AFK Pool (Idle Movements): {format_ms_precise(total_afk_pool)}"
             ]
             
             if massive_pause_info:
