@@ -709,6 +709,8 @@ def main():
                 timeline += gap
                 total_gaps += gap
                 
+                file_start_idx = len(merged)  # Track where this file starts in merged array
+                
                 for e in raw_with_movements:
                     ne = {**e}
                     rel_offset = int(int(e["Time"]) - base_t)
@@ -716,7 +718,13 @@ def main():
                     merged.append(ne)
                 
                 timeline = merged[-1]["Time"]
-                file_segments.append({"name": p.name, "end_time": timeline})
+                file_end_idx = len(merged) - 1  # Track where this file ends
+                file_segments.append({
+                    "name": p.name, 
+                    "end_time": timeline,
+                    "start_idx": file_start_idx,
+                    "end_idx": file_end_idx
+                })
             
             total_afk_pool = total_idle_movements
             
@@ -727,15 +735,12 @@ def main():
                 timeline = merged[-1]["Time"]
                 massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"
                 
-                # ✅ FIX: Update file segment end times AFTER massive pause
-                # Find which file the split happened in and update all segments after it
-                accumulated_time = 0
-                for seg_idx, seg in enumerate(file_segments):
-                    if seg["end_time"] > merged[split]["Time"]:
-                        # This segment and all after it are affected by the massive pause
-                        for update_idx in range(seg_idx, len(file_segments)):
-                            file_segments[update_idx]["end_time"] += p_ms
-                        break
+                # ✅ FIXED: Update file segment end times based on which events are affected
+                for seg in file_segments:
+                    # If ANY event in this file segment is after the split, update end time
+                    if seg["end_idx"] > split:
+                        # The last event of this file is affected by the pause
+                        seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
