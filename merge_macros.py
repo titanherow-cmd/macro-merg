@@ -632,9 +632,15 @@ def main():
         
         if logout_file:
             try:
-                logout_dest = out_f / logout_file.name
+                original_name = logout_file.name
+                # Add folder number prefix: "- logout.json" → "- 46 logout.json"
+                if original_name.startswith("-"):
+                    new_name = f"- {folder_number} {original_name[1:].strip()}"
+                else:
+                    new_name = f"{folder_number} {original_name}"
+                logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
-                print(f"  ✓ Copied {logout_file.name} to {original_rel_path}")
+                print(f"  ✓ Copied logout: {original_name} → {new_name}")
             except Exception as e:
                 print(f"  ✗ Error copying {logout_file.name}: {e}")
         else:
@@ -643,16 +649,26 @@ def main():
         if "non_json_files" in data and data["non_json_files"]:
             for non_json_file in data["non_json_files"]:
                 try:
-                    shutil.copy2(non_json_file, out_f / non_json_file.name)
-                    print(f"  ✓ Copied non-JSON file: {non_json_file.name}")
+                    original_name = non_json_file.name
+                    # Add folder number prefix: "image.png" → "46 image.png"
+                    new_name = f"{folder_number} {original_name}"
+                    shutil.copy2(non_json_file, out_f / new_name)
+                    print(f"  ✓ Copied non-JSON file: {original_name} → {new_name}")
                 except Exception as e:
                     print(f"  ✗ Error copying {non_json_file.name}: {e}")
         
         if "always_files" in data and data["always_files"]:
             for always_file in data["always_files"]:
                 try:
-                    shutil.copy2(always_file, out_f / Path(always_file).name)
-                    print(f"  ✓ Copied 'always' file: {Path(always_file).name}")
+                    original_name = Path(always_file).name
+                    # Add folder number prefix: "- always first.json" → "- 46 always first.json"
+                    # Handle files starting with "-" or "always"
+                    if original_name.startswith("-"):
+                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                    else:
+                        new_name = f"{folder_number} {original_name}"
+                    shutil.copy2(always_file, out_f / new_name)
+                    print(f"  ✓ Copied 'always' file: {original_name} → {new_name}")
                 except Exception as e:
                     print(f"  ✗ Error copying {Path(always_file).name}: {e}")
         
