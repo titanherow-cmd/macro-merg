@@ -633,11 +633,13 @@ def main():
         if logout_file:
             try:
                 original_name = logout_file.name
-                # Add folder number prefix: "- logout.json" → "- 46 logout.json"
+                # Add folder number prefix with leading dash and make UPPERCASE: "logout.json" → "- 46 LOGOUT.JSON"
                 if original_name.startswith("-"):
-                    new_name = f"- {folder_number} {original_name[1:].strip()}"
+                    # Already has dash: "- logout.json" → "- 46 LOGOUT.JSON"
+                    new_name = f"- {folder_number} {original_name[1:].strip()}".upper()
                 else:
-                    new_name = f"{folder_number} {original_name}"
+                    # Add dash: "logout.json" → "- 46 LOGOUT.JSON"
+                    new_name = f"- {folder_number} {original_name}".upper()
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
                 print(f"  ✓ Copied logout: {original_name} → {new_name}")
@@ -650,8 +652,13 @@ def main():
             for non_json_file in data["non_json_files"]:
                 try:
                     original_name = non_json_file.name
-                    # Add folder number prefix: "image.png" → "46 image.png"
-                    new_name = f"{folder_number} {original_name}"
+                    # Keep leading dash if present: "RuneLite_file.png" → "- 46 RuneLite_file.png"
+                    if original_name.startswith("-"):
+                        # Already has dash: "- file.png" → "- 46 file.png"
+                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                    else:
+                        # Add dash: "file.png" → "- 46 file.png"
+                        new_name = f"- {folder_number} {original_name}"
                     shutil.copy2(non_json_file, out_f / new_name)
                     print(f"  ✓ Copied non-JSON file: {original_name} → {new_name}")
                 except Exception as e:
