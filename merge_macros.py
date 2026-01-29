@@ -468,8 +468,8 @@ class QueueFileSelector:
     def __init__(self, rng, all_files, durations_cache):
         self.rng = rng
         self.durations = durations_cache
-        self.efficient = [f for f in all_files if "¬¬¬" not in f.name]
-        self.inefficient = [f for f in all_files if "¬¬¬" in f.name]
+        self.efficient = [f for f in all_files if "¬¬" not in f.name]
+        self.inefficient = [f for f in all_files if "¬¬" in f.name]
         self.eff_pool = list(self.efficient)
         self.ineff_pool = list(self.inefficient)
         self.rng.shuffle(self.eff_pool)
@@ -697,7 +697,7 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            v_code = f"{folder_number}{v_letter}"
+            v_code = f"{folder_number}_{v_letter}"  # Changed from {folder_number}{v_letter}
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
@@ -765,7 +765,7 @@ def main():
                         # The last event of this file is affected by the pause
                         seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
-            fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
             total_pause = total_gaps + total_afk_pool
