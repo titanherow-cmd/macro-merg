@@ -211,6 +211,42 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
     
     return path
 
+def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
+    """
+    Insert random pauses between recorded actions within a file.
+    Before every ~5 actions, 55% chance to insert a 3500-6500ms pause.
+    Uses non-rounded values for natural timing.
+    Returns (events_with_pauses, total_pause_time).
+    """
+    if not events or len(events) < 2:
+        return events, 0
+    
+    total_pause_added = 0
+    action_counter = 0
+    i = 0
+    
+    while i < len(events):
+        action_counter += 1
+        
+        # Every 3-7 actions (random), check if we should insert pause
+        if action_counter >= rng.randint(3, 7) and i < len(events) - 1:
+            # 55% chance to insert pause
+            if rng.random() < 0.55:
+                # Generate non-rounded pause duration (3500-6500ms)
+                # Use floats then convert to avoid round numbers
+                pause_duration = int(rng.uniform(3500.123, 6499.987))
+                total_pause_added += pause_duration
+                
+                # Shift all subsequent events by this pause
+                for j in range(i + 1, len(events)):
+                    events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+                
+                action_counter = 0  # Reset counter
+        
+        i += 1
+    
+    return events, total_pause_added
+
 def insert_idle_mouse_movements(events, rng, movement_percentage):
     """
     Insert realistic human-like mouse movements during idle periods (gaps > 5 seconds).
@@ -706,6 +742,7 @@ def main():
             movement_percentage = rng.uniform(0.40, 0.50)
             
             total_idle_movements = 0
+            total_intra_pauses = 0  # Track intra-file pauses separately
             total_gaps = 0
             total_afk_pool = 0
             file_segments = []
@@ -722,13 +759,22 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                raw_with_movements, idle_time = insert_idle_mouse_movements(raw, rng, movement_percentage)
+                # Step 1: Insert random intra-file pauses between actions
+                raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw, rng)
+                total_intra_pauses += intra_pause_time
+                
+                # Step 2: Insert idle mouse movements in gaps >= 5 seconds
+                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                 total_idle_movements += idle_time
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
+                # Inter-file gap: 1000-3000ms (non-rounded) × multiplier
+                if i > 0:
+                    gap = int(rng.uniform(1000.123, 2999.987) * mult)
+                else:
+                    gap = 0
                 timeline += gap
                 total_gaps += gap
                 
@@ -768,7 +814,7 @@ def main():
             fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
-            total_pause = total_gaps + total_afk_pool
+            total_pause = total_gaps + total_afk_pool + total_intra_pauses
             if massive_pause_info:
                 version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
             else:
@@ -779,7 +825,8 @@ def main():
                 f"  TOTAL DURATION: {format_ms_precise(timeline)}",
                 f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
                 f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
-                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}",
+                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (random pauses between actions)",
+                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)",
                 f"    - AFK Pool (Idle Movements): {format_ms_precise(total_afk_pool)}"
             ]
             
