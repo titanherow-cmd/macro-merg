@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.4.0) - HUMAN-LIKE MOVEMENTS
-- NEW: Imperfect, human-like mouse movements (no perfect geometry)
-- NEW: Variable cursor speeds during idle movements (fast/slow/acceleration)
-- NEW: Random wobbles, overshoots, corrections, pauses mid-movement
-- NEW: Total original file duration shown in manifest
-- FIX: AFK pool now properly calculated (was always showing 0)
-- FIX: "always first/last" files now detected properly
-- FIX: Logout file copied to EVERY folder with a manifest
-- FEATURE: Smooth transitions back to next recorded position
-- FIX: Idle mouse movements SKIP drag sequences
-- FIX: Naming scheme 29A, 29B, 29C (number before letter)
-- OPTIMIZED: Cached durations, single os.walk(), shallow copy.
+merge_macros.py - v3.15.1 - Remove Time Rounding
+- FIX: Removed ALL int() conversions on Time field assignments (preserves exact ms)
+- CLARIFY: Speed profiles EXIST for idle mouse movements (fast_start, slow_start, medium, hesitant)
+- NOTE: Speed profiles affect movement curves, not playback speed
+- ISSUE: v3.15.0 had 4 places where Time was rounded with int()
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
+# Script version
+VERSION = "v3.15.1"
+
+
+# Chat inserts are loaded from 'chat inserts' folder at runtime
 def load_json_events(path: Path):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -210,6 +208,229 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
         path.append((current_time, x, y))
     
     return path
+
+def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
+    """
+    Add realistic pre-move jitter: before a random 20-45% of ALL mouse movements,
+    add 2-3 micro-movements around the target (±1-3px), then snap to exact position.
+    The percentage is randomly chosen per file (non-rounded).
+    Returns (events_with_jitter, jitter_count, total_moves, jitter_percentage).
+    """
+    if not events or len(events) < 2:
+        return events, 0, 0, 0.0
+    
+    # Randomly choose jitter percentage for this file (20-45%, non-rounded)
+    jitter_percentage = rng.uniform(0.20, 0.45)
+    
+    jitter_count = 0
+    total_moves = 0
+    i = 0
+    
+    while i < len(events):
+        event = events[i]
+        event_type = event.get('Type', '')
+        
+        # Apply to ALL mouse movements (MouseMove, Click, RightDown)
+        if event_type in ('MouseMove', 'Click', 'RightDown'):
+            total_moves += 1
+            
+            # Random chance based on jitter_percentage
+            if rng.random() < jitter_percentage:
+                move_x = event.get('X')
+                move_y = event.get('Y')
+                move_time = event.get('Time')
+                
+                if move_x is not None and move_y is not None and move_time is not None:
+                    num_jitters = rng.randint(2, 3)
+                    jitter_events = []
+                    
+                    time_budget = rng.randint(100, 200)
+                    time_per_jitter = time_budget // (num_jitters + 1)
+                    
+                    current_time = move_time - time_budget
+                    
+                    for j in range(num_jitters):
+                        offset_x = rng.randint(-3, 3)
+                        offset_y = rng.randint(-3, 3)
+                        
+                        jitter_x = int(move_x) + offset_x
+                        jitter_y = int(move_y) + offset_y
+                        
+                        jitter_x = max(100, min(1800, jitter_x))
+                        jitter_y = max(100, min(1000, jitter_y))
+                        
+                        jitter_events.append({
+                            'Type': 'MouseMove',
+                            'Time': current_time,
+                            'X': jitter_x,
+                            'Y': jitter_y
+                        })
+                        
+                        current_time += time_per_jitter
+                    
+                    # Final movement: snap to EXACT target position
+                    jitter_events.append({
+                        'Type': 'MouseMove',
+                        'Time': current_time,
+                        'X': int(move_x),
+                        'Y': int(move_y)
+                    })
+                    
+                    for idx, jitter_event in enumerate(jitter_events):
+                        events.insert(i + idx, jitter_event)
+                    
+                    i += len(jitter_events)
+                    jitter_count += 1
+        
+        i += 1
+    
+    return events, jitter_count, total_moves, jitter_percentage
+
+def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) -> tuple:
+    """
+    20% chance to insert a random chat message from 'chat inserts' folder.
+    Loads a recorded .json file and inserts it at a random point.
+    Returns (events_with_chat, chat_inserted).
+    """
+    if not events or not chat_files or rng.random() > 0.20:
+        return events, False
+    
+    # Pick random chat file
+    chat_file = rng.choice(chat_files)
+    
+    try:
+        # Load chat events
+        chat_events = load_json_events(chat_file)
+        if not chat_events:
+            return events, False
+        
+        # Filter problematic keys from chat
+        chat_events = filter_problematic_keys(chat_events)
+        if not chat_events:
+            return events, False
+        
+        # Find insertion point (20-80% through file)
+        if len(events) < 10:
+            return events, False
+        
+        start_idx = int(len(events) * 0.20)
+        end_idx = int(len(events) * 0.80)
+        insertion_point = rng.randint(start_idx, end_idx)
+        
+        # Get time at insertion point
+        base_time = events[insertion_point].get('Time', 0)
+        
+        # Normalize chat events to start at base_time
+        chat_start_time = min(e.get('Time', 0) for e in chat_events)
+        for event in chat_events:
+            event['Time'] = event['Time'] - chat_start_time + base_time
+        
+        # Calculate chat duration
+        chat_duration = max(e.get('Time', 0) for e in chat_events) - base_time
+        
+        # Shift all events AFTER insertion point (no rounding!)
+        for i in range(insertion_point, len(events)):
+            events[i]['Time'] = events[i]['Time'] + chat_duration
+        
+        # Insert chat events
+        for i, chat_event in enumerate(chat_events):
+            events.insert(insertion_point + i, chat_event)
+        
+        return events, True
+        
+    except Exception as e:
+        print(f"  ⚠️ Error loading chat file {chat_file.name}: {e}")
+        return events, False
+
+def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
+    """
+    Insert random pauses before recorded actions.
+    Each file gets 1-4 random pauses (randomly chosen per file).
+    Each pause is 1000-2000ms (non-rounded).
+    Returns (events_with_pauses, total_pause_time).
+    """
+    if not events or len(events) < 5:
+        return events, 0
+    
+    # Randomly decide how many pauses for this file (1-4)
+    num_pauses = rng.randint(1, 4)
+    
+    # Randomly select which event indices will get pauses
+    max_idx = len(events) - 1
+    if max_idx < num_pauses:
+        num_pauses = max_idx
+    
+    # Select random unique indices (skip first event at index 0)
+    pause_indices = rng.sample(range(1, len(events)), num_pauses)
+    pause_indices.sort()
+    
+    total_pause_added = 0
+    
+    # Apply pauses at selected indices
+    for pause_idx in pause_indices:
+        # Generate non-rounded pause duration (1000-2000ms)
+        pause_duration = int(rng.uniform(1000.123, 1999.987))
+        total_pause_added += pause_duration
+        
+        # Shift this event and all subsequent events by the pause (no rounding!)
+        for j in range(pause_idx, len(events)):
+            events[j]["Time"] = events[j]["Time"] + pause_duration
+    
+    return events, total_pause_added
+
+def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
+    """
+    Insert 1-3 random extended pauses (0-2 minutes each) for NORMAL files only.
+    These are inserted at random points throughout the merged file.
+    Returns (events_with_pauses, total_pause_time).
+    """
+    if not events or len(events) < 10:
+        return events, 0
+    
+    # Randomly decide how many extended pauses (1-3)
+    num_pauses = rng.randint(1, 3)
+    
+    # Select random unique indices
+    max_idx = len(events) - 1
+    if max_idx < num_pauses:
+        num_pauses = max_idx
+    
+    pause_indices = rng.sample(range(1, len(events)), num_pauses)
+    pause_indices.sort()
+    
+    total_pause_added = 0
+    
+    # Apply pauses at selected indices
+    for pause_idx in pause_indices:
+        # Generate non-rounded pause duration (0-2 minutes = 0-120000ms)
+        pause_duration = int(rng.uniform(0.123, 119999.987))
+        total_pause_added += pause_duration
+        
+        # Shift this event and all subsequent events by the pause (no rounding!)
+        for j in range(pause_idx, len(events)):
+            events[j]["Time"] = events[j]["Time"] + pause_duration
+    
+    return events, total_pause_added
+
+def filter_problematic_keys(events: list) -> list:
+    """
+    Remove problematic key events that could trigger macro player hotkeys.
+    Filters out: HOME (36), END (35), PAGE UP (33), PAGE DOWN (34), 
+    ESC (27), PAUSE/BREAK (19), PRINT SCREEN (44)
+    """
+    problematic_keycodes = {27, 19, 33, 34, 35, 36, 44}
+    
+    filtered = []
+    for event in events:
+        # Skip KeyDown/KeyUp events with problematic keycodes
+        if event.get('Type') in ['KeyDown', 'KeyUp']:
+            keycode = event.get('KeyCode')
+            if keycode in problematic_keycodes:
+                continue  # Skip this event
+        
+        filtered.append(event)
+    
+    return filtered
 
 def insert_idle_mouse_movements(events, rng, movement_percentage):
     """
@@ -475,22 +696,60 @@ class QueueFileSelector:
         self.rng.shuffle(self.eff_pool)
         self.rng.shuffle(self.ineff_pool)
 
-    def get_sequence(self, target_minutes, force_inef=False, strictly_eff=False):
+    def get_sequence(self, target_minutes, force_inef=False, is_time_sensitive=False):
         seq, cur_ms = [], 0.0
         target_ms = target_minutes * 60000
-        actual_force = force_inef if not strictly_eff else False
+        actual_force = force_inef if not is_time_sensitive else False
+        
+        # Keep adding files until we reach target
+        # Stop conditions:
+        # 1. Reached target OR
+        # 2. Adding next file would overshoot by more than 4 minutes
+        
         while cur_ms < target_ms:
+            # Try to get next file
             if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
             elif self.eff_pool: pick = self.eff_pool.pop(0)
             elif self.efficient:
                 self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
                 pick = self.eff_pool.pop(0)
-            elif self.ineff_pool and not strictly_eff: pick = self.ineff_pool.pop(0)
-            else: break
-            seq.append(pick)
-            cur_ms += (self.durations.get(pick, 2000) + 1500)
-            if len(seq) > 1000: break
+            elif self.ineff_pool and not is_time_sensitive: pick = self.ineff_pool.pop(0)
+            else: break  # No more files
+            
+            file_duration = self.durations.get(pick, 500)
+            
+            # File selector multiplier - CRITICAL for accuracy
+            # 1.0x = too many files (overshoot 11-18 min)
+            # 1.8x = too few files (undershoot 10-13 min)
+            # 1.35x = sweet spot (target ±2-4 min)
+            if is_time_sensitive:
+                estimated_time = file_duration * 1.05  # TIME SENSITIVE: minimal overhead
+            else:
+                estimated_time = file_duration * 1.35  # NORMAL: balanced estimate
+            
+            # Check if adding would overshoot too much
+            potential_total = cur_ms + estimated_time
+            overshoot = potential_total - target_ms
+            
+            if overshoot > (4 * 60000):  # Would overshoot by more than 4 minutes
+                # Only skip if we're already reasonably close to target
+                if cur_ms >= (target_ms - (4 * 60000)):  # Within 4 min of target
+                    break  # Close enough, stop
+                else:
+                    # Still far from target, add it anyway
+                    seq.append(pick)
+                    cur_ms += estimated_time
+            else:
+                # Safe to add (won't overshoot by more than 4 min)
+                seq.append(pick)
+                cur_ms += estimated_time
+            
+            # Safety limits
+            if len(seq) > 800: break
+            if cur_ms > target_ms * 3: break
+        
         return seq
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -538,6 +797,18 @@ def main():
     pools = {}
     z_storage = {}
     durations_cache = {}
+    
+    # Load chat insert files from 'chat inserts' folder (same level as originals)
+    chat_files = []
+    chat_dir = Path(args.input_root).parent / "chat inserts"
+    if chat_dir.exists() and chat_dir.is_dir():
+        chat_files = list(chat_dir.glob("*.json"))
+        if chat_files:
+            print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
+        else:
+            print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
+    else:
+        print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
 
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
@@ -684,12 +955,18 @@ def main():
         manifest = [
             f"MANIFEST FOR FOLDER: {original_rel_path}",
             "=" * 40,
-            f"Total Available Files: {len(data['files'])}",
-            f"Total Original Duration: {format_ms_precise(total_original_ms)}",
-            f"Folder Number: {folder_number}",
-            "",
-            ""
+            f"Script Version: {VERSION}",
+            f"Merged Bundle: merged_bundle_{args.bundle_id}",
+            f"Total Original Files: {len(data['files'])}",
+            f"Total Original Files Duration: {format_ms_precise(total_original_ms)}",
+            " "
         ]
+        
+        # Global chat queue - persists across all versions
+        # Ensures all chat files get used before repeating
+        global_chat_queue = list(chat_files) if chat_files else []
+        if global_chat_queue:
+            rng.shuffle(global_chat_queue)
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -697,17 +974,22 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            v_code = f"{folder_number}_{v_letter}"  # Changed from {folder_number}{v_letter}
+            v_code = f"{folder_number}_{v_letter}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
             else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             movement_percentage = rng.uniform(0.40, 0.50)
+            jitter_percentage = 0.0  # Will be set per file
             
             total_idle_movements = 0
+            total_intra_pauses = 0
+            total_normal_pauses = 0  # NEW: Track normal file pauses
             total_gaps = 0
             total_afk_pool = 0
+            total_jitter_count = 0
+            total_clicks = 0
             file_segments = []
             massive_pause_info = None
             merged = []
@@ -718,17 +1000,90 @@ def main():
             if not paths:
                 continue
             
+            # Chat - only 1 per merged file, using global queue
+            chat_used = False
+            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 else -1
+            file_segments = []
+            
             for i, p in enumerate(paths):
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                raw_with_movements, idle_time = insert_idle_mouse_movements(raw, rng, movement_percentage)
+                # Filter problematic keys
+                raw = filter_problematic_keys(raw)
+                if not raw: continue
+                
+                # Check if TIME SENSITIVE
+                is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
+                
+                # INSERT CHAT ONCE (before the chosen file index)
+                if not chat_used and i == chat_insertion_point and global_chat_queue:
+                    chat_file = global_chat_queue.pop(0)  # Take from front
+                    try:
+                        chat_events = load_json_events(chat_file)
+                        if chat_events:
+                            chat_events = filter_problematic_keys(chat_events)
+                            if chat_events:
+                                # Normalize to current timeline
+                                chat_start = min(e.get('Time', 0) for e in chat_events)
+                                chat_file_start_idx = len(merged)
+                                for e in chat_events:
+                                    e['Time'] = e['Time'] - chat_start + timeline
+                                    merged.append(e)
+                                
+                                timeline = merged[-1]["Time"] if merged else timeline
+                                file_segments.append({
+                                    "name": chat_file.name,
+                                    "end_time": timeline,
+                                    "start_idx": chat_file_start_idx,
+                                    "end_idx": len(merged) - 1,
+                                    "is_chat": True
+                                })
+                                chat_used = True
+                                
+                                # Put used file at END of queue (ensures all files used before repeat)
+                                global_chat_queue.append(chat_file)
+                                
+                                # If queue is empty, refill and shuffle
+                                if not global_chat_queue and chat_files:
+                                    global_chat_queue = list(chat_files)
+                                    rng.shuffle(global_chat_queue)
+                    except Exception as e:
+                        print(f"  ⚠️ Error loading chat {chat_file.name}: {e}")
+                        global_chat_queue.append(chat_file)  # Return to queue
+                
+                # Step 1: Add pre-move jitter (random 20-45% of moves)
+                # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
+                if not is_time_sensitive:
+                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
+                    total_jitter_count += jitter_count
+                    total_clicks += click_count
+                    jitter_percentage = jitter_pct  # Track the percentage used
+                else:
+                    raw_with_jitter = raw
+                    total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
+                
+                # Step 2: Insert random intra-file pauses between actions
+                # TIME SENSITIVE: Skip intra-pauses (NEW rule - excluded)
+                if not is_time_sensitive:
+                    raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
+                    total_intra_pauses += intra_pause_time
+                else:
+                    raw_with_pauses = raw_with_jitter
+                
+                # Step 3: Insert idle mouse movements in gaps >= 5 seconds
+                # TIME SENSITIVE: NOW INCLUDED (doesn't affect timing, fills existing gaps)
+                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                 total_idle_movements += idle_time
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
+                # Inter-file gap: 500-5000ms (non-rounded) × multiplier
+                if i > 0:
+                    gap = int(rng.uniform(500.123, 4999.987) * mult)
+                else:
+                    gap = 0
                 timeline += gap
                 total_gaps += gap
                 
@@ -736,23 +1091,34 @@ def main():
                 
                 for e in raw_with_movements:
                     ne = {**e}
-                    rel_offset = int(int(e["Time"]) - base_t)
+                    rel_offset = e["Time"] - base_t  # No rounding!
                     ne["Time"] = timeline + rel_offset
                     merged.append(ne)
                 
                 timeline = merged[-1]["Time"]
-                file_end_idx = len(merged) - 1  # Track where this file ends
+                file_end_idx = len(merged) - 1
                 file_segments.append({
                     "name": p.name, 
                     "end_time": timeline,
                     "start_idx": file_start_idx,
-                    "end_idx": file_end_idx
+                    "end_idx": file_end_idx,
+                    "is_chat": False  # Regular file
                 })
             
             total_afk_pool = total_idle_movements
+            chat_inserted = chat_used  # Track if chat was used
+            
+            # NEW: Normal File Pause (1-3 times, 1-3 min each)
+            # Only for NORMAL files (not inefficient, not TIME SENSITIVE)
+            if not is_inef and not is_time_sensitive and merged:
+                merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
+                total_normal_pauses += normal_pause_time
+                if normal_pause_time > 0:
+                    timeline = merged[-1]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
-                p_ms = rng.randint(300000, 720000)
+                # Massive pause: 4-9 minutes (240000-540000ms)
+                p_ms = rng.randint(240000, 540000)
                 split = rng.randint(0, len(merged) - 2)
                 for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
@@ -765,34 +1131,65 @@ def main():
                         # The last event of this file is affected by the pause
                         seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
-            fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            # Calculate exact time for filename
+            total_minutes = int(timeline / 60000)
+            total_seconds = int((timeline % 60000) / 1000)
+            
+            fname = f"{'¬¬' if is_inef else ''}{v_code}_{total_minutes}m{total_seconds}s.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
-            total_pause = total_gaps + total_afk_pool
-            if massive_pause_info:
-                version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
+            # Calculate pause time (idle movements are informational only)
+            total_pause = total_intra_pauses + total_gaps + total_normal_pauses
+            
+            # Determine file type
+            if is_time_sensitive:
+                file_type = "Time sensitive"
+            elif is_inef:
+                file_type = "Inefficient"
             else:
-                version_label = f"Version {v_code} (Multiplier: x{mult}):"
+                file_type = "Normal"
+            
+            # Calculate pause times
+            # Only inter-file gaps get multiplied!
+            original_intra = total_intra_pauses  # Not multiplied
+            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps
+            original_normal = total_normal_pauses
+            original_total = original_intra + original_inter + original_normal
+            
+            # Calculate total time in minutes and seconds
+            total_min = int(timeline / 60000)
+            total_sec = int((timeline % 60000) / 1000)
+            
+            # Version label with duration and separator
+            version_label = f"Version {v_code}_{total_min}m{total_sec}s:"
+            separator = "=" * 40
             
             manifest_entry = [
+                separator,
+                " ",
                 version_label,
-                f"  TOTAL DURATION: {format_ms_precise(timeline)}",
-                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
-                f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
-                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}",
-                f"    - AFK Pool (Idle Movements): {format_ms_precise(total_afk_pool)}"
+                f"FILE TYPE: {file_type}",
+                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
+                f"BREAKDOWN",
+                f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
+                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
+                f"                - Normal file pause: {format_ms_precise(original_normal)}",
             ]
             
-            if massive_pause_info:
-                manifest_entry.append(f"    - {massive_pause_info}")
+            # Add idle and jitter info (no chat)
+            manifest_entry.extend([
+                f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
+                f"Mouse Jitter: {int(jitter_percentage * 100)}%"
+            ])
             
+            # Add files list with chat highlighting
             manifest_entry.append("")
+            for seg in file_segments:
+                if seg.get("is_chat", False):
+                    manifest_entry.append(f"  ****** {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+                else:
+                    manifest_entry.append(f"  * {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
             
-            for idx, seg in enumerate(file_segments):
-                bullet = "*" if idx < 11 else "-"
-                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
-            
-            manifest_entry.append("-" * 30)
             manifest.append("\n".join(manifest_entry))
 
         (out_f / f"!_MANIFEST_{folder_number}_!.txt").write_text("\n".join(manifest))
