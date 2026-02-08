@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.15.1 - Remove Time Rounding
-- FIX: Removed ALL int() conversions on Time field assignments (preserves exact ms)
-- CLARIFY: Speed profiles EXIST for idle mouse movements (fast_start, slow_start, medium, hesitant)
-- NOTE: Speed profiles affect movement curves, not playback speed
-- ISSUE: v3.15.0 had 4 places where Time was rounded with int()
+merge_macros.py - v3.16.0 - Chat Insert Toggle
+- NEW: --no-chat flag to disable chat inserts (default: enabled)
+- Chat inserts are ON by default, use --no-chat to disable
+- All other features unchanged
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.15.1"
+VERSION = "v3.16.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -759,6 +758,7 @@ def main():
     parser.add_argument("--target-minutes", type=int, default=35)
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
+    parser.add_argument("--no-chat", action="store_true", help="Disable chat inserts (default: enabled)")
     args = parser.parse_args()
 
     search_base = Path(args.input_root).resolve()
@@ -798,17 +798,20 @@ def main():
     z_storage = {}
     durations_cache = {}
     
-    # Load chat insert files from 'chat inserts' folder (same level as originals)
+    # Load chat insert files from 'chat inserts' folder (unless --no-chat is set)
     chat_files = []
-    chat_dir = Path(args.input_root).parent / "chat inserts"
-    if chat_dir.exists() and chat_dir.is_dir():
-        chat_files = list(chat_dir.glob("*.json"))
-        if chat_files:
-            print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
+    if not args.no_chat:
+        chat_dir = Path(args.input_root).parent / "chat inserts"
+        if chat_dir.exists() and chat_dir.is_dir():
+            chat_files = list(chat_dir.glob("*.json"))
+            if chat_files:
+                print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
+            else:
+                print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
         else:
-            print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
+            print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
     else:
-        print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
+        print(f"🔕 Chat inserts DISABLED (--no-chat flag)")
 
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
