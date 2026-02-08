@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.16.0 - Chat Insert Toggle
-- NEW: --no-chat flag to disable chat inserts (default: enabled)
-- Chat inserts are ON by default, use --no-chat to disable
-- All other features unchanged
+merge_macros.py - v3.17.0 - Fix Chat Queue Across All Files
+- FIX: Global chat queue now persists across ALL merged files (not just per folder)
+- Each merged file in entire batch gets unique chat insert before repeating
+- ISSUE: v3.16.0 reset queue per folder, causing same chat in all files of that folder
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.16.0"
+VERSION = "v3.17.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -883,6 +883,13 @@ def main():
         pool_data["files"] = mergeable_files
         pool_data["always_files"] = always_files
     
+    # GLOBAL chat queue - persists across ALL folders and versions in this batch
+    # Ensures each merged file gets unique chat before any repeats
+    global_chat_queue = list(chat_files) if chat_files else []
+    if global_chat_queue:
+        rng.shuffle(global_chat_queue)
+        print(f"🔄 Initialized global chat queue with {len(global_chat_queue)} files (shuffled)")
+    
     for key, data in pools.items():
         folder_name = data["rel_path"].name
         folder_number = extract_folder_number(folder_name)
@@ -965,11 +972,7 @@ def main():
             " "
         ]
         
-        # Global chat queue - persists across all versions
-        # Ensures all chat files get used before repeating
-        global_chat_queue = list(chat_files) if chat_files else []
-        if global_chat_queue:
-            rng.shuffle(global_chat_queue)
+        # Note: global_chat_queue is created BEFORE folder loop (persists across all folders)
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
