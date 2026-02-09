@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.17.0 - Fix Chat Queue Across All Files
-- FIX: Global chat queue now persists across ALL merged files (not just per folder)
-- Each merged file in entire batch gets unique chat insert before repeating
-- ISSUE: v3.16.0 reset queue per folder, causing same chat in all files of that folder
+merge_macros.py - v3.17.1 - Enable Jitter for TIME SENSITIVE
+- FIX: Mouse jitter now works on TIME SENSITIVE folders (doesn't affect timing)
+- Jitter adds 2-3 micro-movements before target (100-200ms total, part of move)
+- ISSUE: v3.17.0 incorrectly excluded jitter from TIME SENSITIVE
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.17.0"
+VERSION = "v3.17.1"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -1059,18 +1059,15 @@ def main():
                         global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
-                # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
-                if not is_time_sensitive:
-                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
-                    total_jitter_count += jitter_count
-                    total_clicks += click_count
-                    jitter_percentage = jitter_pct  # Track the percentage used
-                else:
-                    raw_with_jitter = raw
-                    total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
+                # Jitter doesn't add time (happens within existing move timing)
+                # Works on ALL file types including TIME SENSITIVE
+                raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
+                total_jitter_count += jitter_count
+                total_clicks += click_count
+                jitter_percentage = jitter_pct  # Track the percentage used
                 
                 # Step 2: Insert random intra-file pauses between actions
-                # TIME SENSITIVE: Skip intra-pauses (NEW rule - excluded)
+                # TIME SENSITIVE: Skip intra-pauses (these DO add time)
                 if not is_time_sensitive:
                     raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
                     total_intra_pauses += intra_pause_time
