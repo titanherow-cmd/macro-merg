@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.19.1 - Fix None Cursor Values
-- FIX: Cursor transition now guards against None X/Y values
-- Events can have X/Y keys with None values, causing TypeError
-- ISSUE: v3.19.0 used 'X' in e check instead of e.get('X') is not None
+merge_macros.py - v3.19.0 - Raw Merged Files Feature
+- NEW: 3 extra '=' tagged raw files (only inter-file gaps, no anti-detection features)
+- Raw files produced for non-TIME-SENSITIVE folders only (same as inefficient)
+- Total output: norm_v + inef_v + 3 raw files per folder
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.19.1"
+VERSION = "v3.19.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -1101,36 +1101,38 @@ def main():
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
                     
                     # CRITICAL: Add cursor transition during gap to prevent teleporting
-                    # Get last cursor position from previous file (must have non-None X/Y)
+                    # Get last cursor position from previous file
                     last_cursor_event = None
                     for e in reversed(merged):
-                        if e.get('X') is not None and e.get('Y') is not None:
+                        if 'X' in e and 'Y' in e:
                             last_cursor_event = e
                             break
                     
-                    # Get first cursor position from current file (must have non-None X/Y)
+                    # Get first cursor position from current file
                     first_cursor_event = None
                     for e in raw_with_movements:
-                        if e.get('X') is not None and e.get('Y') is not None:
+                        if 'X' in e and 'Y' in e:
                             first_cursor_event = e
                             break
                     
                     # If both exist and positions differ, add smooth transition
                     if last_cursor_event and first_cursor_event:
-                        last_x, last_y = int(last_cursor_event['X']), int(last_cursor_event['Y'])
-                        first_x, first_y = int(first_cursor_event['X']), int(first_cursor_event['Y'])
+                        last_x, last_y = last_cursor_event['X'], last_cursor_event['Y']
+                        first_x, first_y = first_cursor_event['X'], first_cursor_event['Y']
                         
-                        # Only add transition if positions are different
+                        # Only add transition if positions are different (avoid redundant move)
                         if (last_x != first_x) or (last_y != first_y):
+                            # Create smooth cursor transition during the gap
                             transition_path = generate_human_path(
                                 last_x, last_y,
                                 first_x, first_y,
-                                gap,
+                                gap,  # Use gap duration for transition
                                 rng
                             )
                             
+                            # Insert transition events during the gap
                             for rel_time, x, y in transition_path:
-                                if rel_time < gap:
+                                if rel_time < gap:  # Only use events within gap duration
                                     merged.append({
                                         'Type': 'MouseMove',
                                         'Time': timeline + rel_time,
