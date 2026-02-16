@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.17.1 - Enable Jitter for TIME SENSITIVE
-- FIX: Mouse jitter now works on TIME SENSITIVE folders (doesn't affect timing)
-- Jitter adds 2-3 micro-movements before target (100-200ms total, part of move)
-- ISSUE: v3.17.0 incorrectly excluded jitter from TIME SENSITIVE
+merge_macros.py - v3.19.0 - Raw Merged Files Feature
+- NEW: 3 extra '=' tagged raw files (only inter-file gaps, no anti-detection features)
+- Raw files produced for non-TIME-SENSITIVE folders only (same as inefficient)
+- Total output: norm_v + inef_v + 3 raw files per folder
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.17.1"
+VERSION = "v3.19.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -976,14 +976,22 @@ def main():
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
+        raw_v  = 0 if data["is_ts"] else 3   # 3 raw files for non-TS folders
         
-        for v_idx in range(1, (norm_v + inef_v) + 1):
-            is_inef = (v_idx > norm_v)
+        # v_idx 1..norm_v        → normal
+        # v_idx norm_v+1..+inef_v → inefficient
+        # v_idx ..+1..+raw_v     → raw (= prefix)
+        total_v = norm_v + inef_v + raw_v
+        
+        for v_idx in range(1, total_v + 1):
+            is_inef = (norm_v < v_idx <= norm_v + inef_v)
+            is_raw  = (v_idx > norm_v + inef_v)
             v_letter = chr(64 + v_idx)
             v_code = f"{folder_number}_{v_letter}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            elif is_raw:  mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             movement_percentage = rng.uniform(0.40, 0.50)
@@ -1059,25 +1067,31 @@ def main():
                         global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
-                # Jitter doesn't add time (happens within existing move timing)
-                # Works on ALL file types including TIME SENSITIVE
-                raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
-                total_jitter_count += jitter_count
-                total_clicks += click_count
-                jitter_percentage = jitter_pct  # Track the percentage used
+                # RAW files: skip all anti-detection features
+                if not is_raw:
+                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
+                    total_jitter_count += jitter_count
+                    total_clicks += click_count
+                    jitter_percentage = jitter_pct
+                else:
+                    raw_with_jitter = raw
+                    total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
                 
                 # Step 2: Insert random intra-file pauses between actions
-                # TIME SENSITIVE: Skip intra-pauses (these DO add time)
-                if not is_time_sensitive:
+                # TIME SENSITIVE or RAW: Skip intra-pauses
+                if not is_time_sensitive and not is_raw:
                     raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
                     total_intra_pauses += intra_pause_time
                 else:
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # TIME SENSITIVE: NOW INCLUDED (doesn't affect timing, fills existing gaps)
-                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
-                total_idle_movements += idle_time
+                # RAW: skip idle movements
+                if not is_raw:
+                    raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
+                    total_idle_movements += idle_time
+                else:
+                    raw_with_movements = raw_with_pauses
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
@@ -1085,8 +1099,49 @@ def main():
                 # Inter-file gap: 500-5000ms (non-rounded) × multiplier
                 if i > 0:
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
+                    
+                    # CRITICAL: Add cursor transition during gap to prevent teleporting
+                    # Get last cursor position from previous file
+                    last_cursor_event = None
+                    for e in reversed(merged):
+                        if 'X' in e and 'Y' in e:
+                            last_cursor_event = e
+                            break
+                    
+                    # Get first cursor position from current file
+                    first_cursor_event = None
+                    for e in raw_with_movements:
+                        if 'X' in e and 'Y' in e:
+                            first_cursor_event = e
+                            break
+                    
+                    # If both exist and positions differ, add smooth transition
+                    if last_cursor_event and first_cursor_event:
+                        last_x, last_y = last_cursor_event['X'], last_cursor_event['Y']
+                        first_x, first_y = first_cursor_event['X'], first_cursor_event['Y']
+                        
+                        # Only add transition if positions are different (avoid redundant move)
+                        if (last_x != first_x) or (last_y != first_y):
+                            # Create smooth cursor transition during the gap
+                            transition_path = generate_human_path(
+                                last_x, last_y,
+                                first_x, first_y,
+                                gap,  # Use gap duration for transition
+                                rng
+                            )
+                            
+                            # Insert transition events during the gap
+                            for rel_time, x, y in transition_path:
+                                if rel_time < gap:  # Only use events within gap duration
+                                    merged.append({
+                                        'Type': 'MouseMove',
+                                        'Time': timeline + rel_time,
+                                        'X': x,
+                                        'Y': y
+                                    })
                 else:
                     gap = 0
+                    
                 timeline += gap
                 total_gaps += gap
                 
@@ -1111,9 +1166,8 @@ def main():
             total_afk_pool = total_idle_movements
             chat_inserted = chat_used  # Track if chat was used
             
-            # NEW: Normal File Pause (1-3 times, 1-3 min each)
-            # Only for NORMAL files (not inefficient, not TIME SENSITIVE)
-            if not is_inef and not is_time_sensitive and merged:
+            # Normal File Pause: only for NORMAL files (not inef, not TS, not raw)
+            if not is_inef and not is_time_sensitive and not is_raw and merged:
                 merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
                 total_normal_pauses += normal_pause_time
                 if normal_pause_time > 0:
@@ -1127,18 +1181,20 @@ def main():
                 timeline = merged[-1]["Time"]
                 massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"
                 
-                # ✅ FIXED: Update file segment end times based on which events are affected
                 for seg in file_segments:
-                    # If ANY event in this file segment is after the split, update end time
                     if seg["end_idx"] > split:
-                        # The last event of this file is affected by the pause
                         seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
             # Calculate exact time for filename
             total_minutes = int(timeline / 60000)
             total_seconds = int((timeline % 60000) / 1000)
             
-            fname = f"{'¬¬' if is_inef else ''}{v_code}_{total_minutes}m{total_seconds}s.json"
+            # File prefix: ¬¬ = inefficient, == = raw, blank = normal
+            if is_raw:   prefix = "="
+            elif is_inef: prefix = "¬¬"
+            else:         prefix = ""
+            
+            fname = f"{prefix}{v_code}_{total_minutes}m{total_seconds}s.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
             # Calculate pause time (idle movements are informational only)
@@ -1149,6 +1205,8 @@ def main():
                 file_type = "Time sensitive"
             elif is_inef:
                 file_type = "Inefficient"
+            elif is_raw:
+                file_type = "Raw"
             else:
                 file_type = "Normal"
             
@@ -1164,26 +1222,37 @@ def main():
             total_sec = int((timeline % 60000) / 1000)
             
             # Version label with duration and separator
-            version_label = f"Version {v_code}_{total_min}m{total_sec}s:"
+            version_label = f"Version {prefix}{v_code}_{total_min}m{total_sec}s:"
             separator = "=" * 40
             
-            manifest_entry = [
-                separator,
-                " ",
-                version_label,
-                f"FILE TYPE: {file_type}",
-                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
-                f"BREAKDOWN",
-                f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
-                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
-                f"                - Normal file pause: {format_ms_precise(original_normal)}",
-            ]
+            if is_raw:
+                # Raw files: minimal manifest (only inter-file gaps, no anti-detection)
+                manifest_entry = [
+                    separator,
+                    " ",
+                    version_label,
+                    f"FILE TYPE: Raw (inter-file gaps only)",
+                    f"  Between files pause: {format_ms_precise(total_gaps)} (x{mult} Multiplier)",
+                ]
+            else:
+                manifest_entry = [
+                    separator,
+                    " ",
+                    version_label,
+                    f"FILE TYPE: {file_type}",
+                    f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
+                    f"BREAKDOWN",
+                    f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
+                    f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
+                    f"                - Normal file pause: {format_ms_precise(original_normal)}",
+                ]
             
-            # Add idle and jitter info (no chat)
-            manifest_entry.extend([
-                f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
-                f"Mouse Jitter: {int(jitter_percentage * 100)}%"
-            ])
+            # Idle and jitter only for non-raw files
+            if not is_raw:
+                manifest_entry.extend([
+                    f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
+                    f"Mouse Jitter: {int(jitter_percentage * 100)}%"
+                ])
             
             # Add files list with chat highlighting
             manifest_entry.append("")
