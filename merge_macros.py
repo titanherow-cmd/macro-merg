@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.19.1 - Fix None Cursor Values
-- FIX: Cursor transition now guards against None X/Y values
-- Events can have X/Y keys with None values, causing TypeError
-- ISSUE: v3.19.0 used 'X' in e check instead of e.get('X') is not None
+merge_macros.py - v3.20.2 - Correct File Counts Per Folder Type
+- Regular folder: norm_v normal + norm_v//2 inef + 3 raw  (default: 6+3+3 = 12)
+- TS folder:      norm_v TS     + 0 inef          + 3 raw  (default: 6+0+3 = 9)
+- FIXED: TS folders no longer also produce normal versions on top
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.19.1"
+VERSION = "v3.20.2"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -975,25 +975,29 @@ def main():
         # Note: global_chat_queue is created BEFORE folder loop (persists across all folders)
         
         norm_v = args.versions
-        inef_v = 0 if data["is_ts"] else (norm_v // 2)
-        raw_v  = 0 if data["is_ts"] else 3   # 3 raw files for non-TS folders
-        
-        # v_idx 1..norm_v        → normal
-        # v_idx norm_v+1..+inef_v → inefficient
-        # v_idx ..+1..+raw_v     → raw (= prefix)
+        is_ts  = data["is_ts"]
+
+        # Regular folder:  norm_v normal  +  norm_v//2 inef  +  3 raw
+        # TS folder:        norm_v TS      +  0 inef          +  3 raw
+        inef_v  = 0 if is_ts else (norm_v // 2)
+        raw_v   = 3   # always 3 raw (^ tag) for every folder type
         total_v = norm_v + inef_v + raw_v
-        
+
+        # v_idx 1..norm_v              → TS versions (TS folder) OR Normal (regular folder)
+        # v_idx norm_v+1..+inef_v      → Inefficient ¬¬  (regular folder only, 0 for TS)
+        # v_idx ..+1..+raw_v           → Raw ^            (all folders)
         for v_idx in range(1, total_v + 1):
-            is_inef = (norm_v < v_idx <= norm_v + inef_v)
-            is_raw  = (v_idx > norm_v + inef_v)
+            is_inef       = (norm_v < v_idx <= norm_v + inef_v)
+            is_raw        = (v_idx > norm_v + inef_v)
+            is_ts_version = is_ts and not is_raw   # first norm_v slots are TS in a TS folder
             v_letter = chr(64 + v_idx)
             v_code = f"{folder_number}_{v_letter}"
-            
-            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
-            elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
-            elif is_raw:  mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
-            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
-            
+
+            if is_ts_version: mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_inef:     mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            elif is_raw:      mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            else:             mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+
             movement_percentage = rng.uniform(0.40, 0.50)
             jitter_percentage = 0.0  # Will be set per file
             
@@ -1009,7 +1013,7 @@ def main():
             merged = []
             timeline = 0
             
-            paths = QueueFileSelector(rng, data["files"], durations_cache).get_sequence(args.target_minutes, is_inef, data["is_ts"])
+            paths = QueueFileSelector(rng, data["files"], durations_cache).get_sequence(args.target_minutes, is_inef, is_ts_version)
             
             if not paths:
                 continue
@@ -1027,8 +1031,8 @@ def main():
                 raw = filter_problematic_keys(raw)
                 if not raw: continue
                 
-                # Check if TIME SENSITIVE
-                is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
+                # is_time_sensitive = True only for explicitly TS versions (not normal versions in TS folders)
+                is_time_sensitive = is_ts_version
                 
                 # INSERT CHAT ONCE (before the chosen file index)
                 if not chat_used and i == chat_insertion_point and global_chat_queue:
@@ -1067,18 +1071,14 @@ def main():
                         global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
-                # RAW files: skip all anti-detection features
-                if not is_raw:
-                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
-                    total_jitter_count += jitter_count
-                    total_clicks += click_count
-                    jitter_percentage = jitter_pct
-                else:
-                    raw_with_jitter = raw
-                    total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
+                # All types get jitter (doesn't affect time)
+                raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
+                total_jitter_count += jitter_count
+                total_clicks += click_count
+                jitter_percentage = jitter_pct
                 
                 # Step 2: Insert random intra-file pauses between actions
-                # TIME SENSITIVE or RAW: Skip intra-pauses
+                # TIME SENSITIVE and RAW: Skip (adds time)
                 if not is_time_sensitive and not is_raw:
                     raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
                     total_intra_pauses += intra_pause_time
@@ -1086,12 +1086,9 @@ def main():
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # RAW: skip idle movements
-                if not is_raw:
-                    raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
-                    total_idle_movements += idle_time
-                else:
-                    raw_with_movements = raw_with_pauses
+                # All types get idle movements (doesn't affect time)
+                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
+                total_idle_movements += idle_time
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
@@ -1187,10 +1184,10 @@ def main():
             total_minutes = int(timeline / 60000)
             total_seconds = int((timeline % 60000) / 1000)
             
-            # File prefix: ¬¬ = inefficient, == = raw, blank = normal
-            if is_raw:   prefix = "="
-            elif is_inef: prefix = "¬¬"
-            else:         prefix = ""
+            # File prefix: ¬¬ = inefficient, ^ = raw, blank = normal/TS
+            if is_raw:        prefix = "^"
+            elif is_inef:     prefix = "¬¬"
+            else:             prefix = ""
             
             fname = f"{prefix}{v_code}_{total_minutes}m{total_seconds}s.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
@@ -1199,7 +1196,7 @@ def main():
             total_pause = total_intra_pauses + total_gaps + total_normal_pauses
             
             # Determine file type
-            if is_time_sensitive:
+            if is_ts_version:
                 file_type = "Time sensitive"
             elif is_inef:
                 file_type = "Inefficient"
@@ -1229,7 +1226,7 @@ def main():
                     separator,
                     " ",
                     version_label,
-                    f"FILE TYPE: Raw (inter-file gaps only)",
+                    f"FILE TYPE: Raw (no time-adding features, no chat)",
                     f"  Between files pause: {format_ms_precise(total_gaps)} (x{mult} Multiplier)",
                 ]
             else:
@@ -1245,12 +1242,11 @@ def main():
                     f"                - Normal file pause: {format_ms_precise(original_normal)}",
                 ]
             
-            # Idle and jitter only for non-raw files
-            if not is_raw:
-                manifest_entry.extend([
-                    f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
-                    f"Mouse Jitter: {int(jitter_percentage * 100)}%"
-                ])
+            # Idle and jitter: all types (raw included, since they don't add time)
+            manifest_entry.extend([
+                f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
+                f"Mouse Jitter: {int(jitter_percentage * 100)}%"
+            ])
             
             # Add files list with chat highlighting
             manifest_entry.append("")
