@@ -1027,14 +1027,13 @@ def main():
         if logout_file:
             try:
                 original_name = logout_file.name
-                # Add folder number prefix with @ prefix and make UPPERCASE: "logout.json" â†’ "- 46 LOGOUT.JSON"
+                # Simple @ prefix with UPPERCASE, no folder number: "logout.json" → "@ LOGOUT.JSON"
                 if original_name.startswith("-"):
-                    # Already has @ prefix: "- logout.json" â†’ "- 46 LOGOUT.JSON"
-                    name_part = original_name[1:].strip()
-                    new_name = f"@ {folder_number} " + "".join([c.upper() if j % 2 == 0 else c.lower() for j, c in enumerate(name_part)])
+                    # Has dash: "- logout.json" → "@ LOGOUT.JSON"
+                    new_name = "@ " + original_name[1:].strip().upper()
                 else:
                     # Add @ prefix: "logout.json" â†’ "- 46 LOGOUT.JSON"
-                    new_name = f"@ {folder_number} " + "".join([j % 2 == 0 and c.upper() or c.lower() for j, c in enumerate(original_name)])
+                    new_name = "@ " + original_name.upper()
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
                 print(f"  âœ“ Copied logout: {original_name} â†’ {new_name}")
