@@ -1,16 +1,100 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.20.2 - Correct File Counts Per Folder Type
-- Regular folder: norm_v normal + norm_v//2 inef + 3 raw  (default: 6+3+3 = 12)
-- TS folder:      norm_v TS     + 0 inef          + 3 raw  (default: 6+0+3 = 9)
-- FIXED: TS folders no longer also produce normal versions on top
+merge_macros.py - v3.23.0
+- Alphabetical naming: Raw (A,B,C) -> Ineff (D,E,F) -> Normal (G,H,I...)
+- DROP ONLY insertion for Mining folders
+- Working whitelist + random file queue
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.20.2"
+VERSION = "v3.24.0"
+
+
+def load_folder_whitelist(root_path: Path) -> dict:
+    """
+    Load folder whitelist from 'specific folders to include for merge' file.
+    Returns dict with 'folders' and 'parent_folders' sets (None = process all).
+    
+    Parent folders (Desktop, Mobile) include ALL their subfolders.
+    Specific folders (1-Mining) include only that folder.
+    """
+    possible_names = [
+        "specific folders to include for merge",
+        "specific folders to include for merge.txt",
+        "SPECIFIC FOLDERS TO INCLUDE FOR MERGE",
+        "SPECIFIC FOLDERS TO INCLUDE FOR MERGE.TXT",
+    ]
+    
+    whitelist_file = None
+    for name in possible_names:
+        test_file = root_path / name
+        if test_file.exists():
+            whitelist_file = test_file
+            break
+    
+    if not whitelist_file:
+        return None
+    
+    try:
+        folders = set()
+        parent_folders = set()
+        
+        with open(whitelist_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                line_lower = line.lower()
+                if line_lower in ['desktop', 'mobile']:
+                    parent_folders.add(line_lower)
+                else:
+                    folders.add(line_lower)
+        
+        if not folders and not parent_folders:
+            print(f"⚠️ Whitelist file is empty: {whitelist_file}")
+            return None
+        
+        print(f"✓ Loaded whitelist from: {whitelist_file}")
+        if parent_folders:
+            print(f"  Including ALL subfolders under:")
+            for pf in sorted(parent_folders):
+                print(f"    - {pf}/* (all subfolders)")
+        if folders:
+            print(f"  Including specific folders:")
+            for folder in sorted(folders):
+                print(f"    - {folder}")
+        
+        return {'folders': folders, 'parent_folders': parent_folders}
+    except Exception as e:
+        print(f"⚠️ Error reading whitelist: {e}")
+        return None
+
+
+def should_process_folder(folder_path: Path, originals_root: Path, whitelist: dict) -> bool:
+    """Check if folder should be processed based on whitelist"""
+    if whitelist is None:
+        return True
+    
+    folder_name = folder_path.name.lower()
+    
+    # Check specific folder match
+    if folder_name in whitelist['folders']:
+        return True
+    
+    # Check parent folder match
+    try:
+        rel_path = folder_path.relative_to(originals_root)
+        for part in rel_path.parts:
+            if part.lower() in whitelist['parent_folders']:
+                return True
+    except ValueError:
+        pass
+    
+    return False
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -51,6 +135,28 @@ def format_ms_precise(ms: int) -> str:
 
 def clean_identity(name: str) -> str:
     return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
+
+
+def find_drop_only_files(folder_path: Path, all_files: list) -> list:
+    """
+    Find all DROP ONLY files in Mining folders (including z+100 storage).
+    Only searches if folder name contains 'mining' (case-insensitive).
+    Returns list of file paths.
+    """
+    # Check if this is a Mining folder
+    if 'mining' not in folder_path.name.lower():
+        return []
+    
+    drop_only_files = []
+    
+    # Search through all files for DROP ONLY pattern
+    for file_path in all_files:
+        filename = file_path.name.lower()
+        # Match: "drop only", "drop only1", "drop only 1", "drop only - copy", etc.
+        if 'drop only' in filename:
+            drop_only_files.append(file_path)
+    
+    return drop_only_files
 
 def extract_folder_number(folder_name: str) -> int:
     """
@@ -211,7 +317,7 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
 def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     """
     Add realistic pre-move jitter: before a random 20-45% of ALL mouse movements,
-    add 2-3 micro-movements around the target (±1-3px), then snap to exact position.
+    add 2-3 micro-movements around the target (Â±1-3px), then snap to exact position.
     The percentage is randomly chosen per file (non-rounded).
     Returns (events_with_jitter, jitter_count, total_moves, jitter_percentage).
     """
@@ -338,7 +444,7 @@ def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) ->
         return events, True
         
     except Exception as e:
-        print(f"  ⚠️ Error loading chat file {chat_file.name}: {e}")
+        print(f"  âš ï¸ Error loading chat file {chat_file.name}: {e}")
         return events, False
 
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
@@ -698,6 +804,10 @@ class QueueFileSelector:
     def get_sequence(self, target_minutes, force_inef=False, is_time_sensitive=False):
         seq, cur_ms = [], 0.0
         target_ms = target_minutes * 60000
+        # Add ±5% margin for flexibility
+        margin = int(target_ms * 0.05)
+        target_min = target_ms - margin
+        target_max = target_ms + margin
         actual_force = force_inef if not is_time_sensitive else False
         
         # Keep adding files until we reach target
@@ -705,7 +815,7 @@ class QueueFileSelector:
         # 1. Reached target OR
         # 2. Adding next file would overshoot by more than 4 minutes
         
-        while cur_ms < target_ms:
+        while cur_ms < target_max:
             # Try to get next file
             if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
             elif self.eff_pool: pick = self.eff_pool.pop(0)
@@ -720,7 +830,7 @@ class QueueFileSelector:
             # File selector multiplier - CRITICAL for accuracy
             # 1.0x = too many files (overshoot 11-18 min)
             # 1.8x = too few files (undershoot 10-13 min)
-            # 1.35x = sweet spot (target ±2-4 min)
+            # 1.35x = sweet spot (target Â±2-4 min)
             if is_time_sensitive:
                 estimated_time = file_duration * 1.05  # TIME SENSITIVE: minimal overhead
             else:
@@ -730,7 +840,7 @@ class QueueFileSelector:
             potential_total = cur_ms + estimated_time
             overshoot = potential_total - target_ms
             
-            if overshoot > (4 * 60000):  # Would overshoot by more than 4 minutes
+            if overshoot > margin:  # Would overshoot beyond acceptable margin
                 # Only skip if we're already reasonably close to target
                 if cur_ms >= (target_ms - (4 * 60000)):  # Within 4 min of target
                     break  # Close enough, stop
@@ -759,6 +869,7 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     parser.add_argument("--no-chat", action="store_true", help="Disable chat inserts (default: enabled)")
+    parser.add_argument("--use-whitelist", action="store_true", help="Use whitelist from 'specific folders to include for merge.txt' (default: off)")
     args = parser.parse_args()
 
     search_base = Path(args.input_root).resolve()
@@ -775,6 +886,17 @@ def main():
     if not originals_root:
         originals_root = search_base
     
+    # NEW: Load folder whitelist (only if --use-whitelist flag is set)
+    folder_whitelist = None
+    if args.use_whitelist:
+        folder_whitelist = load_folder_whitelist(originals_root.parent)
+        if folder_whitelist is None:
+            print("⚠️  --use-whitelist flag set but no whitelist file found or file is empty")
+            print("    Will process ALL folders")
+    else:
+        print("📋 Whitelist is DISABLED (--use-whitelist flag not set)")
+        print("   Processing ALL folders")
+    
     logout_file = None
     logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
     
@@ -786,7 +908,7 @@ def main():
             for test_path in [test_file, Path(str(test_file) + ".json")]:
                 if test_path.exists() and test_path.is_file():
                     logout_file = test_path
-                    print(f"✓ Found logout file at: {logout_file}")
+                    print(f"âœ“ Found logout file at: {logout_file}")
                     break
             if logout_file:
                 break
@@ -795,7 +917,6 @@ def main():
     bundle_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random()
     pools = {}
-    z_storage = {}
     durations_cache = {}
     
     # Load chat insert files from 'chat inserts' folder (unless --no-chat is set)
@@ -805,13 +926,18 @@ def main():
         if chat_dir.exists() and chat_dir.is_dir():
             chat_files = list(chat_dir.glob("*.json"))
             if chat_files:
-                print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
+                print(f"âœ“ Found {len(chat_files)} chat insert files in: {chat_dir}")
             else:
-                print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
+                print(f"âš ï¸ 'chat inserts' folder exists but is empty: {chat_dir}")
         else:
-            print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
+            print(f"âš ï¸ No 'chat inserts' folder found (will skip chat inserts)")
     else:
-        print(f"🔕 Chat inserts DISABLED (--no-chat flag)")
+        print(f"ðŸ”• Chat inserts DISABLED (--no-chat flag)")
+
+    # Track skipped and processed folders for summary
+    skipped_folders = []
+    processed_folders = []
+
 
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
@@ -821,61 +947,42 @@ def main():
         non_jsons = [f for f in files if not f.endswith(".json")]
         
         if not jsons: continue
-        
-        is_z_storage = "z +100" in str(curr).lower()
-        
-        if is_z_storage:
-            parent_scope = None
-            for part in curr.parts:
-                if "desktop" in part.lower() or "mobile" in part.lower():
-                    parent_scope = part
-                    break
-            
-            if parent_scope:
-                macro_id = clean_identity(curr.name)
-                key = (parent_scope, macro_id)
-                if key not in z_storage:
-                    z_storage[key] = []
-                
-                for f in jsons:
-                    file_path = curr / f
-                    z_storage[key].append(file_path)
-                    durations_cache[file_path] = get_file_duration_ms(file_path)
-        else:
-            macro_id = clean_identity(curr.name)
-            rel_path = curr.relative_to(originals_root)
-            
-            parent_scope = None
-            for part in curr.parts:
-                if "desktop" in part.lower() or "mobile" in part.lower():
-                    parent_scope = part
-                    break
-            
-            key = str(rel_path).lower()
-            if key not in pools:
-                is_ts = bool(re.search(r'time[\s-]*sens', key))
-                file_paths = [curr / f for f in jsons]
-                
-                pools[key] = {
-                    "rel_path": rel_path,
-                    "files": file_paths,
-                    "is_ts": is_ts,
-                    "macro_id": macro_id,
-                    "parent_scope": parent_scope,
-                    "non_json_files": [curr / f for f in non_jsons]
-                }
-                
-                for fp in file_paths:
-                    durations_cache[fp] = get_file_duration_ms(fp)
 
-    for pool_key, pool_data in pools.items():
-        parent_scope = pool_data["parent_scope"]
-        macro_id = pool_data["macro_id"]
+        # NEW: Check whitelist before processing
+        if not should_process_folder(curr, originals_root, folder_whitelist):
+            skipped_folders.append(curr.name)
+            continue
+
+        processed_folders.append(curr.name)
+
         
-        z_key = (parent_scope, macro_id)
-        if z_key in z_storage:
-            pool_data["files"].extend(z_storage[z_key])
-    
+        macro_id = clean_identity(curr.name)
+        rel_path = curr.relative_to(originals_root)
+            
+        parent_scope = None
+        for part in curr.parts:
+            if "desktop" in part.lower() or "mobile" in part.lower():
+                parent_scope = part
+                break
+            
+        key = str(rel_path).lower()
+        if key not in pools:
+            is_ts = bool(re.search(r'time[\s-]*sens', key))
+            file_paths = [curr / f for f in jsons]
+                
+            pools[key] = {
+                "rel_path": rel_path,
+                "files": file_paths,
+                "is_ts": is_ts,
+                "macro_id": macro_id,
+                "parent_scope": parent_scope,
+                "non_json_files": [curr / f for f in non_jsons],
+                "drop_only_files": find_drop_only_files(curr, file_paths)
+            }
+                
+            for fp in file_paths:
+                durations_cache[fp] = get_file_duration_ms(fp)
+
     for pool_key, pool_data in pools.items():
         all_files = pool_data["files"]
         always_files = [f for f in all_files if is_always_first_or_last_file(Path(f).name)]
@@ -888,7 +995,7 @@ def main():
     global_chat_queue = list(chat_files) if chat_files else []
     if global_chat_queue:
         rng.shuffle(global_chat_queue)
-        print(f"🔄 Initialized global chat queue with {len(global_chat_queue)} files (shuffled)")
+        print(f"ðŸ”„ Initialized global chat queue with {len(global_chat_queue)} files (shuffled)")
     
     for key, data in pools.items():
         folder_name = data["rel_path"].name
@@ -914,51 +1021,52 @@ def main():
         if logout_file:
             try:
                 original_name = logout_file.name
-                # Add folder number prefix with leading dash and make UPPERCASE: "logout.json" → "- 46 LOGOUT.JSON"
+                # Add folder number prefix with @ prefix and make UPPERCASE: "logout.json" â†’ "- 46 LOGOUT.JSON"
                 if original_name.startswith("-"):
-                    # Already has dash: "- logout.json" → "- 46 LOGOUT.JSON"
-                    new_name = f"- {folder_number} {original_name[1:].strip()}".upper()
+                    # Already has @ prefix: "- logout.json" â†’ "- 46 LOGOUT.JSON"
+                    name_part = original_name[1:].strip()
+                    new_name = f"@ {folder_number} " + "".join([c.upper() if j % 2 == 0 else c.lower() for j, c in enumerate(name_part)])
                 else:
-                    # Add dash: "logout.json" → "- 46 LOGOUT.JSON"
-                    new_name = f"- {folder_number} {original_name}".upper()
+                    # Add @ prefix: "logout.json" â†’ "- 46 LOGOUT.JSON"
+                    new_name = f"@ {folder_number} " + "".join([j % 2 == 0 and c.upper() or c.lower() for j, c in enumerate(original_name)])
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
-                print(f"  ✓ Copied logout: {original_name} → {new_name}")
+                print(f"  âœ“ Copied logout: {original_name} â†’ {new_name}")
             except Exception as e:
-                print(f"  ✗ Error copying {logout_file.name}: {e}")
+                print(f"  âœ— Error copying {logout_file.name}: {e}")
         else:
-            print(f"  ⚠ Warning: No logout file found")
+            print(f"  âš  Warning: No logout file found")
         
         if "non_json_files" in data and data["non_json_files"]:
             for non_json_file in data["non_json_files"]:
                 try:
                     original_name = non_json_file.name
-                    # Keep leading dash if present: "RuneLite_file.png" → "- 46 RuneLite_file.png"
+                    # Keep @ prefix if present: "RuneLite_file.png" â†’ "- 46 RuneLite_file.png"
                     if original_name.startswith("-"):
-                        # Already has dash: "- file.png" → "- 46 file.png"
-                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                        # Already has @ prefix: "- file.png" â†’ "- 46 file.png"
+                        new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
-                        # Add dash: "file.png" → "- 46 file.png"
-                        new_name = f"- {folder_number} {original_name}"
+                        # Add @ prefix: "file.png" â†’ "- 46 file.png"
+                        new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(non_json_file, out_f / new_name)
-                    print(f"  ✓ Copied non-JSON file: {original_name} → {new_name}")
+                    print(f"  âœ“ Copied non-JSON file: {original_name} â†’ {new_name}")
                 except Exception as e:
-                    print(f"  ✗ Error copying {non_json_file.name}: {e}")
+                    print(f"  âœ— Error copying {non_json_file.name}: {e}")
         
         if "always_files" in data and data["always_files"]:
             for always_file in data["always_files"]:
                 try:
                     original_name = Path(always_file).name
-                    # Add folder number prefix: "- always first.json" → "- 46 always first.json"
+                    # Add folder number prefix: "- always first.json" â†’ "- 46 always first.json"
                     # Handle files starting with "-" or "always"
                     if original_name.startswith("-"):
-                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                        new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
-                        new_name = f"{folder_number} {original_name}"
+                        new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(always_file, out_f / new_name)
-                    print(f"  ✓ Copied 'always' file: {original_name} → {new_name}")
+                    print(f"  âœ“ Copied 'always' file: {original_name} â†’ {new_name}")
                 except Exception as e:
-                    print(f"  ✗ Error copying {Path(always_file).name}: {e}")
+                    print(f"  âœ— Error copying {Path(always_file).name}: {e}")
         
         total_original_ms = sum(durations_cache.get(f, 0) for f in data["files"])
         
@@ -983,13 +1091,29 @@ def main():
         raw_v   = 3   # always 3 raw (^ tag) for every folder type
         total_v = norm_v + inef_v + raw_v
 
-        # v_idx 1..norm_v              → TS versions (TS folder) OR Normal (regular folder)
-        # v_idx norm_v+1..+inef_v      → Inefficient ¬¬  (regular folder only, 0 for TS)
-        # v_idx ..+1..+raw_v           → Raw ^            (all folders)
+        # NEW NAMING SCHEME: Raw gets A,B,C first, then Inefficient, then Normal
+        # This ensures alphabetical sorting works: ^A, ^B, ^C, ¬¬D, ¬¬E, ¬¬F, G, H, I...
+        # 
+        # Order of generation:
+        # 1. Raw files (raw_v = 3): indices 1, 2, 3 → letters A, B, C
+        # 2. Inefficient files (inef_v): indices 4, 5, 6 → letters D, E, F
+        # 3. Normal files (norm_v = 6): indices 7-12 → letters G, H, I, J, K, L
+        
         for v_idx in range(1, total_v + 1):
-            is_inef       = (norm_v < v_idx <= norm_v + inef_v)
-            is_raw        = (v_idx > norm_v + inef_v)
-            is_ts_version = is_ts and not is_raw   # first norm_v slots are TS in a TS folder
+            # Determine file type based on NEW ordering
+            if v_idx <= raw_v:
+                is_raw = True
+                is_inef = False
+                is_ts_version = False
+            elif v_idx <= raw_v + inef_v:
+                is_raw = False
+                is_inef = True
+                is_ts_version = False
+            else:
+                is_raw = False
+                is_inef = False
+                is_ts_version = is_ts  # Only normal files can be TS
+            
             v_letter = chr(64 + v_idx)
             v_code = f"{folder_number}_{v_letter}"
 
@@ -1017,10 +1141,20 @@ def main():
             
             if not paths:
                 continue
+
+            # DROP ONLY insertion for Mining folders
+            drop_only_file = None
+            if 'drop_only_files' in data and data['drop_only_files']:
+                # Randomly select ONE drop only file for this merged file
+                drop_only_file = rng.choice(data['drop_only_files'])
+                print(f"  ℹ️  Mining folder: Will insert DROP ONLY file: {drop_only_file.name}")
+
             
             # Chat - only 1 per merged file, using global queue
             chat_used = False
-            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 else -1
+            # Insert chat in only 50% of merged files
+            should_insert_chat = rng.random() < 0.50
+            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 and should_insert_chat else -1
             file_segments = []
             
             for i, p in enumerate(paths):
@@ -1067,7 +1201,7 @@ def main():
                                     global_chat_queue = list(chat_files)
                                     rng.shuffle(global_chat_queue)
                     except Exception as e:
-                        print(f"  ⚠️ Error loading chat {chat_file.name}: {e}")
+                        print(f"  âš ï¸ Error loading chat {chat_file.name}: {e}")
                         global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
@@ -1093,7 +1227,7 @@ def main():
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                # Inter-file gap: 500-5000ms (non-rounded) × multiplier
+                # Inter-file gap: 500-5000ms (non-rounded) Ã— multiplier
                 if i > 0:
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
                     
@@ -1158,6 +1292,52 @@ def main():
                     "is_chat": False  # Regular file
                 })
             
+
+            # INSERT DROP ONLY file if selected (Mining folders only)
+            if drop_only_file and merged:
+                # Load DROP ONLY events
+                drop_events = load_json_events(drop_only_file)
+                if drop_events:
+                    drop_events = filter_problematic_keys(drop_events)
+                    if drop_events:
+                        # Random insertion point (25-75% through file)
+                        if len(merged) > 10:
+                            drop_start_idx = int(len(merged) * 0.25)
+                            drop_end_idx = int(len(merged) * 0.75)
+                            drop_insertion_point = rng.randint(drop_start_idx, drop_end_idx)
+                            
+                            # Get time at insertion point
+                            drop_base_time = merged[drop_insertion_point].get('Time', 0)
+                            
+                            # Normalize DROP events
+                            drop_start_time = min(e.get('Time', 0) for e in drop_events)
+                            drop_file_start_idx = len(merged)
+                            for e in drop_events:
+                                e['Time'] = e['Time'] - drop_start_time + drop_base_time
+                                merged.append(e)
+                            
+                            # Calculate drop duration
+                            drop_duration = max(e.get('Time', 0) for e in drop_events) - drop_base_time
+                            
+                            # Shift all events after insertion point
+                            for j in range(drop_insertion_point, drop_file_start_idx):
+                                merged[j]['Time'] = merged[j]['Time'] + drop_duration
+                            
+                            # Update timeline
+                            if merged:
+                                timeline = merged[-1]["Time"]
+                            
+                            # Add to file segments for manifest
+                            file_segments.append({
+                                "name": f"[DROP ONLY] {drop_only_file.name}",
+                                "end_time": drop_base_time + drop_duration,
+                                "start_idx": drop_file_start_idx,
+                                "end_idx": len(merged) - 1,
+                                "is_chat": False
+                            })
+                            
+                            print(f"    ✓ Inserted DROP ONLY at {format_ms_precise(drop_base_time)}")
+
             total_afk_pool = total_idle_movements
             chat_inserted = chat_used  # Track if chat was used
             
