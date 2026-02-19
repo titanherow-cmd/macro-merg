@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.0"
+VERSION = "v3.24.1"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -82,19 +82,25 @@ def should_process_folder(folder_path: Path, originals_root: Path, whitelist: di
     folder_name = folder_path.name.lower()
     
     # Check specific folder match
-    if folder_name in whitelist['folders']:
+    if folder_name in whitelist["folders"]:
         return True
     
-    # Check parent folder match
+    # Check parent folder match AND check if any ancestor folder is in whitelist
     try:
         rel_path = folder_path.relative_to(originals_root)
         for part in rel_path.parts:
-            if part.lower() in whitelist['parent_folders']:
+            part_lower = part.lower()
+            # Check if this part matches parent_folders (Desktop, Mobile)
+            if part_lower in whitelist["parent_folders"]:
+                return True
+            # Check if this part matches regular folders (Mining, etc.)
+            if part_lower in whitelist["folders"]:
                 return True
     except ValueError:
         pass
     
     return False
+
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
