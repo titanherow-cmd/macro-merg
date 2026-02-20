@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.3"
+VERSION = "v3.24.8"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1196,7 +1196,6 @@ def main():
                 
                 # INSERT CHAT ONCE (before the chosen file index)
                 if not chat_used and i == chat_insertion_point and global_chat_queue:
-                    chat_file = global_chat_queue.pop(0)  # Take from front
                     try:
                         chat_events = load_json_events(chat_file)
                         if chat_events:
@@ -1246,9 +1245,10 @@ def main():
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # All types get idle movements (doesn't affect time)
+                # Fills gaps with movement, does NOT add time
                 raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                 total_idle_movements += idle_time
+                
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
@@ -1399,6 +1399,10 @@ def main():
                 total_normal_pauses += normal_pause_time
                 if normal_pause_time > 0:
                     timeline = merged[-1]["Time"]
+                    # Update file_segments to reflect new timeline after pauses
+                    for seg in file_segments:
+                        if seg["end_idx"] < len(merged):
+                            seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
                 # Massive pause: 4-9 minutes (240000-540000ms)
@@ -1481,6 +1485,9 @@ def main():
             ])
             
             # Add files list with chat highlighting
+            # Sort file segments by end_time for chronological order
+            file_segments.sort(key=lambda x: x["end_time"])
+            
             manifest_entry.append("")
             for seg in file_segments:
                 if seg.get("is_chat", False):
