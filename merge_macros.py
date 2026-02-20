@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.1"
+VERSION = "v3.24.2"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -145,12 +145,13 @@ def clean_identity(name: str) -> str:
 
 def find_drop_only_files(folder_path: Path, all_files: list) -> list:
     """
-    Find all DROP ONLY files in Mining folders (including z+100 storage).
-    Only searches if folder name contains 'mining' (case-insensitive).
+    Find all DROP ONLY files in Mining folders and subfolders.
+    Checks if "mining" appears ANYWHERE in the folder path.
     Returns list of file paths.
     """
-    # Check if this is a Mining folder
-    if 'mining' not in folder_path.name.lower():
+    # Check if "mining" appears anywhere in the full path
+    full_path_str = str(folder_path).lower()
+    if "mining" not in full_path_str:
         return []
     
     drop_only_files = []
@@ -159,10 +160,11 @@ def find_drop_only_files(folder_path: Path, all_files: list) -> list:
     for file_path in all_files:
         filename = file_path.name.lower()
         # Match: "drop only", "drop only1", "drop only 1", "drop only - copy", etc.
-        if 'drop only' in filename:
+        if "drop only" in filename:
             drop_only_files.append(file_path)
     
     return drop_only_files
+
 
 def extract_folder_number(folder_name: str) -> int:
     """
@@ -1298,50 +1300,54 @@ def main():
                 })
             
 
+
             # INSERT DROP ONLY file if selected (Mining folders only)
             if drop_only_file and merged:
                 # Load DROP ONLY events
                 drop_events = load_json_events(drop_only_file)
                 if drop_events:
                     drop_events = filter_problematic_keys(drop_events)
-                    if drop_events:
+                    if drop_events and len(merged) > 10:
                         # Random insertion point (25-75% through file)
-                        if len(merged) > 10:
-                            drop_start_idx = int(len(merged) * 0.25)
-                            drop_end_idx = int(len(merged) * 0.75)
-                            drop_insertion_point = rng.randint(drop_start_idx, drop_end_idx)
-                            
-                            # Get time at insertion point
-                            drop_base_time = merged[drop_insertion_point].get('Time', 0)
-                            
-                            # Normalize DROP events
-                            drop_start_time = min(e.get('Time', 0) for e in drop_events)
-                            drop_file_start_idx = len(merged)
-                            for e in drop_events:
-                                e['Time'] = e['Time'] - drop_start_time + drop_base_time
-                                merged.append(e)
-                            
-                            # Calculate drop duration
-                            drop_duration = max(e.get('Time', 0) for e in drop_events) - drop_base_time
-                            
-                            # Shift all events after insertion point
-                            for j in range(drop_insertion_point, drop_file_start_idx):
-                                merged[j]['Time'] = merged[j]['Time'] + drop_duration
-                            
-                            # Update timeline
-                            if merged:
-                                timeline = merged[-1]["Time"]
-                            
-                            # Add to file segments for manifest
-                            file_segments.append({
-                                "name": f"[DROP ONLY] {drop_only_file.name}",
-                                "end_time": drop_base_time + drop_duration,
-                                "start_idx": drop_file_start_idx,
-                                "end_idx": len(merged) - 1,
-                                "is_chat": False
-                            })
-                            
-                            print(f"    ✓ Inserted DROP ONLY at {format_ms_precise(drop_base_time)}")
+                        drop_start_idx = int(len(merged) * 0.25)
+                        drop_end_idx = int(len(merged) * 0.75)
+                        drop_insertion_point = rng.randint(drop_start_idx, drop_end_idx)
+                        
+                        # Get time at insertion point
+                        drop_base_time = merged[drop_insertion_point].get("Time", 0)
+                        
+                        # Normalize DROP events to start at insertion time
+                        drop_start_time = min(e.get("Time", 0) for e in drop_events)
+                        normalized_drop = []
+                        for e in drop_events:
+                            ne = {**e}
+                            ne["Time"] = e["Time"] - drop_start_time + drop_base_time
+                            normalized_drop.append(ne)
+                        
+                        # Calculate drop duration
+                        drop_duration = max(e.get("Time", 0) for e in normalized_drop) - drop_base_time
+                        
+                        # Shift all events AFTER insertion point by drop duration
+                        for j in range(drop_insertion_point, len(merged)):
+                            merged[j]["Time"] += drop_duration
+                        
+                        # Insert DROP events at the insertion point
+                        for idx, drop_event in enumerate(normalized_drop):
+                            merged.insert(drop_insertion_point + idx, drop_event)
+                        
+                        # Update timeline
+                        timeline = merged[-1]["Time"]
+                        
+                        # Add to file segments for manifest
+                        file_segments.append({
+                            "name": f"[DROP ONLY] {drop_only_file.name}",
+                            "end_time": drop_base_time + drop_duration,
+                            "start_idx": drop_insertion_point,
+                            "end_idx": drop_insertion_point + len(normalized_drop) - 1,
+                            "is_chat": False
+                        })
+                        
+                        print(f"    ✓ Inserted DROP ONLY at {format_ms_precise(drop_base_time)}")
 
             total_afk_pool = total_idle_movements
             chat_inserted = chat_used  # Track if chat was used
