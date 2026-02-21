@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.9"
+VERSION = "v3.25.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1186,6 +1186,7 @@ def main():
                 # INSERT CHAT ONCE (before the chosen file index)
                 if not chat_used and i == chat_insertion_point and global_chat_queue:
                     try:
+                        chat_file = global_chat_queue.pop(0)  # Take from front
                         chat_events = load_json_events(chat_file)
                         if chat_events:
                             chat_events = filter_problematic_keys(chat_events)
