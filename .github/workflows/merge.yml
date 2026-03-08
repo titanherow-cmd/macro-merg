@@ -20,7 +20,7 @@ on:
       target_minutes:
         description: 'Target duration per merged file *'
         required: true
-        default: '35'
+        default: '60'
       specific_folders_input:
         description: 'Specific folders to include (one per line, leave empty to use saved list)'
         required: false
