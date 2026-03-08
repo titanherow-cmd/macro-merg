@@ -22,7 +22,7 @@ on:
         required: true
         default: '60'
       specific_folders_input:
-        description: 'Specific folders to include (one per line, leave empty to use saved list)'
+        description: 'Specific folders to include'
         required: false
         default: ''
         type: string
